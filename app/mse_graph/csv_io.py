@@ -6,12 +6,23 @@ annual reports / FRC filings) and the Neo4j loader. A data directory holds:
     companies.csv      ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url
     shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source
     executives.csv     company_ticker,person_name,title,role,since,until,source
+    manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}}   (optional)
+
+Files may also be gzipped (shareholders.csv.gz, ...), as in the archive.
+
+The archive (`archive()`) keeps one gzipped directory per scrape date,
+`data/archive/YYYY-MM-DD/`, so the full history in Neo4j can be rebuilt from
+the raw observations (`cli rebuild-history`).
 """
 from __future__ import annotations
 
 import csv
+import gzip
+import json
+import re
 from dataclasses import fields
 from pathlib import Path
+from typing import IO
 
 from .models import Company, Dataset, Position, Shareholding
 from .normalize import clean, parse_int, parse_percent
@@ -41,26 +52,90 @@ def _coerce(cls, row: dict):
     return cls(**kwargs)
 
 
+MANIFEST = "manifest.json"
+
+
+def _open(fpath: Path, mode: str) -> IO[str]:
+    if fpath.suffix == ".gz":
+        return gzip.open(fpath, mode + "t", encoding="utf-8-sig" if mode == "r" else "utf-8", newline="")
+    return fpath.open(mode, encoding="utf-8-sig" if mode == "r" else "utf-8", newline="")
+
+
 def read_dir(path: str | Path) -> Dataset:
     path = Path(path)
     ds = Dataset()
     for attr, (fname, cls) in FILES.items():
         fpath = path / fname
         if not fpath.exists():
-            continue
-        with fpath.open(encoding="utf-8-sig", newline="") as fh:
+            fpath = path / (fname + ".gz")
+            if not fpath.exists():
+                continue
+        with _open(fpath, "r") as fh:
             items = [_coerce(cls, row) for row in csv.DictReader(fh)]
         getattr(ds, attr).extend(items)
+    mpath = path / MANIFEST
+    if mpath.exists():
+        meta = json.loads(mpath.read_text(encoding="utf-8"))
+        ds.observed_at = meta.get("observed_at", "")
+        ds.snapshots = {k: dict(v) for k, v in (meta.get("snapshots") or {}).items()}
     return ds
 
 
-def write_dir(ds: Dataset, path: str | Path) -> None:
+def write_dir(ds: Dataset, path: str | Path, compress: bool = False) -> None:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     for attr, (fname, cls) in FILES.items():
         cols = [f.name for f in fields(cls)]
-        with (path / fname).open("w", encoding="utf-8", newline="") as fh:
+        target = path / (fname + ".gz" if compress else fname)
+        stale = path / (fname if compress else fname + ".gz")
+        stale.unlink(missing_ok=True)
+        with _open(target, "w") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
             for item in getattr(ds, attr):
                 w.writerow({c: getattr(item, c) for c in cols})
+    mpath = path / MANIFEST
+    if ds.observed_at or ds.snapshots:
+        mpath.write_text(json.dumps({"observed_at": ds.observed_at, "snapshots": ds.snapshots},
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+    else:
+        mpath.unlink(missing_ok=True)
+
+
+_DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def archive(ds: Dataset, root: str | Path = "data/archive", part: str = "") -> Path:
+    """Store a scrape as data/archive/<observed_at>/[<part>/]*.csv.gz (a few hundred KB).
+
+    The main scrape goes in the date directory itself; extra sources loaded the
+    same day (e.g. part="opendatalab") go in a subdirectory and are replayed
+    after it. A second scrape on the same day replaces that day's files.
+    """
+    if not ds.observed_at:
+        raise ValueError("archive() needs ds.observed_at")
+    target = Path(root) / ds.observed_at
+    if part:
+        target = target / part
+    write_dir(ds, target, compress=True)
+    return target
+
+
+def archived_snapshots(root: str | Path = "data/archive") -> list[Path]:
+    """Archived data directories in the order they must be loaded: by date,
+    each day's main scrape before its extra sources."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    out = []
+    for day in sorted(p for p in root.iterdir() if p.is_dir() and _DATE_DIR.match(p.name)):
+        if any(day.glob("*.csv*")):
+            out.append(day)
+        out += sorted(p for p in day.iterdir() if p.is_dir())
+    return out
+
+
+def is_demo(ds: Dataset) -> bool:
+    from .graph import DEMO_SOURCE
+    sources = {x.source for x in ds.shareholdings + ds.positions}
+    return bool(sources) and sources <= {DEMO_SOURCE}

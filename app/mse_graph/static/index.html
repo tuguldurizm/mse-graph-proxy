@@ -70,6 +70,7 @@
     <button data-a="interlocks">Олон компанид ажилладаг хүмүүс</button>
     <button data-a="common-owners">Нийтлэг эзэмшигчид</button>
     <button data-a="board-overlap">ТУЗ давхцал</button>
+    <button data-a="moves">Компани сольсон хүмүүс</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -146,6 +147,17 @@ async function showDetails(d) {
   html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
   html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(h.ticker || h.name)}</span><span>${pct(h.percent)}</span>`);
   html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
+  // ended links (people who left, stakes sold or resized), most recent first
+  const h = d.history || {};
+  const period = i => `<span class="meta" style="white-space:nowrap">${esc(i.since || i.first_seen || '?')} – ${esc(i.until || '?')}</span>`;
+  html += list('Өмнөх удирдлага / ТУЗ', h.people,
+               p => `<span>${esc(p.name)} <span class="meta">${esc(p.title)}</span></span>${period(p)}`);
+  html += list('Өмнөх хувьцаа эзэмшигчид', h.owners,
+               o => `<span>${esc(o.name)} ${pct(o.percent)}</span>${period(o)}`);
+  html += list('Өмнө эзэмшиж байсан', h.holdings,
+               x => `<span>${esc(x.ticker || x.name)} ${pct(x.percent)}</span>${period(x)}`);
+  html += list('Өмнөх албан тушаал', h.positions,
+               p => `<span>${esc(p.ticker)} <span class="meta">${esc(p.title)}</span></span>${period(p)}`);
   html += list('Холбоотой компаниуд', d.related_companies,
                r => `<span>${esc(r.ticker)} ${esc(r.name)}</span><span class="meta">${r.links.map(l => esc(l.name)).join(', ')}</span>`);
   if (e.type === 'Company') {
@@ -198,6 +210,9 @@ document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () =>
   if (kind === 'board-overlap') {
     ul.innerHTML = rs.map(r => `<li data-key="company:${esc(r.company_a)}"><span>${esc(r.company_a)} ↔ ${esc(r.company_b)}</span>
       <span class="meta">${r.shared_people.map(esc).join(', ')}</span></li>`).join('');
+  } else if (kind === 'moves') {
+    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+      <span class="meta">${r.past.map(x => esc(x.from)).join(', ')} → ${r.now.map(x => esc(x.to)).join(', ')}</span></li>`).join('');
   } else {
     ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
       <span class="meta">${r.companies} компани</span></li>`).join('');
@@ -208,7 +223,9 @@ document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () =>
 function loadStats() {
   return api('/api/stats').then(s => {
     document.getElementById('stats').textContent =
-      `${s.companies} компани${s.unlisted_companies ? ` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал`;
+      `${s.companies} компани${s.unlisted_companies ? ` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал` +
+      (s.past_positions || s.past_ownerships ? ` · түүх: ${s.past_positions} албан тушаал, ${s.past_ownerships} эзэмшил` : '') +
+      (s.first_observed && s.first_observed !== s.last_observed ? ` (${s.first_observed} – ${s.last_observed})` : '');
     if (s.companies) document.getElementById('btnOverview').click();
   }).catch(() => document.getElementById('stats').textContent = 'Өгөгдлийн сан ачаалж байна…');
 }

@@ -90,3 +90,32 @@ def parse_int(value: str | int | None) -> int | None:
         return value
     digits = re.sub(r"[^\d]", "", str(value))
     return int(digits) if digits else None
+
+
+_YMD_RE = re.compile(r"(?<!\d)(\d{4})(?:[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?)?(?!\d)")
+_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})(?!\d)")
+
+
+def parse_date(value: str | None) -> str:
+    """Normalise a source date to ISO form ("2021-04-29", "2021-04" or "2021").
+
+    Accepts "2021.04.29", "2021/4/29", "29.04.2021", "2021 он" etc. ISO strings
+    of different precision still sort correctly against each other. Text with
+    no recognisable date is returned cleaned but otherwise unchanged, so no
+    information is lost; an empty value gives "".
+    """
+    text = clean(value)
+    if not text:
+        return ""
+    m = _DMY_RE.search(text)
+    if m and 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(1)) <= 31:
+        return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    m = _YMD_RE.search(text)
+    if m and 1900 <= int(m.group(1)) <= 2100:
+        y, mo, d = m.group(1), m.group(2), m.group(3)
+        if mo and 1 <= int(mo) <= 12:
+            if d and 1 <= int(d) <= 31:
+                return f"{y}-{int(mo):02d}-{int(d):02d}"
+            return f"{y}-{int(mo):02d}"
+        return y
+    return text

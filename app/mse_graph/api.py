@@ -132,3 +132,15 @@ def common_owners(min_companies: int = 2):
 @app.get("/api/analysis/board-overlap")
 def board_overlap():
     return g().board_overlap()
+
+
+@app.get("/api/analysis/moves")
+def moves():
+    """People who used to hold a position at one listed company and now hold one at another."""
+    return g().moves()
+
+
+@app.get("/api/changes")
+def changes(since: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"), limit: int = 500):
+    """Positions and stakes that started or ended on or after `since`."""
+    return g().changes(since, limit)

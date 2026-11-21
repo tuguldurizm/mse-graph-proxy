@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Settings:
     neo4j_uri: str = field(default_factory=lambda: os.getenv("NEO4J_URI", "bolt://localhost:7687"))
-    neo4j_user: str = field(default_factory=lambda: os.getenv("NEO4J_USER", "neo4j"))
+    # NEO4J_USERNAME is what Neo4j Aura's downloaded credentials file uses
+    neo4j_user: str = field(default_factory=lambda: os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or "neo4j")
     neo4j_password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", "msegraph123"))
     neo4j_database: str = field(default_factory=lambda: os.getenv("NEO4J_DATABASE", "neo4j"))
 
@@ -24,3 +25,11 @@ class Settings:
 
 
 settings = Settings()
+
+
+LOCAL_NEO4J_HOSTS = {"localhost", "127.0.0.1", "::1", "neo4j"}   # "neo4j" = docker compose service
+
+
+def neo4j_is_local(uri: str | None = None) -> bool:
+    from urllib.parse import urlsplit
+    return (urlsplit(uri or settings.neo4j_uri).hostname or "localhost") in LOCAL_NEO4J_HOSTS

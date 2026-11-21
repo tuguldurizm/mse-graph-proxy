@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import time
+from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -84,10 +85,17 @@ class Fetcher:
     """
 
     def __init__(self, cache_dir: str | Path = "data/raw", delay: float | None = None,
-                 proxy_url: str | None = None, proxy_token: str | None = None):
+                 proxy_url: str | None = None, proxy_token: str | None = None,
+                 cache_max_age: float | None = None):
         import httpx  # local import so offline parsing works without httpx
 
         self.cache_dir = Path(cache_dir)
+        # Cached pages older than this (seconds) are fetched again. Without a limit
+        # every later scrape would replay the first one and no change (a new CEO, a
+        # sold stake) would ever be recorded. The default (20 h) lets a re-run on the
+        # same day reuse the pages while a daily scrape always sees fresh ones.
+        self.cache_max_age = (cache_max_age if cache_max_age is not None
+                              else float(os.getenv("MSE_CACHE_MAX_AGE_HOURS", "20")) * 3600)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.delay = settings.request_delay if delay is None else delay
         self.proxy_url = (proxy_url if proxy_url is not None else settings.proxy_url).rstrip("/")
@@ -129,9 +137,15 @@ class Fetcher:
     def _cache_path(self, url: str, ext: str) -> Path:
         return self.cache_dir / (hashlib.sha1(url.encode()).hexdigest() + ext)
 
+    def _fresh(self, path: Path) -> bool:
+        try:
+            return time.time() - path.stat().st_mtime < self.cache_max_age
+        except OSError:
+            return False
+
     def get(self, url: str, use_cache: bool = True) -> str | None:
         path = self._cache_path(url, ".html")
-        if use_cache and path.exists():
+        if use_cache and self._fresh(path):
             return path.read_text(encoding="utf-8")
         r = self._request(url)
         if r is None:
@@ -141,7 +155,7 @@ class Fetcher:
 
     def get_bytes(self, url: str, use_cache: bool = True) -> bytes | None:
         path = self._cache_path(url, ".bin")
-        if use_cache and path.exists():
+        if use_cache and self._fresh(path):
             return path.read_bytes()
         r = self._request(url)
         if r is None:
@@ -385,12 +399,15 @@ def crawl(limit: int | None = None, fetcher: Fetcher | None = None) -> Dataset:
             "No company links found on mse.mn. Check network access to mse.mn, or set "
             "MSE_COMPANY_LIST_PATH / MSE_COMPANY_LINK_REGEX to match the current site."
         )
-    ds = Dataset()
+    ds = Dataset(observed_at=date.today().isoformat())
     for i, link in enumerate(links[:limit] if limit else links):
         html = fetcher.get(link)
         if not html:
             continue
         page = parse_company_page(html, url=link)
+        # the whole company page was read: it is the current picture of the company
+        for kind in ("shareholdings", "positions"):
+            page.mark_snapshot(kind, page.companies[0].ticker, link)
         log.info("[%d/%d] %s: %s", i + 1, len(links), page.companies[0].ticker, page.summary())
         if i < 2 or not (page.shareholdings or page.positions):
             describe_page(html, link, brief=i >= 2)
@@ -570,10 +587,11 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Data
     fetcher = fetcher or Fetcher()
     companies = list_companies_api(fetcher)
     log.info("company list: %d companies", len(companies))
-    ds = Dataset()
+    ds = Dataset(observed_at=date.today().isoformat())
     for i, c in enumerate(companies[:limit] if limit else companies):
         page = Dataset(companies=[c])
         html = fetcher.get(c.url)
+        fetched = {"info": html is not None}
         if html:
             page.positions += parse_open_info(html, c)
             if i < 2:
@@ -581,6 +599,7 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Data
         for tab, kind in TABS.items():
             url = f"{c.url}/tab/{tab}"
             frag = fetcher.get(url)
+            fetched[kind] = frag is not None
             if not frag:
                 continue
             if frag.lstrip()[:1] in "[{":
@@ -603,6 +622,12 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Data
                 seen.add(k)
                 uniq.append(p)
         page.positions = uniq
+        # Only a fully fetched company is a snapshot: then whoever is missing compared
+        # with the previous scrape has left. A failed fetch must not look like a departure.
+        if fetched["shareholders"]:
+            page.mark_snapshot("shareholdings", c.ticker, c.url)
+        if fetched["info"] and fetched["board"] and fetched["executive"]:
+            page.mark_snapshot("positions", c.ticker, c.url)
         log.info("[%d/%d] %s %s: %s", i + 1, len(companies), c.ticker, c.name, page.summary())
         ds.extend(page)
     return ds

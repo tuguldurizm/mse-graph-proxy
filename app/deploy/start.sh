@@ -1,8 +1,18 @@
 #!/bin/bash
 # Starts Neo4j (localhost only), runs the data pipeline in the background and
 # serves the web app on $PORT. Memory is tuned for a 512 MB instance.
+#
+# With NEO4J_URI (+ NEO4J_USERNAME / NEO4J_PASSWORD) pointing to an external
+# database such as Neo4j Aura, the bundled Neo4j is not started.
 set -euo pipefail
 
+if [[ -n "${NEO4J_URI:-}" && ! "$NEO4J_URI" =~ ://(localhost|127\.0\.0\.1)(:|/|$) ]]; then
+  # External database (e.g. Neo4j Aura): the graph and its history survive restarts.
+  : "${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set when NEO4J_URI points to an external database}"
+  export NEO4J_URI NEO4J_PASSWORD
+  echo "[start] using external neo4j at ${NEO4J_URI}"
+else
+# Bundled database: lives in the container and is lost when the instance restarts.
 : "${NEO4J_PASSWORD:=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)}"
 export NEO4J_PASSWORD NEO4J_USER=neo4j NEO4J_URI=bolt://127.0.0.1:7687
 
@@ -42,6 +52,7 @@ eval "$NEO4J_CMD" > /tmp/neo4j.log 2>&1 &
 NEO4J_PID=$!
 ( while kill -0 "$NEO4J_PID" 2>/dev/null; do sleep 5; done
   echo "[start] neo4j exited; last log lines:"; tail -n 40 /tmp/neo4j.log ) &
+fi
 
 # The data pipeline runs in a thread inside the web app (saves a Python process).
 export RUN_PIPELINE=1
