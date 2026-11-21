@@ -94,19 +94,20 @@ def run() -> None:
                 log.error(traceback.format_exc())
 
             set_status("running", "importing Open Data Lab")
-            try:
-                if os.getenv("ODL_ENABLE") != "1":
-                    raise RuntimeError("skipped: set ODL_ENABLE=1 to import Open Data Lab")
-                ods, report = opendatalab.auto_import(lookup=g.company_lookup())
-                for e in report:
-                    log.info("ODL %-40s %s  %s", e["status"], e["dataset"][:60], e["url"])
-                csv_io.write_dir(ods, "data/opendatalab")
-                set_status("running", "loaded Open Data Lab", datasets=len(report),
-                           imported=sum(1 for e in report if e["status"].startswith("imported")),
-                           stats=g.load(ods))
-            except Exception as exc:
-                set_status("running", "Open Data Lab import failed", error=str(exc))
-                log.error(traceback.format_exc())
+            if os.getenv("ODL_ENABLE") != "1":
+                set_status("running", "Open Data Lab skipped (set ODL_ENABLE=1)")
+            else:
+                try:
+                    ods, report = opendatalab.auto_import(lookup=g.company_lookup())
+                    for e in report:
+                        log.info("ODL %-40s %s  %s", e["status"], e["dataset"][:60], e["url"])
+                    csv_io.write_dir(ods, "data/opendatalab")
+                    set_status("running", "loaded Open Data Lab", datasets=len(report),
+                               imported=sum(1 for e in report if e["status"].startswith("imported")),
+                               stats=g.load(ods))
+                except Exception as exc:
+                    set_status("running", "Open Data Lab import failed", error=str(exc))
+                    log.error(traceback.format_exc())
 
         stats = g.stats()
         top = [{"name": r["name"], "companies": r["companies"]} for r in g.interlocks()[:10]]

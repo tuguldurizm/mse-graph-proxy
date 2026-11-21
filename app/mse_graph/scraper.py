@@ -494,6 +494,11 @@ def _hcol(header: list[str], *words: str) -> int | None:
     return None
 
 
+HEADER_LABELS = {"нэр", "овог нэр", "овог, нэр", "компанийн нэр", "name", "full name",
+                 "хувьцаа эзэмшигч", "албан тушаал"}
+_logged_company_tables: dict[str, bool] = {}
+
+
 def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
     """Parse an open.mse.mn tab fragment: shareholders / boardmembers / officials.
 
@@ -517,13 +522,21 @@ def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
         c_name = _hcol(header, "нэр", "name")
         if c_name is None:
             continue
+        if "компани" in header[c_name] or "company" in header[c_name]:
+            # e.g. a member's positions in other companies: different shape, parsed separately
+            if not _logged_company_tables.get(kind):
+                _logged_company_tables[kind] = True
+                log.info("TAB %s has a company-keyed table (skipped): header=%s first=%s",
+                         source, header, rows[:2])
+            continue
         date_col = _hcol(header, "огноо", "date")
         for r in rows:
             if c_name >= len(r):
                 continue
             name = clean(r[c_name])
-            if not name or is_aggregate(name) or re.search(r"\d", name) or len(name) < 3:
-                continue
+            if (not name or is_aggregate(name) or re.search(r"\d", name) or len(name) < 3
+                    or name.lower() in HEADER_LABELS or name.lower() in header):
+                continue  # empty, totals, junk, or a repeated header row
             if kind == "shareholders":
                 c_sh = _hcol(header, "хувьцааны тоо", "тоо", "shares")
                 c_pct = _hcol(header, "эзэмшлийн хувь", "эзлэх хувь", "%")
