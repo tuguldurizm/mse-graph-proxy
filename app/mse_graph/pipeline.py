@@ -61,6 +61,10 @@ def wait_for_neo4j(timeout: int = 600):
 
 
 def run() -> None:
+    if os.getenv("DISCOVER") == "1":
+        set_status("running", "discovering site structure")
+        from . import discover
+        discover.run()
     set_status("running", "waiting for neo4j")
     g = wait_for_neo4j()
     try:
