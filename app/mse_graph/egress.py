@@ -69,9 +69,15 @@ def _redact(url: str) -> str:
     p = urlsplit(url)
     if not p.netloc:            # not a URL, e.g. "user:pass@host:port" without a scheme
         return url.rsplit("@", 1)[-1]
+    try:
+        port = p.port
+    except ValueError:          # e.g. a template's "PORT" left in: show it as written
+        port = p.netloc.rsplit(":", 1)[-1]
     netloc = p.hostname or ""
-    if p.port:
-        netloc += f":{p.port}"
+    if ":" in netloc:
+        netloc = f"[{netloc}]"  # IPv6
+    if port:
+        netloc += f":{port}"
     return urlunsplit((p.scheme, netloc, p.path, "", ""))
 
 
@@ -97,6 +103,12 @@ def parse_routes(spec: str, token: str = "", attempts: int = 2, ca: str = "",
             raise EgressConfigError(
                 f"{var}: {_redact(item)!r} is not a route; use http://, https://, socks5:// or socks5h:// "
                 f"[user:pass@]host:port, a fetch gateway https://host/fetch, or 'direct'")
+        try:
+            p.port
+        except ValueError:
+            raise EgressConfigError(
+                f"{var}: the port in {_redact(item)} is not a number; put the proxy's port there (e.g. :80)"
+            ) from None
         path = p.path.rstrip("/")
         if path.endswith("/fetch"):
             if scheme not in ("http", "https"):
