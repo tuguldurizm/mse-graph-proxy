@@ -21,7 +21,9 @@ class Settings:
     # NEO4J_USERNAME is what Neo4j Aura's downloaded credentials file uses
     neo4j_user: str = field(default_factory=lambda: os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or "neo4j")
     neo4j_password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", "msegraph123"))
-    neo4j_database: str = field(default_factory=lambda: os.getenv("NEO4J_DATABASE", "neo4j"))
+    # Empty = the server's default (home) database. Don't assume "neo4j": newer Aura
+    # instances name their database after the instance id.
+    neo4j_database: str = field(default_factory=lambda: os.getenv("NEO4J_DATABASE", "").strip())
 
     mse_base_url: str = field(default_factory=lambda: os.getenv("MSE_BASE_URL", "https://mse.mn"))
     # Language segment used in MSE URLs ("mn" or "en").

@@ -99,7 +99,7 @@ class Graph:
             auth=(user or settings.neo4j_user, password or settings.neo4j_password),
             notifications_min_severity="OFF",
         )
-        self.database = database or settings.neo4j_database
+        self.database = database or settings.neo4j_database or None   # None: server default
 
     def close(self):
         self.driver.close()
