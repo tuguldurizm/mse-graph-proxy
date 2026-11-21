@@ -22,10 +22,12 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-from urllib.parse import urljoin
+from typing import NamedTuple
+from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
+from . import egress
 from .config import settings
 from .models import Company, Dataset, Position, Shareholding
 from .normalize import clean, is_aggregate, parse_int, parse_percent
@@ -77,16 +79,30 @@ def _has(text: str, words: list[str]) -> bool:
 
 # ---- HTTP -------------------------------------------------------------------
 
-class Fetcher:
-    """Throttled, disk-cached HTTP GET.
+class Attempt(NamedTuple):
+    response: object | None   # httpx.Response when step == "ok"
+    status: int | None        # the target site's HTTP status, None if it never answered
+    error: str
+    step: str                 # "ok" | "retry" (same route again) | "next" (next route) | "stop" (final answer)
+    seconds: float = 0.0      # time the request took (the crawl-delay wait not included)
 
-    If MSE_PROXY_URL (and MSE_PROXY_TOKEN) are set, requests go through the
-    allow-listed fetch proxy in `proxy/app.py` instead of directly.
+
+class Fetcher:
+    """Throttled, disk-cached HTTP GET with per-host egress routes (see egress.py).
+
+    Requests to opendatalab.mn leave through ODL_PROXY_URL when it is set. Other
+    requests go through the allow-listed fetch proxy in `proxy/app.py` when
+    MSE_PROXY_URL (and MSE_PROXY_TOKEN) are set, and directly otherwise. A route
+    that fails is tried again (ODL_PROXY_ATTEMPTS times), then the next route;
+    every try waits out the host's crawl delay.
     """
+
+    # Statuses worth another try: a block or rate limit, a timeout, a proxy or upstream failure.
+    RETRY_STATUS = {403, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
     def __init__(self, cache_dir: str | Path = "data/raw", delay: float | None = None,
                  proxy_url: str | None = None, proxy_token: str | None = None,
-                 cache_max_age: float | None = None):
+                 cache_max_age: float | None = None, router: egress.Router | None = None):
         import httpx  # local import so offline parsing works without httpx
 
         self.cache_dir = Path(cache_dir)
@@ -100,39 +116,102 @@ class Fetcher:
         self.delay = settings.request_delay if delay is None else delay
         self.proxy_url = (proxy_url if proxy_url is not None else settings.proxy_url).rstrip("/")
         self.proxy_token = proxy_token if proxy_token is not None else settings.proxy_token
-        self.client = httpx.Client(
-            # generous timeout: a free Render instance can take ~1 min to wake up
-            timeout=httpx.Timeout(90, connect=30), follow_redirects=True,
-            headers={"User-Agent": "mse-graph/0.1 (research crawler)"},
-        )
+        self.router = router or egress.Router.from_env(self.proxy_url, self.proxy_token)
+        self.client = self._make_client()
+        self._proxy_clients: dict[str, httpx.Client] = {}
         self._last_by_host: dict[str, float] = {}
+        self._hinted = False
+        # Outcome of the last request that missed the cache: the site's HTTP status
+        # (None if it never answered) and the last error seen.
+        self.last_status: int | None = None
+        self.last_error = ""
 
     # robots.txt crawl-delay of sites that ask for one
     HOST_DELAY = {"opendatalab.mn": 11.0, "www.opendatalab.mn": 11.0}
 
-    def _request(self, url: str):
-        from urllib.parse import urlsplit as _us
-        host = _us(url).hostname or ""
+    @staticmethod
+    def _make_client(**kw):
+        import httpx
+        return httpx.Client(
+            # generous timeout: a free Render instance can take ~1 min to wake up
+            timeout=httpx.Timeout(90, connect=30), follow_redirects=True,
+            headers={"User-Agent": "mse-graph/0.1 (research crawler)"}, **kw,
+        )
+
+    def _proxy_client(self, route: egress.Route):
+        client = self._proxy_clients.get(route.url)
+        if client is None:
+            verify = egress.ssl_context(route.ca) if route.ca else True
+            client = self._proxy_clients[route.url] = self._make_client(proxy=route.url, verify=verify)
+        return client
+
+    def _throttle(self, host: str) -> None:
         delay = max(self.delay, self.HOST_DELAY.get(host, 0.0))
-        last = self._last_by_host.get(host, 0.0)
-        wait = delay - (time.monotonic() - last)
+        wait = delay - (time.monotonic() - self._last_by_host.get(host, float("-inf")))
         if wait > 0:
             time.sleep(wait)
         self._last_by_host[host] = time.monotonic()
+
+    def try_route(self, route: egress.Route, url: str) -> Attempt:
+        """One GET of `url` through `route`, after the host's crawl delay."""
+        client = self._proxy_client(route) if route.kind == "proxy" else self.client
+        self._throttle(urlsplit(url).hostname or "")
+        start = time.monotonic()
+        a = self._send(client, route, url)
+        return a._replace(seconds=round(time.monotonic() - start, 2))
+
+    def _send(self, client, route: egress.Route, url: str) -> Attempt:
         try:
-            if self.proxy_url:
-                r = self.client.get(f"{self.proxy_url}/fetch", params={"url": url},
-                                    headers={"X-Proxy-Token": self.proxy_token})
+            if route.kind == "gateway":
+                r = client.get(route.url, params={"url": url}, headers={"X-Proxy-Token": route.token})
             else:
-                r = self.client.get(url)
+                r = client.get(url)
         except Exception as exc:  # network errors are logged, not fatal
-            log.warning("GET %s failed: %s", url, exc)
-            return None
-        if r.status_code != 200:
-            detail = r.text[:200] if self.proxy_url and r.status_code in (401, 403, 502, 503) else ""
-            log.warning("GET %s -> HTTP %s %s", url, r.status_code, detail)
-            return None
-        return r
+            import httpx
+
+            error = f"{type(exc).__name__}: {exc}"
+            if route.kind == "proxy" and "CERTIFICATE_VERIFY_FAILED" in error:
+                return Attempt(None, None, error + " (does the proxy re-sign HTTPS? set ODL_PROXY_CA_BUNDLE)",
+                               "next")
+            if isinstance(exc, httpx.ProxyError) and str(exc).startswith("407"):
+                return Attempt(None, None, error + " (check the proxy's username and password)", "next")
+            return Attempt(None, None, error, "retry")
+        if route.kind == "gateway" and r.status_code != 200 and "x-upstream-status" not in r.headers:
+            # the gateway itself refused (token, allow-list, not configured) or is waking up / failing
+            step = "retry" if r.status_code >= 500 else "next"
+            return Attempt(None, None, f"gateway HTTP {r.status_code}: {r.text[:200]}", step)
+        if r.status_code == 200:
+            return Attempt(r, 200, "", "ok")
+        if r.status_code == 407:
+            return Attempt(None, None, "HTTP 407 (check the proxy's username and password)", "next")
+        step = "retry" if r.status_code in self.RETRY_STATUS else "stop"
+        return Attempt(None, r.status_code, f"HTTP {r.status_code}", step)
+
+    def _request(self, url: str):
+        host = urlsplit(url).hostname or ""
+        routes = self.router.routes_for(host)          # a bad ODL_PROXY_URL raises here
+        self.last_status, self.last_error = None, ""
+        for route in routes:
+            for n in range(1, route.attempts + 1):
+                a = self.try_route(route, url)
+                if a.step == "ok":
+                    self.last_status = 200
+                    return a.response
+                self.last_status, self.last_error = a.status, a.error
+                via = f" via {route.label}" if route is not egress.DIRECT else ""
+                tries = f" (try {n}/{route.attempts})" if route.attempts > 1 else ""
+                log.warning("GET %s%s%s -> %s", url, via, tries, a.error)
+                if a.step == "stop":
+                    return None
+                if a.step == "next":
+                    break
+        if (self.last_status is None and not self._hinted and egress.host_matches(host, egress.ODL_DOMAIN)
+                and not self.router.is_custom(host)):
+            self._hinted = True
+            log.warning("opendatalab.mn did not answer. It refuses connections from some hosting providers' "
+                        "addresses (issue #4); set ODL_PROXY_URL to reach it through a proxy "
+                        "(README: 'Egress for Open Data Lab').")
+        return None
 
     def _cache_path(self, url: str, ext: str) -> Path:
         return self.cache_dir / (hashlib.sha1(url.encode()).hexdigest() + ext)

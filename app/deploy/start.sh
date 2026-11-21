@@ -56,9 +56,20 @@ fi
 
 # The data pipeline runs in a thread inside the web app (saves a Python process).
 export RUN_PIPELINE=1
-# opendatalab.mn has blocked this server's address (issue #4): keep the registry
-# import off here unless ODL_ENABLE=1 is set in the service environment.
-export ODL_ENABLE="${ODL_ENABLE:-0}"
+# opendatalab.mn refuses this server's own address (issue #4), so the registry import
+# runs only when its requests have another way out (ODL_PROXY_URL, see mse_graph/egress.py)
+# or ODL_ENABLE is set explicitly in the service environment (ODL_ENABLE=0 always wins).
+if [[ -z "${ODL_ENABLE:-}" ]]; then
+  if [[ -n "${ODL_PROXY_URL:-}" ]]; then ODL_ENABLE=1; else ODL_ENABLE=0; fi
+fi
+export ODL_ENABLE
+if [[ "$ODL_ENABLE" != 0 && -n "${ODL_PROXY_URL:-}" ]]; then
+  echo "[start] Open Data Lab import on, through ODL_PROXY_URL"
+elif [[ "$ODL_ENABLE" != 0 ]]; then
+  echo "[start] Open Data Lab import on, direct from this server (no ODL_PROXY_URL)"
+else
+  echo "[start] Open Data Lab import off (set ODL_PROXY_URL to turn it on)"
+fi
 
 echo "[start] launching web app on port ${PORT:-8000}"
 exec uvicorn mse_graph.api:app --host 0.0.0.0 --port "${PORT:-8000}" --workers 1 --no-access-log

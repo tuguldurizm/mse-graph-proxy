@@ -17,11 +17,14 @@
     python -m mse_graph.cli odl-company <REG_NO>
     python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--load]
     python -m mse_graph.cli odl-import <file-or-url> [--kind auto|shareholders|executives|companies] [--load]
+    python -m mse_graph.cli egress-check [--reg REG_NO]   fetch one registry page through each opendatalab.mn route
     python -m mse_graph.cli cycles | cross-holdings | state
     python -m mse_graph.cli conflicts [--kind insider_owner|competitor|related_party]
     python -m mse_graph.cli flags    <TICKER>
 
-Set MSE_PROXY_URL / MSE_PROXY_TOKEN to route all downloads through the fetch proxy.
+Set MSE_PROXY_URL / MSE_PROXY_TOKEN to route all downloads through the fetch proxy,
+and ODL_PROXY_URL to send opendatalab.mn requests through a proxy of their own
+(see mse_graph/egress.py).
 """
 from __future__ import annotations
 
@@ -114,6 +117,10 @@ def main(argv=None):
                    help="override column mapping, e.g. --map holder_name='Эзэмшигч'")
     p.add_argument("--out", default="data/opendatalab")
     p.add_argument("--load", action="store_true", help="also load into Neo4j")
+    p = sub.add_parser("egress-check",
+                       help="show how requests leave this server; fetch one Open Data Lab registry page "
+                            "through each opendatalab.mn route (one request per route, 11 s apart)")
+    p.add_argument("--reg", default="2008572", help="registration number of the page to fetch (default %(default)s)")
 
     p = sub.add_parser("changes", help="who joined / left and which stakes changed, newest first")
     p.add_argument("--ticker")
@@ -196,6 +203,25 @@ def main(argv=None):
             if g:
                 g.close()
         return
+
+    if args.cmd == "egress-check":
+        from . import egress, opendatalab
+        from .config import settings
+        from .scraper import Fetcher
+
+        fetcher = Fetcher()
+        try:
+            print(f"{'mse.mn':<16} -> {fetcher.router.describe(settings.mse_base_url)}")
+            print(f"{'opendatalab.mn':<16} -> {fetcher.router.describe(settings.odl_base_url)}")
+            print(f"fetching {opendatalab.registry_url(args.reg)} through each opendatalab.mn route:")
+            results = opendatalab.check_egress(args.reg, fetcher)
+        except egress.EgressConfigError as exc:
+            sys.exit(f"error: {exc}")
+        for r in results:
+            status = f"HTTP {r['status']}" if r["status"] else "-"
+            print(f"  {'OK' if r['ok'] else 'FAIL':<5} {r['route']:<48} {status:<9} {r['seconds']:>6.2f} s  "
+                  f"{r['error'] or 'registry page for ' + args.reg}")
+        sys.exit(0 if any(r["ok"] for r in results) else 1)
 
     if args.cmd == "odl-import":
         from . import opendatalab

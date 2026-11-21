@@ -32,6 +32,8 @@ URLISH = re.compile(r"""["'`]((?:https?://[^"'`\s]{4,200})|(?:/[A-Za-z0-9_\-./{}
 
 
 def _client():
+    # Deliberately not routed through ODL_PROXY_URL (egress.py): discovery probes paths other
+    # than /search/<reg no>, the kind of traffic that got the server's address refused (issue #4).
     import httpx
     return httpx.Client(timeout=30, follow_redirects=True,
                         headers={"User-Agent": "Mozilla/5.0 (compatible; mse-graph/0.1)"})

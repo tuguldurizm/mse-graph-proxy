@@ -169,20 +169,32 @@ def run(force: bool = False) -> None:
                 set_status("running", "mse.mn scrape failed", error=str(exc))
                 log.error(traceback.format_exc())
 
-            set_status("running", "importing Open Data Lab registry")
             if os.getenv("ODL_ENABLE", "1") == "0":
                 set_status("running", "Open Data Lab skipped (ODL_ENABLE=0)")
             else:
                 try:
+                    from .config import settings
+
+                    fetcher = scraper.Fetcher()
+                    # naming the route also validates ODL_PROXY_URL (a bad value fails this step only)
+                    route = fetcher.router.describe(settings.odl_base_url)
+                    set_status("running", "importing Open Data Lab registry", egress=route)
                     companies = g.companies_with_reg()
-                    ods, report = opendatalab.enrich_companies(companies, limit=limit)
-                    ods.observed_at = ods.observed_at or date.today().isoformat()
-                    csv_io.write_dir(ods, "data/opendatalab")
-                    csv_io.archive(ods, part="opendatalab")
-                    loaded = g.load(ods)
-                    set_status("running", "loaded Open Data Lab registry", companies=len(report),
-                               found=sum(1 for e in report if e["status"] == "ok"), stats=loaded)
-                    track(g, loaded, ods, "opendatalab")
+                    ods, report = opendatalab.enrich_companies(companies, fetcher=fetcher, limit=limit)
+                    found = sum(1 for e in report if e["status"] == "ok")
+                    failed = sum(1 for e in report if e["status"] in ("fetch failed", "skipped"))
+                    if failed and not found:
+                        # nothing came back: keep the previous registry data, don't archive an empty run
+                        set_status("running", "Open Data Lab unreachable", egress=route, failed=failed,
+                                   error=fetcher.last_error)
+                    else:
+                        ods.observed_at = ods.observed_at or date.today().isoformat()
+                        csv_io.write_dir(ods, "data/opendatalab")
+                        csv_io.archive(ods, part="opendatalab")
+                        loaded = g.load(ods)
+                        set_status("running", "loaded Open Data Lab registry", companies=len(report),
+                                   found=found, failed=failed, stats=loaded)
+                        track(g, loaded, ods, "opendatalab")
                 except Exception as exc:
                     set_status("running", "Open Data Lab import failed", error=str(exc))
                     log.error(traceback.format_exc())

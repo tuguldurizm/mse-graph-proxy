@@ -1,7 +1,7 @@
 neo4j>=5.20,<6
 fastapi>=0.110
 uvicorn>=0.29
-httpx>=0.27
+httpx[socks]>=0.27   # [socks]: socks5:// routes in ODL_PROXY_URL
 beautifulsoup4>=4.12
 lxml>=5.0
 openpyxl>=3.1

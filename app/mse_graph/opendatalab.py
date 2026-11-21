@@ -424,39 +424,85 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
     return ds
 
 
+def _entity_page(html: str, reg_no: str) -> dict | None:
+    """The parsed page if it is the registry page of `reg_no`, else None
+    (unknown number, error page, a block or challenge page, ...)."""
+    page = parse_registry_page(html)
+    got = re.sub(r"\D", "", page["info"].get("reg_no", ""))
+    return page if got == re.sub(r"\D", "", reg_no) else None
+
+
 def fetch_registry_page(reg_no: str, fetcher=None) -> tuple[dict | None, str]:
     """Download and parse the registry page for `reg_no`. Returns (page or None, url)."""
     url = registry_url(reg_no)
     html = (fetcher or _fetcher()).get(url)
-    if not html:
-        return None, url
-    page = parse_registry_page(html)
-    got = re.sub(r"\D", "", page["info"].get("reg_no", ""))
-    if got != re.sub(r"\D", "", reg_no):
-        return None, url                # not an entity page (unknown number, error page, ...)
-    return page, url
+    return (_entity_page(html, reg_no) if html else None), url
 
 
-def enrich_companies(companies: list[tuple[str, str]], fetcher=None,
-                     limit: int | None = None) -> tuple[Dataset, list[dict]]:
+# Registry pages in a row that could not be downloaded before a run gives up on the
+# remaining companies: the way out is down, and ~200 companies x 11 s x retries of
+# nothing would only hold up the pipeline.
+MAX_CONSECUTIVE_FAILURES = 5
+
+
+def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int | None = None,
+                     max_failures: int = MAX_CONSECUTIVE_FAILURES) -> tuple[Dataset, list[dict]]:
     """Fetch the registry page of each (ticker, reg_no) and collect its records.
 
-    Returns the combined Dataset and a per-company report.
+    Returns the combined Dataset and a per-company report whose status is "ok",
+    "not found" (no such entity), "fetch failed" (no answer through any route) or
+    "skipped" (not tried: the `max_failures` downloads before it all failed).
+    A company without a page gets no records, so nothing of its history is closed.
     """
     fetcher = fetcher or _fetcher()
     out, report = Dataset(), []
     todo = [(t, re.sub(r"\D", "", r or "")) for t, r in companies]
     todo = [(t, r) for t, r in todo if r]
-    for i, (ticker, reg) in enumerate(todo[:limit] if limit else todo):
-        page, url = fetch_registry_page(reg, fetcher)
+    todo = todo[:limit] if limit else todo
+    failures = 0
+    for i, (ticker, reg) in enumerate(todo):
+        url = registry_url(reg)
         entry = {"ticker": ticker, "reg_no": reg, "url": url}
-        if page is None:
-            entry["status"] = "not found"
-        else:
-            ds = registry_dataset(page, ticker, url)
-            out.extend(ds)
-            entry.update(status="ok", shareholders=len(ds.shareholdings), officers=len(ds.positions),
-                         beneficial_owners=len(ds.beneficial_owners))
-        log.info("ODL [%d/%d] %s %s: %s", i + 1, len(todo), ticker, reg, entry["status"])
         report.append(entry)
+        if failures >= max_failures:
+            entry["status"] = "skipped"
+            continue
+        html = fetcher.get(url)
+        if html is None and getattr(fetcher, "last_status", None) not in (404, 410):
+            failures += 1
+            entry["status"] = "fetch failed"
+            if getattr(fetcher, "last_error", ""):
+                entry["error"] = fetcher.last_error
+            if failures == max_failures and i + 1 < len(todo):
+                log.error("ODL: %d registry pages in a row could not be downloaded; skipping the other %d "
+                          "companies this run. Check the route: python -m mse_graph.cli egress-check",
+                          failures, len(todo) - i - 1)
+        else:
+            failures = 0
+            page = _entity_page(html, reg) if html else None
+            if page is None:
+                entry["status"] = "not found"
+            else:
+                ds = registry_dataset(page, ticker, url)
+                out.extend(ds)
+                entry.update(status="ok", shareholders=len(ds.shareholdings), officers=len(ds.positions),
+                             beneficial_owners=len(ds.beneficial_owners))
+        log.info("ODL [%d/%d] %s %s: %s", i + 1, len(todo), ticker, reg, entry["status"])
     return out, report
+
+
+def check_egress(reg_no: str, fetcher=None) -> list[dict]:
+    """Fetch the registry page of `reg_no` through each opendatalab.mn route on its
+    own (no cache, no retries, no failover; crawl delay kept) and report per route
+    whether the real page came back."""
+    fetcher = fetcher or _fetcher()
+    url = registry_url(reg_no)
+    results = []
+    for route in fetcher.router.routes_for(url):
+        a = fetcher.try_route(route, url)
+        res = {"route": route.label, "status": a.status, "seconds": a.seconds, "error": a.error}
+        res["ok"] = a.step == "ok" and _entity_page(a.response.text, reg_no) is not None
+        if a.step == "ok" and not res["ok"]:
+            res["error"] = "answered, but not with the registry page (unknown number, or a block page?)"
+        results.append(res)
+    return results

@@ -37,6 +37,12 @@ class Settings:
 
     # Open Data Lab Mongolia. The bare domain often times out; the www host answers.
     odl_base_url: str = field(default_factory=lambda: os.getenv("ODL_BASE_URL", "https://www.opendatalab.mn"))
+    # Egress for opendatalab.mn, which blocks the hosted server's address (issue #4).
+    # See mse_graph/egress.py: proxy / gateway routes, gateway token, extra CA, tries per route.
+    odl_proxy_url: str = field(default_factory=lambda: os.getenv("ODL_PROXY_URL", ""))
+    odl_proxy_token: str = field(default_factory=lambda: os.getenv("ODL_PROXY_TOKEN", ""))
+    odl_proxy_ca_bundle: str = field(default_factory=lambda: os.getenv("ODL_PROXY_CA_BUNDLE", ""))
+    odl_proxy_attempts: int = field(default_factory=lambda: int(os.getenv("ODL_PROXY_ATTEMPTS") or "2"))
 
 
 settings = Settings()
