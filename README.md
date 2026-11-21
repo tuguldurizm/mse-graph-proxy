@@ -42,3 +42,19 @@ A free Render instance sleeps when idle, so the first request after a pause can 
 ```bash
 pip install -r requirements.txt pytest && pytest -q
 ```
+
+---
+
+# app/: the hosted MSE connections graph
+
+`app/` has the full app (Neo4j, the scraper pipeline and the web UI) packaged as **one container**
+for Render. On startup it scrapes mse.mn, imports Open Data Lab Mongolia, loads Neo4j and serves
+the UI. Progress is at `/api/status` and in the service logs.
+
+- Render: Docker runtime, Dockerfile `./app/deploy/Dockerfile`, context `./app`
+- `APP_PASSWORD`: when set, the site asks for a login (any username, this password)
+- `SCRAPE_LIMIT`: scrape only the first N companies (0 = all)
+- `PIPELINE_DEMO=1`: load the fictional demo data instead
+
+Memory is tuned to fit a 512 MB instance. The free plan has no disk, so the data is
+rebuilt each time the service starts or wakes up.

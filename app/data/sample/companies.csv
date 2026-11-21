@@ -1,0 +1,7 @@
+ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url
+XAG,Алтан Говь Майнинг ХК,Altan Gobi Mining JSC,,Mining,,,,true,
+XNB,Нүүдэл Банк ХК,Nuudel Bank JSC,,Finance,,,,true,
+XTS,Тал Сүү ХК,Tal Suu JSC,,Food,,,,true,
+XBT,Бат Тээвэр ХК,Bat Teever JSC,,Transport,,,,true,
+XSD,Сүлд Даатгал ХК,Suld Daatgal JSC,,Insurance,,,,true,
+XUB,Улаан Барилга ХК,Ulaan Barilga JSC,,Construction,,,,true,

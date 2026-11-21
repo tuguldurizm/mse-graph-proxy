@@ -1,0 +1,404 @@
+"""Scraper for mse.mn listed-company profiles.
+
+mse.mn's markup changes over time and was not reachable while this was
+written, so parsing is label-driven rather than tied to CSS selectors:
+
+* key/value facts (symbol, sector, registration no., address, ...) are read
+  from 2-column tables, <dl> lists and "Label: value" text;
+* tables are classified as *shareholders* or *management* from their header
+  cells and the nearest preceding heading/caption, in Mongolian or English;
+* columns are located by header keywords (name / % / shares / position).
+
+If the live site needs different URLs, set MSE_COMPANY_LIST_PATH and
+MSE_COMPANY_LINK_REGEX, or save pages from a browser and use
+`python -m mse_graph.cli parse-html <dir>`.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import re
+import time
+from pathlib import Path
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup, Tag
+
+from .config import settings
+from .models import Company, Dataset, Position, Shareholding
+from .normalize import clean, is_aggregate, parse_int, parse_percent
+
+log = logging.getLogger(__name__)
+
+COMPANY_LIST_PATHS = [
+    p for p in os.getenv("MSE_COMPANY_LIST_PATH", "").split(",") if p
+] or [
+    "/{lang}/companies", "/{lang}/company", "/{lang}/listed-companies",
+    "/{lang}/company_list", "/{lang}/market/companies",
+]
+COMPANY_LINK_RE = re.compile(
+    os.getenv("MSE_COMPANY_LINK_REGEX", r"/(?:mn|en)/(?:company|companies|listed[-_]companies)/([\w-]+)/?$"),
+    re.IGNORECASE,
+)
+
+# ---- label vocabularies -----------------------------------------------------
+
+FACT_LABELS = {
+    "ticker": ["симбол", "symbol", "ticker", "код", "тэмдэглэгээ"],
+    "name": ["компанийн нэр", "company name", "нэр"],
+    "name_en": ["англи нэр", "english name", "name in english"],
+    "sector": ["салбар", "sector", "industry", "үйл ажиллагааны чиглэл"],
+    "reg_no": ["регистр", "registration", "улсын бүртгэл", "reg no", "register"],
+    "address": ["хаяг", "address"],
+    "website": ["вэб", "веб", "website", "web"],
+}
+
+SHAREHOLDER_WORDS = ["хувьцаа эзэмшигч", "эзэмшигч", "shareholder", "owner", "ownership", "эзэмшил"]
+MANAGEMENT_WORDS = [
+    "удирдлага", "төлөөлөн удирдах", "туз", "гүйцэтгэх", "захирал", "албан тушаал",
+    "management", "board", "director", "executive", "officer", "position",
+]
+BOARD_WORDS = ["туз", "төлөөлөн удирдах", "board", "director", "гишүүн", "дарга", "chairman", "chair"]
+EXEC_TITLE_WORDS = ["гүйцэтгэх захирал", "ерөнхий захирал", "ceo", "cfo", "coo", "менежер",
+                    "нягтлан", "executive", "officer", "дэд захирал"]
+
+COL_NAME = ["нэр", "name", "эзэмшигч", "shareholder", "овог", "гишүүн", "member", "holder"]
+COL_PCT = ["хувь", "%", "percent", "ownership", "эзлэх"]
+COL_SHARES = ["тоо", "ширхэг", "number", "shares", "хувьцааны тоо", "quantity"]
+COL_TITLE = ["албан тушаал", "position", "title", "role", "тушаал"]
+
+
+def _has(text: str, words: list[str]) -> bool:
+    t = text.lower()
+    return any(w in t for w in words)
+
+
+# ---- HTTP -------------------------------------------------------------------
+
+class Fetcher:
+    """Throttled, disk-cached HTTP GET.
+
+    If MSE_PROXY_URL (and MSE_PROXY_TOKEN) are set, requests go through the
+    allow-listed fetch proxy in `proxy/app.py` instead of directly.
+    """
+
+    def __init__(self, cache_dir: str | Path = "data/raw", delay: float | None = None,
+                 proxy_url: str | None = None, proxy_token: str | None = None):
+        import httpx  # local import so offline parsing works without httpx
+
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.delay = settings.request_delay if delay is None else delay
+        self.proxy_url = (proxy_url if proxy_url is not None else settings.proxy_url).rstrip("/")
+        self.proxy_token = proxy_token if proxy_token is not None else settings.proxy_token
+        self.client = httpx.Client(
+            # generous timeout: a free Render instance can take ~1 min to wake up
+            timeout=httpx.Timeout(90, connect=30), follow_redirects=True,
+            headers={"User-Agent": "mse-graph/0.1 (research crawler)"},
+        )
+        self._last = 0.0
+
+    def _request(self, url: str):
+        wait = self.delay - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.monotonic()
+        try:
+            if self.proxy_url:
+                r = self.client.get(f"{self.proxy_url}/fetch", params={"url": url},
+                                    headers={"X-Proxy-Token": self.proxy_token})
+            else:
+                r = self.client.get(url)
+        except Exception as exc:  # network errors are logged, not fatal
+            log.warning("GET %s failed: %s", url, exc)
+            return None
+        if r.status_code != 200:
+            detail = r.text[:200] if self.proxy_url and r.status_code in (401, 403, 502, 503) else ""
+            log.warning("GET %s -> HTTP %s %s", url, r.status_code, detail)
+            return None
+        return r
+
+    def _cache_path(self, url: str, ext: str) -> Path:
+        return self.cache_dir / (hashlib.sha1(url.encode()).hexdigest() + ext)
+
+    def get(self, url: str, use_cache: bool = True) -> str | None:
+        path = self._cache_path(url, ".html")
+        if use_cache and path.exists():
+            return path.read_text(encoding="utf-8")
+        r = self._request(url)
+        if r is None:
+            return None
+        path.write_text(r.text, encoding="utf-8")
+        return r.text
+
+    def get_bytes(self, url: str, use_cache: bool = True) -> bytes | None:
+        path = self._cache_path(url, ".bin")
+        if use_cache and path.exists():
+            return path.read_bytes()
+        r = self._request(url)
+        if r is None:
+            return None
+        path.write_bytes(r.content)
+        return r.content
+
+
+# ---- parsing ----------------------------------------------------------------
+
+def find_company_links(html: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "lxml")
+    seen, out = set(), []
+    for a in soup.find_all("a", href=True):
+        url = urljoin(base_url, a["href"]).split("#")[0].split("?")[0]
+        if COMPANY_LINK_RE.search(url) and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _context_text(table: Tag) -> str:
+    """Caption plus the nearest preceding heading-ish element of a table."""
+    parts = []
+    if table.caption:
+        parts.append(table.caption.get_text(" "))
+    prev = table.find_previous(["h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "legend"])
+    if prev:
+        parts.append(prev.get_text(" "))
+    # tab panes: <div id="shareholders"> ... <table>
+    for parent in table.parents:
+        if isinstance(parent, Tag) and (parent.get("id") or parent.get("class")):
+            parts.append(" ".join([parent.get("id") or "", *(parent.get("class") or [])]))
+            break
+    return clean(" ".join(parts))
+
+
+def _table_rows(table: Tag) -> tuple[list[str], list[list[str]]]:
+    rows = [
+        [clean(c.get_text(" ")) for c in tr.find_all(["th", "td"])]
+        for tr in table.find_all("tr")
+    ]
+    rows = [r for r in rows if any(r)]
+    if not rows:
+        return [], []
+    header_tr = table.find("tr")
+    if table.find("thead") or (header_tr and header_tr.find("th") and not header_tr.find("td")):
+        return [h.lower() for h in rows[0]], rows[1:]
+    return [], rows
+
+
+def _col(header: list[str], words: list[str], exclude: set[int] = frozenset()) -> int | None:
+    for i, h in enumerate(header):
+        if i not in exclude and _has(h, words):
+            return i
+    return None
+
+
+def _extract_facts(soup: BeautifulSoup) -> dict[str, str]:
+    pairs: list[tuple[str, str]] = []
+    for tr in soup.find_all("tr"):
+        table = tr.find_parent("table")
+        if table is not None and table.find("thead"):
+            continue  # a data table (shareholders/management), not a facts table
+        cells = tr.find_all(["th", "td"])
+        if len(cells) == 2 and tr.find("td"):
+            pairs.append((clean(cells[0].get_text(" ")), clean(cells[1].get_text(" "))))
+    for dl in soup.find_all("dl"):
+        for dt in dl.find_all("dt"):
+            dd = dt.find_next_sibling("dd")
+            if dd:
+                pairs.append((clean(dt.get_text(" ")), clean(dd.get_text(" "))))
+    for el in soup.find_all(["li", "p", "div", "span"]):
+        if el.find(["li", "p", "div", "table"]):
+            continue
+        m = re.match(r"^([^:：]{2,40})[:：]\s*(.+)$", clean(el.get_text(" ")))
+        if m:
+            pairs.append((m.group(1), m.group(2)))
+
+    facts: dict[str, str] = {}
+    for label, value in pairs:
+        lab = label.lower().strip(" :")
+        if not value or len(lab) > 40:
+            continue
+        for key, words in FACT_LABELS.items():
+            if key not in facts and any(lab == w or lab.startswith(w) or w in lab for w in words):
+                # "нэр" is too generic: only accept it as an exact label
+                if key == "name" and lab not in ("нэр", "компанийн нэр", "company name"):
+                    continue
+                facts[key] = value
+                break
+    return facts
+
+
+def parse_company_page(html: str, url: str = "", ticker_hint: str = "") -> Dataset:
+    soup = BeautifulSoup(html, "lxml")
+    facts = _extract_facts(soup)
+
+    name = facts.get("name")
+    if not name:
+        h = soup.find(["h1", "h2"])
+        name = clean(h.get_text(" ")) if h else clean(soup.title.get_text() if soup.title else "")
+    raw_ticker = facts.get("ticker") or ticker_hint
+    ticker = raw_ticker.split()[0].upper() if raw_ticker else ""
+    mse_id = ""
+    if url and (m := COMPANY_LINK_RE.search(url)):
+        mse_id = m.group(1)
+    if not ticker:
+        ticker = mse_id.upper() or re.sub(r"\W+", "_", name).upper()[:20]
+
+    company = Company(
+        ticker=ticker, name=name, name_en=facts.get("name_en", ""), mse_id=mse_id,
+        sector=facts.get("sector", ""), reg_no=facts.get("reg_no", ""),
+        address=facts.get("address", ""), website=facts.get("website", ""), url=url,
+    )
+    ds = Dataset(companies=[company])
+    source = url or "html"
+
+    for table in soup.find_all("table"):
+        header, rows = _table_rows(table)
+        if not rows:
+            continue
+        ctx = _context_text(table)
+        htext = " ".join(header)
+        is_sh = _has(htext + " " + ctx, SHAREHOLDER_WORDS) or (
+            header and _col(header, COL_PCT) is not None and _col(header, COL_TITLE) is None)
+        is_mg = _has(htext + " " + ctx, MANAGEMENT_WORDS) and _col(header, COL_PCT) is None
+        if is_sh and not (is_mg and _col(header, COL_TITLE) is not None):
+            ds.shareholdings += _parse_shareholders(header, rows, ticker, source)
+        elif is_mg:
+            ds.positions += _parse_management(header, rows, ticker, source, ctx)
+    return ds
+
+
+def _parse_shareholders(header, rows, ticker, source) -> list[Shareholding]:
+    if header:
+        c_pct = _col(header, COL_PCT)
+        c_sh = _col(header, COL_SHARES, exclude={c_pct} if c_pct is not None else set())
+        c_name = _col(header, COL_NAME, exclude={i for i in (c_pct, c_sh) if i is not None})
+    else:
+        c_name = c_pct = c_sh = None
+    out = []
+    for r in rows:
+        if c_name is None:
+            # headerless: first non-numeric cell is the name, a cell with % or <=100 is pct
+            texts = [(i, v) for i, v in enumerate(r) if v and not re.fullmatch(r"[\d.,%\s]+", v)]
+            if not texts:
+                continue
+            name = texts[0][1]
+            nums = [v for v in r if re.fullmatch(r"[\d.,%\s]+", v or "")]
+            pct = next((parse_percent(v) for v in nums if "%" in v), None)
+            if pct is None:
+                pct = next((parse_percent(v) for v in reversed(nums)
+                            if (p := parse_percent(v)) is not None and p <= 100 and "." in v.replace(",", ".")), None)
+            shares = next((parse_int(v) for v in nums if (parse_int(v) or 0) > 100), None)
+        else:
+            name = r[c_name] if c_name < len(r) else ""
+            pct = parse_percent(r[c_pct]) if c_pct is not None and c_pct < len(r) else None
+            shares = parse_int(r[c_sh]) if c_sh is not None and c_sh < len(r) else None
+        if not name or is_aggregate(name) or re.fullmatch(r"[\d.\s]+", name):
+            continue
+        out.append(Shareholding(ticker, name, pct, shares, source=source))
+    return out
+
+
+def _parse_management(header, rows, ticker, source, ctx) -> list[Position]:
+    c_title = _col(header, COL_TITLE) if header else None
+    c_name = _col(header, COL_NAME, exclude={c_title} if c_title is not None else set()) if header else None
+    board_ctx = _has(ctx, BOARD_WORDS) and not _has(ctx, ["гүйцэтгэх удирдлага", "executive management"])
+    out = []
+    for r in rows:
+        cells = [v for v in r if v and not re.fullmatch(r"\d+\.?", v)]
+        if c_name is not None and c_name < len(r):
+            name = r[c_name]
+            title = r[c_title] if c_title is not None and c_title < len(r) else ""
+        elif len(cells) >= 2:
+            # guess: the cell that looks like a job title is the title
+            if _has(cells[0], BOARD_WORDS + EXEC_TITLE_WORDS):
+                title, name = cells[0], cells[1]
+            else:
+                name, title = cells[0], cells[1]
+        elif cells:
+            name, title = cells[0], ""
+        else:
+            continue
+        if not name:
+            continue
+        if _has(title, EXEC_TITLE_WORDS) and not _has(title, ["туз", "board"]):
+            role = "executive"
+        elif _has(title, BOARD_WORDS) or board_ctx:
+            role = "board"
+        else:
+            role = "executive"
+        out.append(Position(ticker, name, title, role, source=source))
+    return out
+
+
+# ---- crawl ------------------------------------------------------------------
+
+def describe_page(html: str, url: str, brief: bool = False) -> None:
+    """Log a compact outline of a page (links, headings, tables) to debug parsing remotely."""
+    soup = BeautifulSoup(html, "lxml")
+    title = clean(soup.title.get_text()) if soup.title else ""
+    log.info("PAGE %s title=%r size=%d tables=%d scripts=%d", url, title[:80], len(html),
+             len(soup.find_all("table")), len(soup.find_all("script")))
+    if brief:
+        return
+    hrefs = []
+    for a in soup.find_all("a", href=True):
+        h = a["href"]
+        if h not in hrefs and not h.startswith(("#", "javascript", "mailto", "tel")):
+            hrefs.append(h)
+    log.info("PAGE links (%d): %s", len(hrefs), " | ".join(hrefs[:60]))
+    heads = [clean(h.get_text(" "))[:60] for h in soup.find_all(["h1", "h2", "h3", "h4"])][:25]
+    log.info("PAGE headings: %s", " | ".join(heads))
+    for i, t in enumerate(soup.find_all("table")[:8]):
+        rows = [[clean(c.get_text(" "))[:30] for c in tr.find_all(["th", "td"])] for tr in t.find_all("tr")[:3]]
+        log.info("PAGE table %d (%d rows, ctx=%r): %s", i, len(t.find_all("tr")), _context_text(t)[:80], rows)
+    api_hints = sorted({m for m in re.findall(r"""["'](/[\w/.-]*api[\w/.?=&-]*)["']""", html)})[:20]
+    if api_hints:
+        log.info("PAGE api-like paths: %s", api_hints)
+
+
+def crawl(limit: int | None = None, fetcher: Fetcher | None = None) -> Dataset:
+    fetcher = fetcher or Fetcher()
+    base = settings.mse_base_url.rstrip("/")
+    links: list[str] = []
+    # the home page first: its links reveal the real company-list URL if ours are wrong
+    for path in ["/", "/{lang}"] + COMPANY_LIST_PATHS:
+        url = base + path.format(lang=settings.mse_lang)
+        html = fetcher.get(url)
+        if html:
+            links = find_company_links(html, url)
+            log.info("%s -> %d company links", url, len(links))
+            if not links:
+                describe_page(html, url)
+            if len(links) >= 5:   # the home page may link only a few companies
+                break
+    if not links:
+        raise RuntimeError(
+            "No company links found on mse.mn. Check network access to mse.mn, or set "
+            "MSE_COMPANY_LIST_PATH / MSE_COMPANY_LINK_REGEX to match the current site."
+        )
+    ds = Dataset()
+    for i, link in enumerate(links[:limit] if limit else links):
+        html = fetcher.get(link)
+        if not html:
+            continue
+        page = parse_company_page(html, url=link)
+        log.info("[%d/%d] %s: %s", i + 1, len(links), page.companies[0].ticker, page.summary())
+        if i < 2 or not (page.shareholdings or page.positions):
+            describe_page(html, link, brief=i >= 2)
+        ds.extend(page)
+    return ds
+
+
+def parse_html_dir(path: str | Path) -> Dataset:
+    """Parse company pages saved manually (one .html file per company).
+
+    The file stem is used as the ticker if the page doesn't show one,
+    e.g. `APU.html`.
+    """
+    ds = Dataset()
+    for f in sorted(Path(path).glob("*.htm*")):
+        ds.extend(parse_company_page(f.read_text(encoding="utf-8", errors="replace"),
+                                     url=f.name, ticker_hint=f.stem))
+    return ds

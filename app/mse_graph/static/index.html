@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="mn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSE Connections</title>
+<script src="/static/vendor/vis-network.min.js"></script>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc;
+          --company:#2f6fb2; --person:#c46a1c; --org:#5b8a3a; --accent:#2f6fb2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --panel:#1f1f1d; --ink:#ecebe6; --muted:#9a9993; --line:#33332f;
+            --company:#6aa3e0; --person:#e89a55; --org:#8fbf6b; --accent:#6aa3e0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink);
+         display:grid; grid-template-columns: 360px 1fr; height:100vh; }
+  aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:16px; }
+  main { position:relative; }
+  #net { position:absolute; inset:0; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:18px 0 6px; }
+  .stats { color:var(--muted); font-size:12px; }
+  input, select, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line);
+                          border-radius:6px; padding:6px 8px; }
+  input { width:100%; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .row { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { padding:5px 6px; border-radius:5px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  li:hover { background:var(--bg); }
+  .tag { font-size:11px; padding:1px 6px; border-radius:10px; color:#fff; flex-shrink:0; align-self:center; }
+  .Company { background:var(--company); } .Person { background:var(--person); } .Organization { background:var(--org); }
+  .meta { color:var(--muted); font-size:12px; }
+  .legend { position:absolute; top:12px; right:12px; background:var(--panel); border:1px solid var(--line);
+            border-radius:8px; padding:8px 10px; font-size:12px; display:flex; gap:10px; }
+  .legend span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:50%;
+                         margin-right:4px; background:var(--c); }
+  #pathFrom, #pathTo { font-size:12px; }
+  @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>MSE холбоосын граф</h1>
+  <div class="stats" id="stats">…</div>
+  <div class="stats" id="pipeline"></div>
+
+  <h2>Хайх / Search</h2>
+  <input id="q" placeholder="Компани, тикер, хүний нэр…" autocomplete="off">
+  <ul id="results"></ul>
+
+  <h2>Харах / View</h2>
+  <div class="row">
+    <button id="btnOverview">Зах зээлийн тойм</button>
+    <select id="depth"><option value="1">1 алхам</option><option value="2" selected>2 алхам</option><option value="3">3 алхам</option></select>
+  </div>
+
+  <h2>Холбоос олох / Path</h2>
+  <div id="pathFrom" class="meta">A: — (сонгоод "A" дарна)</div>
+  <div id="pathTo" class="meta">B: —</div>
+  <div class="row"><button id="setA">A болгох</button><button id="setB">B болгох</button><button id="findPath">Зам олох</button></div>
+
+  <h2>Дэлгэрэнгүй / Details</h2>
+  <div id="details" class="meta">Зангилаа сонгоно уу.</div>
+
+  <h2>Шинжилгээ / Analysis</h2>
+  <div class="row">
+    <button data-a="interlocks">Олон компанид ажилладаг хүмүүс</button>
+    <button data-a="common-owners">Нийтлэг эзэмшигчид</button>
+    <button data-a="board-overlap">ТУЗ давхцал</button>
+  </div>
+  <ul id="analysis"></ul>
+</aside>
+<main>
+  <div id="net"></div>
+  <div class="legend">
+    <span style="--c:var(--company)">Компани</span>
+    <span style="--c:var(--person)">Хувь хүн</span>
+    <span style="--c:var(--org)">Байгууллага</span>
+  </div>
+</main>
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const COLORS = () => ({ Company: css('--company'), Person: css('--person'), Organization: css('--org') });
+const api = (p) => fetch(p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const nodes = new vis.DataSet(), edges = new vis.DataSet();
+const network = new vis.Network(document.getElementById('net'), { nodes, edges }, {
+  physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -60, springLength: 110 },
+             stabilization: { iterations: 200 } },
+  interaction: { hover: true, tooltipDelay: 120 },
+  edges: { arrows: { to: { enabled: true, scaleFactor: .5 } }, smooth: { type: 'continuous' },
+           font: { size: 10, color: css('--muted'), strokeWidth: 0 } },
+  nodes: { font: { color: css('--ink'), size: 13 } },
+});
+let selected = null, pathA = null, pathB = null;
+
+function draw(data, { replace = true, focus = null } = {}) {
+  const col = COLORS();
+  if (replace) { nodes.clear(); edges.clear(); }
+  nodes.update(data.nodes.map(n => ({
+    id: n.key, label: n.ticker && !n.ticker.startsWith('~') ? `${n.ticker}\n${n.name}` : n.name, type: n.type,
+    shape: n.type === 'Company' ? 'box' : 'dot', size: 12,
+    color: { background: col[n.type], border: col[n.type], highlight: { background: col[n.type], border: css('--ink') } },
+    font: n.type === 'Company' ? { color: '#fff' } : undefined,
+    title: `${n.type}: ${n.name}`,
+  })));
+  edges.update(data.edges.filter(Boolean).map(e => ({
+    id: `${e.source}|${e.type}|${e.target}|${e.title || ''}`, from: e.source, to: e.target,
+    label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : 'эзэмшил') : (e.title || ''),
+    dashes: e.type === 'HOLDS_POSITION',
+    width: e.type === 'OWNS' ? 1 + Math.min(6, (e.percent || 0) / 10) : 1,
+    color: { color: e.type === 'OWNS' ? css('--company') : css('--person'), opacity: .7 },
+  })));
+  if (focus) setTimeout(() => network.focus(focus, { scale: 1, animation: true }), 300);
+}
+
+async function open(key) {
+  selected = key;
+  const depth = document.getElementById('depth').value;
+  const [g, d] = await Promise.all([
+    api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}`),
+    api(`/api/entity?key=${encodeURIComponent(key)}`),
+  ]);
+  draw(g, { focus: key });
+  network.selectNodes([key]);
+  showDetails(d);
+}
+
+function list(title, items, fmt) {
+  if (!items || !items.length) return '';
+  return `<h2>${title}</h2><ul>${items.map(i => `<li data-key="${esc(i.key)}">${fmt(i)}</li>`).join('')}</ul>`;
+}
+
+async function showDetails(d) {
+  const e = d.entity;
+  let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
+  for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['reg_no','Регистр'],['address','Хаяг']])
+    if (e[k]) html += `<div>${label}: ${esc(e[k])}</div>`;
+  if (e.url && /^https?:/.test(e.url)) html += `<div><a href="${esc(e.url)}" target="_blank" rel="noopener">mse.mn</a></div>`;
+  const pct = p => p != null ? `${p}%` : '';
+  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}</span><span>${pct(o.percent)}</span>`);
+  html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
+  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(h.ticker || h.name)}</span><span>${pct(h.percent)}</span>`);
+  html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
+  html += list('Холбоотой компаниуд', d.related_companies,
+               r => `<span>${esc(r.ticker)} ${esc(r.name)}</span><span class="meta">${r.links.map(l => esc(l.name)).join(', ')}</span>`);
+  if (e.type === 'Company') {
+    const uo = await api(`/api/companies/${encodeURIComponent(e.ticker)}/ultimate-owners`);
+    html += list('Эцсийн өмчлөгчид (look-through)', uo,
+                 u => `<span>${esc(u.name)}</span><span>${u.effective_percent}%</span>`);
+  }
+  const box = document.getElementById('details');
+  box.innerHTML = html;
+}
+
+document.getElementById('details').addEventListener('click', ev => {
+  const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
+});
+document.getElementById('analysis').addEventListener('click', ev => {
+  const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
+});
+
+let t;
+document.getElementById('q').addEventListener('input', ev => {
+  clearTimeout(t);
+  const q = ev.target.value.trim();
+  if (!q) { document.getElementById('results').innerHTML = ''; return; }
+  t = setTimeout(async () => {
+    const rs = await api(`/api/search?q=${encodeURIComponent(q)}`);
+    const ul = document.getElementById('results');
+    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.ticker && !r.ticker.startsWith('~') ? r.ticker + ' · ' : '')}${esc(r.name)}</span>
+      <span class="tag ${r.type}">${r.type}</span></li>`).join('') || '<li class="meta">Олдсонгүй</li>';
+  }, 200);
+});
+document.getElementById('results').addEventListener('click', ev => {
+  const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
+});
+
+network.on('click', p => { if (p.nodes.length) open(p.nodes[0]); });
+document.getElementById('btnOverview').onclick = async () => draw(await api('/api/graph/overview'));
+document.getElementById('setA').onclick = () => { if (!selected) return; pathA = selected;
+  document.getElementById('pathFrom').textContent = 'A: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
+document.getElementById('setB').onclick = () => { if (!selected) return; pathB = selected;
+  document.getElementById('pathTo').textContent = 'B: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
+document.getElementById('findPath').onclick = async () => {
+  if (!pathA || !pathB) return alert('A болон B зангилааг сонгоно уу.');
+  const p = await api(`/api/graph/path?a=${encodeURIComponent(pathA)}&b=${encodeURIComponent(pathB)}`);
+  if (!p.nodes.length) return alert('Холбоос олдсонгүй.');
+  draw(p);
+};
+
+document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => {
+  const kind = b.dataset.a, rs = await api(`/api/analysis/${kind}`), ul = document.getElementById('analysis');
+  if (kind === 'board-overlap') {
+    ul.innerHTML = rs.map(r => `<li data-key="company:${esc(r.company_a)}"><span>${esc(r.company_a)} ↔ ${esc(r.company_b)}</span>
+      <span class="meta">${r.shared_people.map(esc).join(', ')}</span></li>`).join('');
+  } else {
+    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+      <span class="meta">${r.companies} компани</span></li>`).join('');
+  }
+  if (!rs.length) ul.innerHTML = '<li class="meta">Үр дүн алга</li>';
+});
+
+function loadStats() {
+  return api('/api/stats').then(s => {
+    document.getElementById('stats').textContent =
+      `${s.companies} компани${s.unlisted_companies ? ` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал`;
+    if (s.companies) document.getElementById('btnOverview').click();
+  }).catch(() => document.getElementById('stats').textContent = 'Өгөгдлийн сан ачаалж байна…');
+}
+
+// While the data pipeline is running (hosted deployment), show its progress.
+let lastState = null;
+async function pollStatus() {
+  let st;
+  try { st = await api('/api/status'); } catch { return; }
+  const box = document.getElementById('pipeline');
+  if (!st || st.state === 'unknown') { box.textContent = ''; return; }
+  const last = (st.steps || []).slice(-1)[0];
+  box.textContent = st.state === 'done' ? '' :
+    `Өгөгдөл шинэчилж байна: ${last ? last.step : st.state}…`;
+  if (st.state !== lastState && (st.state === 'done' || lastState === null)) loadStats();
+  lastState = st.state;
+  if (st.state === 'running' || st.state === 'starting') setTimeout(pollStatus, 5000);
+  else if (st.state === 'failed') box.textContent = 'Өгөгдөл ачаалахад алдаа гарлаа (logs-г шалгана уу).';
+}
+loadStats(); pollStatus();
+</script>
+</body>
+</html>
