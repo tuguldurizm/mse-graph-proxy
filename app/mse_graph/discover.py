@@ -52,7 +52,12 @@ def _interesting_strings(text: str, base_host: str) -> list[str]:
             continue
         if re.search(r"\.(png|jpe?g|svg|gif|webp|ico|woff2?|ttf|css|mp4)(\?|$)", s, re.I):
             continue
-        host = urlsplit(s).hostname if s.startswith("http") else base_host
+        if "${" in s:
+            continue
+        try:
+            host = urlsplit(s).hostname if s.startswith("http") else base_host
+        except ValueError:
+            continue
         if s.startswith("http") and host and not INTERESTING.search(s) and base_host not in host:
             continue
         if INTERESTING.search(s) or "/api" in s:
@@ -187,6 +192,16 @@ def explore(url: str, seen_scripts: set[str]) -> None:
     log.info("DISC2 %s -> %s %s %d bytes final=%s", url, r.status_code, ctype[:30], len(r.content), r.url)
     if "json" in ctype:
         log.info("DISC2   json: %s", re.sub(r"\s+", " ", r.text[:1500]))
+        try:
+            data = r.json()
+        except ValueError:
+            return
+        items = data if isinstance(data, list) else next(
+            (v for v in (data.values() if isinstance(data, dict) else []) if isinstance(v, list)), [])
+        log.info("DISC2   json items=%d keys=%s", len(items), sorted(items[0].keys()) if items and isinstance(items[0], dict) else None)
+        for it in items[:2]:
+            log.info("DISC2   item: %s", str(it)[:1500])
+        FOLLOW.extend(_detail_urls(items[:2]))
         return
     if r.status_code != 200 or "html" not in ctype:
         return
@@ -210,7 +225,11 @@ def explore(url: str, seen_scripts: set[str]) -> None:
     found: Counter = Counter(_interesting_strings(html, host))
     for s in soup.find_all("script", src=True):
         src = urljoin(str(r.url), s["src"])
-        if src in seen_scripts or host not in (urlsplit(src).hostname or ""):
+        try:
+            src_host = urlsplit(src).hostname or ""
+        except ValueError:
+            continue
+        if src in seen_scripts or host not in src_host:
             continue
         seen_scripts.add(src)
         rs = _polite_get(c, src)
@@ -236,10 +255,32 @@ EXPLORE_DEFAULT = [
 ]
 
 
+FOLLOW: list[str] = []
+
+
+def _detail_urls(items: list) -> list[str]:
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        for k, v in it.items():
+            if v and re.search(r"symbol|ticker|code|^id$|companyid|company_id|secid", k, re.I) and len(str(v)) < 20:
+                out.append(f"https://mse.mn/securities/{v}")
+    return out[:4]
+
+
 def run_explore(urls: list[str] | None = None) -> None:
     seen: set[str] = set()
-    for u in urls or EXPLORE_DEFAULT:
+    queue = list(urls or EXPLORE_DEFAULT)
+    done: set[str] = set()
+    while queue:
+        u = queue.pop(0)
+        if u in done:
+            continue
+        done.add(u)
         try:
             explore(u, seen)
         except Exception as exc:
             log.exception("DISC2 %s failed: %s", u, exc)
+        while FOLLOW:
+            queue.append(FOLLOW.pop(0))
