@@ -51,16 +51,26 @@ def read_status() -> dict:
 def wait_for_neo4j(timeout: int = 600):
     from .graph import Graph
 
+    from .config import settings
+
     deadline = time.time() + timeout
+    attempt = 0
     while True:
         g = Graph()
         try:
             g.driver.verify_connectivity()
+            if attempt:
+                log.info("connected to neo4j at %s after %d retries", settings.neo4j_uri, attempt)
             return g
         except Exception as exc:
             g.close()
+            # say why (wrong password, paused Aura instance, ...) instead of retrying silently
+            if attempt % 10 == 0:
+                log.warning("neo4j at %s not reachable (attempt %d): %s: %s",
+                            settings.neo4j_uri, attempt + 1, type(exc).__name__, exc)
+            attempt += 1
             if time.time() > deadline:
-                raise RuntimeError(f"Neo4j did not start: {exc}")
+                raise RuntimeError(f"Neo4j did not start: {type(exc).__name__}: {exc}")
             time.sleep(3)
 
 

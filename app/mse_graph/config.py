@@ -2,9 +2,22 @@ import os
 from dataclasses import dataclass, field
 
 
+def _neo4j_uri(raw: str) -> str:
+    """NEO4J_URI with a scheme. A bare Aura host ("xxxx.databases.neo4j.io") gets
+    neo4j+s://, which Aura requires; any other bare host is an error."""
+    uri = raw.strip()
+    if not uri:
+        return "bolt://localhost:7687"
+    if "://" in uri:
+        return uri
+    if uri.split("/")[0].split(":")[0].endswith(".neo4j.io"):
+        return "neo4j+s://" + uri
+    raise ValueError(f"NEO4J_URI={uri!r} has no scheme; use e.g. bolt://{uri} or neo4j+s://{uri}")
+
+
 @dataclass(frozen=True)
 class Settings:
-    neo4j_uri: str = field(default_factory=lambda: os.getenv("NEO4J_URI", "bolt://localhost:7687"))
+    neo4j_uri: str = field(default_factory=lambda: _neo4j_uri(os.getenv("NEO4J_URI", "")))
     # NEO4J_USERNAME is what Neo4j Aura's downloaded credentials file uses
     neo4j_user: str = field(default_factory=lambda: os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or "neo4j")
     neo4j_password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", "msegraph123"))
