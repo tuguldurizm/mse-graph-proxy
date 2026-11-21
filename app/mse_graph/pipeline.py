@@ -83,7 +83,8 @@ def run() -> None:
             set_status("running", "scraping mse.mn")
             limit = int(os.getenv("SCRAPE_LIMIT", "0")) or None
             try:
-                ds = scraper.crawl(limit=limit)
+                crawl = scraper.crawl if os.getenv("MSE_SOURCE") == "legacy" else scraper.crawl_open
+                ds = crawl(limit=limit)
                 csv_io.write_dir(ds, "data/scraped")
                 g.wipe()
                 set_status("running", "scraped mse.mn", **ds.summary())
@@ -94,6 +95,8 @@ def run() -> None:
 
             set_status("running", "importing Open Data Lab")
             try:
+                if os.getenv("ODL_ENABLE") != "1":
+                    raise RuntimeError("skipped: set ODL_ENABLE=1 to import Open Data Lab")
                 ods, report = opendatalab.auto_import(lookup=g.company_lookup())
                 for e in report:
                     log.info("ODL %-40s %s  %s", e["status"], e["dataset"][:60], e["url"])

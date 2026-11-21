@@ -97,13 +97,20 @@ class Fetcher:
             timeout=httpx.Timeout(90, connect=30), follow_redirects=True,
             headers={"User-Agent": "mse-graph/0.1 (research crawler)"},
         )
-        self._last = 0.0
+        self._last_by_host: dict[str, float] = {}
+
+    # robots.txt crawl-delay of sites that ask for one
+    HOST_DELAY = {"opendatalab.mn": 11.0, "www.opendatalab.mn": 11.0}
 
     def _request(self, url: str):
-        wait = self.delay - (time.monotonic() - self._last)
+        from urllib.parse import urlsplit as _us
+        host = _us(url).hostname or ""
+        delay = max(self.delay, self.HOST_DELAY.get(host, 0.0))
+        last = self._last_by_host.get(host, 0.0)
+        wait = delay - (time.monotonic() - last)
         if wait > 0:
             time.sleep(wait)
-        self._last = time.monotonic()
+        self._last_by_host[host] = time.monotonic()
         try:
             if self.proxy_url:
                 r = self.client.get(f"{self.proxy_url}/fetch", params={"url": url},
@@ -401,4 +408,135 @@ def parse_html_dir(path: str | Path) -> Dataset:
     for f in sorted(Path(path).glob("*.htm*")):
         ds.extend(parse_company_page(f.read_text(encoding="utf-8", errors="replace"),
                                      url=f.name, ticker_hint=f.stem))
+    return ds
+
+
+# ---- open.mse.mn (current MSE site) ------------------------------------------
+#
+# mse.mn (Next.js) lists companies via /api/all_companies; each company's
+# profile is server-rendered on open.mse.mn/securities/<id>, with tabs loaded
+# from /securities/<id>/tab/<name>.
+
+OPEN_BASE = os.getenv("MSE_OPEN_BASE", "https://open.mse.mn")
+COMPANY_LIST_API = os.getenv("MSE_COMPANY_LIST_API", "https://mse.mn/api/all_companies?lang=mn")
+TABS = {"shareholders": "shareholders", "boardmembers": "board", "officials": "executive"}
+
+INFO_LABELS = {
+    "reg_no": ["улсын бүртгэлийн дугаар", "регистр"],
+    "address": ["байршил хаяг", "хаяг"],
+    "website": ["вэб сайт"],
+    "sector": ["үйл ажиллагааны чиглэл", "бизнесийн чиглэл"],
+    "ceo": ["гүйцэтгэх захирал"],
+}
+
+
+def list_companies_api(fetcher: Fetcher) -> list[Company]:
+    raw = fetcher.get(COMPANY_LIST_API, use_cache=False)
+    if not raw:
+        raise RuntimeError(f"could not load company list from {COMPANY_LIST_API}")
+    import json
+    out = []
+    for it in json.loads(raw):
+        label = clean(str(it.get("name", "")))
+        if "|" not in label:
+            continue
+        name, _, ticker = label.rpartition("|")
+        name, ticker = clean(name) or label, clean(ticker).upper()
+        cid = str(it.get("id") or it.get("value") or "")
+        if not (cid and ticker):
+            continue
+        out.append(Company(ticker=ticker, name=name, mse_id=cid, url=f"{OPEN_BASE}/securities/{cid}"))
+    return out
+
+
+def parse_open_info(html: str, company: Company) -> list[Position]:
+    """Fill company facts from the 'Ерөнхий мэдээлэл' key/value table; returns the CEO position."""
+    soup = BeautifulSoup(html, "lxml")
+    found: dict = {}
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["th", "td"])
+        if len(cells) != 2:
+            continue
+        label, value = clean(cells[0].get_text(" ")).lower(), clean(cells[1].get_text(" "))
+        if not value or value.upper() == "N/A":
+            continue
+        for key, words in INFO_LABELS.items():
+            for rank, w in enumerate(words):   # earlier label = more specific
+                if label.startswith(w) and rank < found.get(key, ("", 99))[1]:
+                    found[key] = (value, rank)
+                    break
+    found = {k: v for k, (v, _) in found.items()}
+    company.reg_no = found.get("reg_no", company.reg_no)
+    company.address = found.get("address", company.address)
+    company.website = found.get("website", company.website)
+    company.sector = found.get("sector", company.sector)
+    if "ceo" in found:
+        return [Position(company.ticker, found["ceo"], "Гүйцэтгэх захирал", "executive", source=company.url)]
+    return []
+
+
+def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
+    """Parse a tab fragment (shareholders / boardmembers / officials)."""
+    ds = Dataset()
+    soup = BeautifulSoup(html, "lxml")
+    for table in soup.find_all("table"):
+        header, rows = _table_rows(table)
+        if not rows:
+            continue
+        if not header and rows and not any(re.search(r"\d", c) for c in rows[0]) and len(rows) > 1:
+            # first row is a header made of <td>s
+            header, rows = [h.lower() for h in rows[0]], rows[1:]
+        if kind == "shareholders":
+            ds.shareholdings += _parse_shareholders(header, rows, ticker, source)
+        else:
+            for p in _parse_management(header, rows, ticker, source, "ТУЗ" if kind == "board" else ""):
+                if kind == "board" and p.role != "board" and not _has(p.title, EXEC_TITLE_WORDS):
+                    p.role = "board"
+                ds.positions.append(p)
+    if not soup.find("table"):
+        # card/list layouts: "Name — Title" blocks
+        for el in soup.select("li, .card, .item, .member, div.row > div"):
+            txt = clean(el.get_text(" "))
+            if 3 < len(txt) < 160 and not el.find(["li", "table"]):
+                m = re.match(r"^([А-ЯӨҮЁA-Z][^,;|]{2,60}?)\s*[,|–—-]\s*(.+)$", txt)
+                if m and kind != "shareholders":
+                    role = "board" if kind == "board" else "executive"
+                    ds.positions.append(Position(ticker, m.group(1), m.group(2), role, source=source))
+    return ds
+
+
+def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Dataset:
+    fetcher = fetcher or Fetcher()
+    companies = list_companies_api(fetcher)
+    log.info("company list: %d companies", len(companies))
+    ds = Dataset()
+    for i, c in enumerate(companies[:limit] if limit else companies):
+        page = Dataset(companies=[c])
+        html = fetcher.get(c.url)
+        if html:
+            page.positions += parse_open_info(html, c)
+            if i < 2:
+                describe_page(html, c.url, brief=True)
+        for tab, kind in TABS.items():
+            url = f"{c.url}/tab/{tab}"
+            frag = fetcher.get(url)
+            if not frag:
+                continue
+            if frag.lstrip()[:1] in "[{":
+                log.info("TAB %s is JSON: %s", url, frag[:400])
+            part = parse_open_tab(frag, c.ticker, kind, url)
+            if i < 2 or (tab == "shareholders" and not part.shareholdings) and i < 6:
+                describe_page(frag, url)
+            page.shareholdings += part.shareholdings
+            page.positions += part.positions
+        # de-duplicate CEO listed both in info table and officials tab
+        seen, uniq = set(), []
+        for p in page.positions:
+            k = (p.person_name, p.title)
+            if k not in seen:
+                seen.add(k)
+                uniq.append(p)
+        page.positions = uniq
+        log.info("[%d/%d] %s %s: %s", i + 1, len(companies), c.ticker, c.name, page.summary())
+        ds.extend(page)
     return ds
