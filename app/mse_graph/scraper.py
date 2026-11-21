@@ -475,33 +475,81 @@ def parse_open_info(html: str, company: Company) -> list[Position]:
     return []
 
 
+SHARES_PCT_RE = re.compile(r"^\s*([\d\s,.]+?)\s*(?:/\s*([\d.,]+)\s*%\s*/?)?\s*$")
+
+
+def _split_shares_pct(cell: str) -> tuple[int | None, float | None]:
+    """'46,300 /33.28%/' -> (46300, 33.28)."""
+    m = SHARES_PCT_RE.match(cell or "")
+    if not m:
+        return parse_int(cell), None
+    return parse_int(m.group(1)), parse_percent(m.group(2)) if m.group(2) else None
+
+
+def _hcol(header: list[str], *words: str) -> int | None:
+    for w in words:
+        for i, h in enumerate(header):
+            if w in h:
+                return i
+    return None
+
+
 def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
-    """Parse a tab fragment (shareholders / boardmembers / officials)."""
+    """Parse an open.mse.mn tab fragment: shareholders / boardmembers / officials.
+
+    Layouts (as served by open.mse.mn):
+      shareholders: № | Нэр | Хувьцааны тоо ('46,300 /33.28%/') | Бусад компанийн хувьцааг эзэмших |
+                    Түүнтэй нэгдмэл сонирхолтой этгээд | Огноо     (+ a '...түүх' history table: skipped)
+      boardmembers: № | Нэр | Гишүүнчлэл | Албан тушаал | Сонгогдсон огноо | ... | Хувьцааны тоо | ...
+      officials:    № | Нэр | Албан тушаал | Хувьцааны тоо          (КЭБАТ, plus securities officer table)
+    """
     ds = Dataset()
     soup = BeautifulSoup(html, "lxml")
     for table in soup.find_all("table"):
+        ctx = _context_text(table).lower()
+        if "түүх" in ctx or "history" in ctx:
+            continue  # historical holders/officers, not current
         header, rows = _table_rows(table)
-        if not rows:
-            continue
-        if not header and rows and not any(re.search(r"\d", c) for c in rows[0]) and len(rows) > 1:
-            # first row is a header made of <td>s
+        if not header and len(rows) > 1 and not any(re.search(r"\d", c) for c in rows[0]):
             header, rows = [h.lower() for h in rows[0]], rows[1:]
-        if kind == "shareholders":
-            ds.shareholdings += _parse_shareholders(header, rows, ticker, source)
-        else:
-            for p in _parse_management(header, rows, ticker, source, "ТУЗ" if kind == "board" else ""):
-                if kind == "board" and p.role != "board" and not _has(p.title, EXEC_TITLE_WORDS):
-                    p.role = "board"
-                ds.positions.append(p)
-    if not soup.find("table"):
-        # card/list layouts: "Name — Title" blocks
-        for el in soup.select("li, .card, .item, .member, div.row > div"):
-            txt = clean(el.get_text(" "))
-            if 3 < len(txt) < 160 and not el.find(["li", "table"]):
-                m = re.match(r"^([А-ЯӨҮЁA-Z][^,;|]{2,60}?)\s*[,|–—-]\s*(.+)$", txt)
-                if m and kind != "shareholders":
-                    role = "board" if kind == "board" else "executive"
-                    ds.positions.append(Position(ticker, m.group(1), m.group(2), role, source=source))
+        if not header or not rows:
+            continue
+        c_name = _hcol(header, "нэр", "name")
+        if c_name is None:
+            continue
+        date_col = _hcol(header, "огноо", "date")
+        for r in rows:
+            if c_name >= len(r):
+                continue
+            name = clean(r[c_name])
+            if not name or is_aggregate(name) or re.search(r"\d", name) or len(name) < 3:
+                continue
+            if kind == "shareholders":
+                c_sh = _hcol(header, "хувьцааны тоо", "тоо", "shares")
+                c_pct = _hcol(header, "эзэмшлийн хувь", "эзлэх хувь", "%")
+                shares, pct = _split_shares_pct(r[c_sh]) if c_sh is not None and c_sh < len(r) else (None, None)
+                if pct is None and c_pct is not None and c_pct < len(r):
+                    pct = parse_percent(r[c_pct])
+                as_of = r[date_col] if date_col is not None and date_col < len(r) else ""
+                ds.shareholdings.append(Shareholding(ticker, name, pct, shares, as_of=as_of, source=source))
+            else:
+                c_title = _hcol(header, "албан тушаал", "position", "title")
+                title = clean(r[c_title]) if c_title is not None and c_title < len(r) else ""
+                if title and re.fullmatch(r"[\d\s.,/-]+", title):
+                    title = ""  # junk value in source
+                if kind == "board":
+                    c_mem = _hcol(header, "гишүүнчлэл")
+                    member = clean(r[c_mem]) if c_mem is not None and c_mem < len(r) else ""
+                    title = title or "ТУЗ-ийн гишүүн"
+                    if member and member.lower() not in title.lower():
+                        title = f"{title} ({member})"
+                    role = "board"
+                else:
+                    if "мэргэжилтэн" in ctx and not title:
+                        title = "Үнэт цаас хариуцсан мэргэжилтэн"
+                    role = "board" if re.search(r"туз-ийн (дарга|гишүүн)", title.lower()) else "executive"
+                since = r[date_col] if date_col is not None and date_col < len(r) else ""
+                ds.positions.append(Position(ticker, name, title, role, since=since, source=source))
     return ds
 
 
@@ -525,11 +573,16 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Data
             if frag.lstrip()[:1] in "[{":
                 log.info("TAB %s is JSON: %s", url, frag[:400])
             part = parse_open_tab(frag, c.ticker, kind, url)
-            if i < 2 or (tab == "shareholders" and not part.shareholdings) and i < 6:
+            if i < 1:
                 describe_page(frag, url)
             page.shareholdings += part.shareholdings
             page.positions += part.positions
-        # de-duplicate CEO listed both in info table and officials tab
+        # The CEO appears in the info table and (usually) the officials tab, often in a
+        # different name format; keep the tab entry when one exists.
+        tab_ceo = any("гүйцэтгэх захирал" in p.title.lower() and p.source.endswith("/officials")
+                      for p in page.positions)
+        if tab_ceo:
+            page.positions = [p for p in page.positions if p.source != c.url]
         seen, uniq = set(), []
         for p in page.positions:
             k = (p.person_name, p.title)
