@@ -64,7 +64,12 @@ def run() -> None:
     if os.getenv("DISCOVER") == "1":
         set_status("running", "discovering site structure")
         from . import discover
-        discover.run()
+        if os.getenv("DISCOVER_PASS", "1") == "2":
+            urls = [u for u in os.getenv("DISCOVER_URLS", "").split(",") if u.strip()]
+            discover.run_explore(urls or None)
+        else:
+            discover.run()
+        os.environ["PIPELINE_DEMO"] = "1"   # discovery-only run: don't crawl, show demo data
     set_status("running", "waiting for neo4j")
     g = wait_for_neo4j()
     try:

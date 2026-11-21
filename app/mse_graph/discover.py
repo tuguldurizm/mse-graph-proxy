@@ -144,3 +144,102 @@ def run(sites: list[str] | None = None) -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     run(sys.argv[1:] or None)
+
+
+# ---- pass 2: explore specific pages --------------------------------------------
+
+HOST_DELAY = {"opendatalab.mn": 11.0, "www.opendatalab.mn": 11.0}
+_last_hit: dict[str, float] = {}
+
+
+def _polite_get(c, url):
+    import time
+    host = urlsplit(url).hostname or ""
+    wait = HOST_DELAY.get(host, 1.0) - (time.monotonic() - _last_hit.get(host, 0))
+    if wait > 0:
+        time.sleep(wait)
+    _last_hit[host] = time.monotonic()
+    return _get(c, url)
+
+
+def _rsc_snippets(html: str, limit: int = 6) -> list[str]:
+    """Next.js app-router flight data (self.__next_f.push) often embeds the page data."""
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.S)
+    text = " ".join(chunks).encode("utf-8", "ignore").decode("unicode_escape", "ignore")
+    text = text.encode("latin-1", "ignore").decode("utf-8", "ignore")
+    hits = []
+    for m in re.finditer(r'\{[^{}]{0,40}"(?:symbol|ticker|companyName|name|register|regNo|shareholder|percent)"[^{}]{20,600}\}', text):
+        hits.append(m.group(0)[:600])
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def explore(url: str, seen_scripts: set[str]) -> None:
+    from bs4 import BeautifulSoup
+
+    c = _client()
+    host = urlsplit(url).hostname or ""
+    r = _polite_get(c, url)
+    if r is None:
+        return
+    ctype = r.headers.get("content-type", "")
+    log.info("DISC2 %s -> %s %s %d bytes final=%s", url, r.status_code, ctype[:30], len(r.content), r.url)
+    if "json" in ctype:
+        log.info("DISC2   json: %s", re.sub(r"\s+", " ", r.text[:1500]))
+        return
+    if r.status_code != 200 or "html" not in ctype:
+        return
+    html = r.text
+    soup = BeautifulSoup(html, "lxml")
+    links = sorted({urljoin(str(r.url), a["href"]).split("#")[0] for a in soup.find_all("a", href=True)})
+    links = [l for l in links if host in (urlsplit(l).hostname or "")]
+    log.info("DISC2   links (%d): %s", len(links), " | ".join(links[:100]))
+    for f in soup.find_all("form")[:5]:
+        fields = [(i.get("name"), i.get("type")) for i in f.find_all(["input", "select"])]
+        log.info("DISC2   form action=%r method=%r fields=%s", f.get("action"), f.get("method"), fields[:15])
+    for i, t in enumerate(soup.find_all("table")[:6]):
+        rows = [[clean_text(c.get_text(" "))[:40] for c in tr.find_all(["th", "td"])] for tr in t.find_all("tr")[:4]]
+        log.info("DISC2   table %d (%d rows): %s", i, len(t.find_all("tr")), rows)
+    heads = [clean_text(h.get_text(" "))[:60] for h in soup.find_all(["h1", "h2", "h3", "h4", "h5"])][:30]
+    log.info("DISC2   headings: %s", " | ".join(heads))
+    body = clean_text(soup.get_text(" "))
+    log.info("DISC2   text (first 1200): %s", body[:1200])
+    for s in _rsc_snippets(html):
+        log.info("DISC2   rsc: %s", s)
+    found: Counter = Counter(_interesting_strings(html, host))
+    for s in soup.find_all("script", src=True):
+        src = urljoin(str(r.url), s["src"])
+        if src in seen_scripts or host not in (urlsplit(src).hostname or ""):
+            continue
+        seen_scripts.add(src)
+        rs = _polite_get(c, src)
+        if rs is not None and rs.status_code == 200:
+            found.update(_interesting_strings(rs.text, host))
+    if found:
+        log.info("DISC2   api-like strings: %s", sorted(found)[:150])
+
+
+def clean_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+EXPLORE_DEFAULT = [
+    "https://mse.mn/companies-info", "https://mse.mn/stock-list", "https://mse.mn/shareholders",
+    "https://mse.mn/company-governance", "https://mse.mn/live-market",
+    "https://mse.mn/api/public/securities", "https://mse.mn/api/public/companies",
+    "https://mse.mn/api/public/stocks", "https://mse.mn/api/public/stock-list",
+    "https://mse.mn/api/public/companies-info", "https://mse.mn/api/public/shareholders",
+    "https://mse.mn/api/public/settings",
+    "https://opendatalab.mn/legalentity", "https://opendatalab.mn/search?query=2007029",
+    "https://opendatalab.mn/declarationform",
+]
+
+
+def run_explore(urls: list[str] | None = None) -> None:
+    seen: set[str] = set()
+    for u in urls or EXPLORE_DEFAULT:
+        try:
+            explore(u, seen)
+        except Exception as exc:
+            log.exception("DISC2 %s failed: %s", u, exc)
