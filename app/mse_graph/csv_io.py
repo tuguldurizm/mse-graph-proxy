@@ -6,13 +6,18 @@ annual reports / FRC filings) and the Neo4j loader. A data directory holds:
     companies.csv      ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url
     shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source
     executives.csv     company_ticker,person_name,title,role,since,until,source
-    manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}}   (optional)
+    manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}, "supplementary": true}   (optional)
 
 Files may also be gzipped (shareholders.csv.gz, ...), as in the archive.
 
 The archive (`archive()`) keeps one gzipped directory per scrape date,
 `data/archive/YYYY-MM-DD/`, so the full history in Neo4j can be rebuilt from
 the raw observations (`cli rebuild-history`).
+
+Open Data Lab enrichment adds two optional files:
+
+    beneficial_owners.csv  company_ticker,owner_name,owner_type,since,source
+    company_facts.csv      ticker,reg_no,legal_form,founded,address,registry_name,registry_updated,registry_url
 """
 from __future__ import annotations
 
@@ -24,14 +29,17 @@ from dataclasses import fields
 from pathlib import Path
 from typing import IO
 
-from .models import Company, Dataset, Position, Shareholding
+from .models import BeneficialOwner, Company, CompanyFacts, Dataset, Position, Shareholding
 from .normalize import clean, parse_int, parse_percent
 
 FILES = {
     "companies": ("companies.csv", Company),
     "shareholdings": ("shareholders.csv", Shareholding),
     "positions": ("executives.csv", Position),
+    "beneficial_owners": ("beneficial_owners.csv", BeneficialOwner),
+    "facts": ("company_facts.csv", CompanyFacts),
 }
+OPTIONAL = {"beneficial_owners", "facts"}   # only written when non-empty
 
 
 def _coerce(cls, row: dict):
@@ -78,6 +86,7 @@ def read_dir(path: str | Path) -> Dataset:
         meta = json.loads(mpath.read_text(encoding="utf-8"))
         ds.observed_at = meta.get("observed_at", "")
         ds.snapshots = {k: dict(v) for k, v in (meta.get("snapshots") or {}).items()}
+        ds.supplementary = bool(meta.get("supplementary"))
     return ds
 
 
@@ -85,19 +94,24 @@ def write_dir(ds: Dataset, path: str | Path, compress: bool = False) -> None:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     for attr, (fname, cls) in FILES.items():
-        cols = [f.name for f in fields(cls)]
         target = path / (fname + ".gz" if compress else fname)
         stale = path / (fname if compress else fname + ".gz")
         stale.unlink(missing_ok=True)
+        if attr in OPTIONAL and not getattr(ds, attr):
+            target.unlink(missing_ok=True)      # don't leave an older run's file behind
+            continue
+        cols = [f.name for f in fields(cls)]
         with _open(target, "w") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
             for item in getattr(ds, attr):
                 w.writerow({c: getattr(item, c) for c in cols})
     mpath = path / MANIFEST
-    if ds.observed_at or ds.snapshots:
-        mpath.write_text(json.dumps({"observed_at": ds.observed_at, "snapshots": ds.snapshots},
-                                    ensure_ascii=False, indent=1), encoding="utf-8")
+    if ds.observed_at or ds.snapshots or ds.supplementary:
+        meta = {"observed_at": ds.observed_at, "snapshots": ds.snapshots}
+        if ds.supplementary:
+            meta["supplementary"] = True
+        mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     else:
         mpath.unlink(missing_ok=True)
 

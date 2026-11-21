@@ -56,6 +56,9 @@ fi
 
 # The data pipeline runs in a thread inside the web app (saves a Python process).
 export RUN_PIPELINE=1
+# opendatalab.mn has blocked this server's address (issue #4): keep the registry
+# import off here unless ODL_ENABLE=1 is set in the service environment.
+export ODL_ENABLE="${ODL_ENABLE:-0}"
 
 echo "[start] launching web app on port ${PORT:-8000}"
 exec uvicorn mse_graph.api:app --host 0.0.0.0 --port "${PORT:-8000}" --workers 1 --no-access-log

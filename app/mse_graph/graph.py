@@ -6,10 +6,16 @@ Graph model
 (:Entity:Person       {key, name})
 (:Entity:Organization {key, name})           -- non-listed corporate / state shareholders
 
-(holder:Entity)-[:OWNS {percent, shares, as_of, source, <history>}]->(:Company)
-(:Person)-[:HOLDS_POSITION {title, role, since, source, <history>}]->(:Company)
+(holder:Entity)-[:OWNS {percent, shares, as_of, source, sources, <history>}]->(:Company)
+(:Person)-[:HOLDS_POSITION {title, role, since, source, sources, <history>}]->(:Company)
+(owner:Entity)-[:BENEFICIAL_OWNER {since, source, <history>}]->(:Company)  -- declared to the registry (Open Data Lab)
 
-    <history> = current, first_seen, last_seen, until
+    <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline
+
+`source` is the source that owns an edge: only that source, or a complete
+snapshot of the company, can change or close it. `sources` lists every source
+that reported it (mse.mn and/or the Open Data Lab registry). A source without
+a percentage never clears one that another source gave.
 
 `key` is the unique merge key (see normalize.entity_key). A shareholder whose
 name matches a listed company's name / English name is linked to that
@@ -30,12 +36,20 @@ Loads never wipe; they compare the new data with what is in the graph:
 
 `since` / `until` / `as_of` from the source are normalised to ISO dates. All
 "current picture" queries filter on `current`; past edges feed `entity()`
-history, `moves()` and `changes()`.
+history, `moves()`, `changes()` and history.py (change alerts, timelines).
+
+Each load has a run id. Edges it opens get `opened_run`. Edges it closes get
+`closed_run` and `closed_at` (the observation date). A position recorded
+straight from a source as already ended has neither, because it is history,
+not a change. A company's `first_seen` / `first_run` mark when it entered
+the graph, so its first holders and officers count as one `company_added`.
+Likewise the edges a source opens the first time it reports a company (e.g.
+the first Open Data Lab import) get `baseline: true` and are not changes.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from neo4j import GraphDatabase
@@ -57,7 +71,7 @@ SCHEMA = [
 
 # Graphs loaded before history tracking: every edge was the current state.
 MIGRATE = """
-MATCH ()-[r:OWNS|HOLDS_POSITION]->() WHERE r.current IS NULL
+MATCH ()-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->() WHERE r.current IS NULL
 SET r.since = CASE WHEN r.since = '' THEN null ELSE r.since END,
     r.until = CASE WHEN r.until = '' THEN null ELSE r.until END,
     r.as_of = CASE WHEN r.as_of = '' THEN null ELSE r.as_of END
@@ -66,7 +80,26 @@ SET r.current = r.until IS NULL,
     r.last_seen = coalesce(r.last_seen, $today)
 """
 
+# Graphs loaded before change tracking: edges the loader closed have an
+# `until` on or after the day they were first seen (a source's own end date
+# is normally earlier); companies entered the graph with their first edge.
+MIGRATE_CHANGES = [
+    """
+    MATCH ()-[r:OWNS|HOLDS_POSITION]->()
+    WHERE NOT r.current AND r.closed_at IS NULL AND r.until >= r.first_seen
+    SET r.closed_at = r.until
+    """,
+    """
+    MATCH (c:Company) WHERE c.first_seen IS NULL
+    OPTIONAL MATCH (c)<-[r:OWNS|HOLDS_POSITION]-()
+    WITH c, min(r.first_seen) AS first
+    SET c.first_seen = coalesce(first, $today)
+    """,
+]
+
 DEMO_SOURCE = "DEMO-fictional"
+# as_of values that compare correctly as strings (see normalize.parse_date)
+ISO_DATE = r"\d{4}(-\d{2}){0,2}"
 # Two stakes differing by less than this many percentage points count as equal.
 PERCENT_TOLERANCE = 0.001
 
@@ -86,6 +119,11 @@ def _under(source: str | None, prefix: str) -> bool:
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def new_run_id() -> str:
+    """A sortable id for one load: UTC time to the microsecond."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
 
 def company_key(ticker: str) -> str:
@@ -125,6 +163,44 @@ class Graph:
         for stmt in SCHEMA:
             self.run(stmt)
         self.run(MIGRATE, today=_today())
+        for stmt in MIGRATE_CHANGES:
+            self.run(stmt, today=_today())
+        self.rekey_entities()
+
+    def rekey_entities(self) -> int:
+        """Give people and organisations the key the current entity_key() makes.
+
+        When the key rules change (e.g. "Батын Болд" now matches "Б.Болд"), the
+        next load would otherwise create new nodes and report everyone as having
+        left and rejoined. Nodes that end up with the same key are merged; their
+        edges move over unless the target already has the same open edge.
+        Returns the number of nodes re-keyed or merged.
+        """
+        rows = self.run("""MATCH (e:Entity) WHERE (e:Person OR e:Organization) AND NOT e:Company
+                           RETURN e.key AS key, e.name AS name, e:Organization AS org""")
+        moves = []
+        for r in rows:
+            new = entity_key(r["name"] or "", "organization" if r["org"] else "person")
+            if new and new != r["key"] and not r["key"].startswith("company:"):
+                moves.append((r["key"], new))
+        for old, new in moves:
+            if not self.run("MATCH (n:Entity {key: $new}) RETURN count(n) > 0 AS x", new=new)[0]["x"]:
+                self.run("MATCH (o:Entity {key: $old}) SET o.key = $new", old=old, new=new)
+                continue
+            for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
+                # copy every period over, except an open one the target already has
+                self.run(
+                    f"""
+                    MATCH (o:Entity {{key: $old}})-[r:{rel}]->(t), (n:Entity {{key: $new}})
+                    WHERE t <> n AND NOT (coalesce(r.current, false) AND EXISTS {{
+                        MATCH (n)-[x:{rel} {{current: true}}]->(t) WHERE coalesce(x.title, '') = coalesce(r.title, '') }})
+                    CREATE (n)-[x:{rel}]->(t)
+                    SET x = properties(r)
+                    """,
+                    old=old, new=new,
+                )
+            self.run("MATCH (o:Entity {key: $old}) DETACH DELETE o", old=old)
+        return len(moves)
 
     def wipe(self):
         self.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 5000 ROWS")
@@ -158,15 +234,17 @@ class Graph:
 
     # ---- loading ------------------------------------------------------------
 
-    def load(self, ds: Dataset, observed_at: str | None = None) -> dict:
+    def load(self, ds: Dataset, observed_at: str | None = None, run: str | None = None) -> dict:
         """Merge a dataset into the graph, keeping history (see module docstring).
 
         Load datasets in chronological order: `observed_at` (default: the
         dataset's own, else today) is the date stamped on new, refreshed and
-        closed edges.
+        closed edges. `run` (default: a fresh UTC timestamp) is stamped on the
+        edges this load opens or closes; history.run_changes() reads them back.
         """
         self.init_schema()
         when = observed_at or ds.observed_at or _today()
+        run = run or new_run_id()
         companies = []
         for c in ds.companies:
             aliases = sorted({entity_key(n) for n in (c.name, c.name_en) if n} |
@@ -177,6 +255,7 @@ class Graph:
             """
             UNWIND $rows AS r
             MERGE (c:Entity:Company {ticker: r.ticker})
+            ON CREATE SET c.first_seen = $when, c.first_run = $run
             SET c.key = r.key, c.name = r.name, c.listed = r.listed,
                 c.aliases = r.aliases,
                 c.name_en  = CASE WHEN r.name_en  <> '' THEN r.name_en  ELSE c.name_en  END,
@@ -187,30 +266,47 @@ class Graph:
                 c.mse_id   = CASE WHEN r.mse_id   <> '' THEN r.mse_id   ELSE c.mse_id   END,
                 c.url      = CASE WHEN r.url      <> '' THEN r.url      ELSE c.url      END
             """,
-            rows=companies,
+            rows=companies, when=when, run=run,
         )
         # Fold any :Organization created earlier (before this company was loaded)
         # into the matching :Company node.
         self._merge_orgs_into_companies()
 
         changes = {}
-        changes.update(self._load_shareholdings(ds, when))
-        changes.update(self._load_positions(ds, when))
-        return {**self.stats(), "observed_at": when, "changes": changes}
+        changes.update(self._load_shareholdings(ds, when, run))
+        changes.update(self._load_positions(ds, when, run))
+        changes.update(self._load_beneficial_owners(ds, when, run))
+        self._load_facts(ds)
+        return {**self.stats(), "observed_at": when, "run": run, "changes": changes}
 
-    def _load_shareholdings(self, ds: Dataset, when: str) -> dict:
+    def _new_sources(self, rel: str, snaps: dict[str, str]) -> set[str]:
+        """Tickers whose snapshot source has never reported a `rel` edge for them."""
+        scopes = [{"ticker": t, "prefix": p, "under": p.rstrip("/") + "/"} for t, p in snaps.items()]
+        rows = self.run(
+            f"""
+            UNWIND $scopes AS s
+            MATCH (c:Company {{ticker: s.ticker}})
+            WHERE NOT EXISTS {{ MATCH ()-[r:{rel}]->(c) WHERE r.source = s.prefix OR r.source STARTS WITH s.under }}
+            RETURN c.ticker AS t
+            """,
+            scopes=scopes,
+        )
+        return {r["t"] for r in rows}
+
+    def _load_shareholdings(self, ds: Dataset, when: str, run: str) -> dict:
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
         snaps = {t.upper(): p for t, p in ds.snapshots.get("shareholdings", {}).items()}
+        fresh = self._new_sources("OWNS", snaps)
 
         by_pair: dict[tuple, dict] = {}
         for h in ds.shareholdings:
             name = clean(h.holder_name)
             if not name or is_aggregate(name):
                 continue  # "Бусад" / "Others" / totals are not real holders
-            key = entity_key(name)
-            if key in alias_map:
-                key, label = alias_map[key], "Company"
+            key = entity_key(name, h.holder_type)
+            if key in alias_map or entity_key(name) in alias_map:
+                key, label = alias_map.get(key) or alias_map[entity_key(name)], "Company"
             else:
                 htype = h.holder_type or ("organization" if is_organization(name) else "person")
                 label = "Organization" if htype.startswith("org") else "Person"
@@ -221,10 +317,13 @@ class Graph:
                 "percent": h.percent, "shares": h.shares, "as_of": _opt(parse_date(h.as_of)),
                 "source": h.source,
                 # rows from a complete snapshot of the company define its current owners
-                "authoritative": prefix is not None and _under(h.source, prefix),
+                "in_snapshot": prefix is not None and _under(h.source, prefix),
+                "baseline": ticker in fresh,
             }
+            # ... and, unless the source only supplements others, may take edges over
+            row["authoritative"] = row["in_snapshot"] and not ds.supplementary
             prev = by_pair.get((ticker, key))
-            if prev is None or row["authoritative"] or not prev["authoritative"]:
+            if prev is None or row["in_snapshot"] or not prev["in_snapshot"]:
                 by_pair[(ticker, key)] = row   # one row per holder and company
         holdings = list(by_pair.values())
 
@@ -249,31 +348,44 @@ class Graph:
                  o IS NOT NULL AND (
                    (r.percent IS NOT NULL AND o.percent IS NOT NULL AND abs(r.percent - o.percent) > $tol) OR
                    (r.shares IS NOT NULL AND o.shares IS NOT NULL AND r.shares <> o.shares)) AS changed
-            // a different value replaces the open stake only if it comes from the
-            // company's snapshot or from the same source; otherwise two sources that
-            // disagree would close and reopen the stake on every load
-            WITH r, c, e, o, changed, changed AND (r.authoritative OR o.source = r.source) AS supersede
+            // A different value replaces the open stake if it comes from the company's
+            // snapshot, from the same source, or is dated later; never if it is dated
+            // earlier. Otherwise two sources that disagree would close and reopen the
+            // stake on every load (loads are layered: mse.mn, Open Data Lab, CSVs).
+            WITH r, c, e, o, changed,
+                 coalesce(r.as_of =~ $iso AND o.as_of =~ $iso AND r.as_of < o.as_of, false) AS older,
+                 coalesce(r.as_of =~ $iso AND o.as_of =~ $iso AND r.as_of > o.as_of, false) AS newer
+            WITH r, c, e, o, changed,
+                 changed AND NOT older AND (r.authoritative OR o.source = r.source OR newer) AS supersede
             CALL (r, c, e, o, supersede) {
                 WITH r, c, e, o, supersede WHERE o IS NULL OR supersede
                 CREATE (e)-[n:OWNS {current: true}]->(c)
-                SET n.percent = r.percent, n.shares = r.shares, n.as_of = r.as_of,
-                    n.source = r.source, n.first_seen = $when, n.last_seen = $when
+                SET n.percent = r.percent, n.shares = r.shares, n.as_of = r.as_of, n.source = r.source,
+                    n.sources = [r.source], n.first_seen = $when, n.last_seen = $when, n.opened_run = $run,
+                    n.baseline = CASE WHEN r.baseline THEN true END
                 WITH o WHERE o IS NOT NULL
-                SET o.current = false, o.until = $when
+                SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
             }
             CALL (r, o, changed) {
                 WITH r, o WHERE o IS NOT NULL AND NOT changed
                 SET o.last_seen = CASE WHEN coalesce(o.last_seen, '') < $when THEN $when ELSE o.last_seen END,
                     o.percent = coalesce(o.percent, r.percent),
                     o.shares = coalesce(o.shares, r.shares)
-                WITH r, o WHERE r.authoritative OR o.source = r.source OR o.as_of IS NULL
-                SET o.as_of = coalesce(r.as_of, o.as_of), o.source = r.source
+                WITH r, o, coalesce(o.sources, [x IN [o.source] WHERE x IS NOT NULL]) AS have
+                SET o.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END
+                WITH r, o WHERE NOT coalesce(r.as_of =~ $iso AND o.as_of =~ $iso AND r.as_of < o.as_of, false)
+                // another source (e.g. the registry) only adds itself to `sources`: if it
+                // took over `source`, the company's own snapshot could no longer close the edge
+                WITH r, o, r.authoritative OR o.source = r.source OR o.source IS NULL AS owner
+                SET o.source = CASE WHEN owner THEN r.source ELSE o.source END,
+                    o.as_of = CASE WHEN owner OR (o.as_of IS NULL AND r.percent IS NOT NULL)
+                                   THEN coalesce(r.as_of, o.as_of) ELSE o.as_of END
             }
             RETURN count(CASE WHEN o IS NULL THEN 1 END) AS opened,
                    count(CASE WHEN supersede THEN 1 END) AS changed,
                    count(CASE WHEN changed AND NOT supersede THEN 1 END) AS conflicting
             """,
-            rows=holdings, when=when, tol=PERCENT_TOLERANCE,
+            rows=holdings, when=when, run=run, tol=PERCENT_TOLERANCE, iso=ISO_DATE,
         )[0]
 
         # Holders missing from a company's complete snapshot have sold out. A
@@ -281,7 +393,7 @@ class Graph:
         # layout change, not every holder selling on the same day).
         seen: dict[str, list[str]] = {}
         for h in holdings:
-            if h["authoritative"]:
+            if h["in_snapshot"]:
                 seen.setdefault(h["ticker"], []).append(h["key"])
         scopes = [{"ticker": t, "prefix": snaps[t], "under": snaps[t].rstrip("/") + "/", "seen": keys}
                   for t, keys in seen.items()]
@@ -290,23 +402,27 @@ class Graph:
             UNWIND $scopes AS s
             MATCH (e:Entity)-[o:OWNS {current: true}]->(c:Company {ticker: s.ticker})
             WHERE (o.source = s.prefix OR o.source STARTS WITH s.under) AND NOT e.key IN s.seen
-            SET o.current = false, o.until = $when
+            SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
             RETURN count(o) AS n
             """,
-            scopes=scopes, when=when,
+            scopes=scopes, when=when, run=run,
         )[0]["n"]
         return {"ownerships_opened": res["opened"], "ownerships_changed": res["changed"],
                 "ownerships_closed": closed, "ownerships_conflicting": res["conflicting"]}
 
-    def _load_positions(self, ds: Dataset, when: str) -> dict:
+    def _load_positions(self, ds: Dataset, when: str, run: str) -> dict:
         snaps = {t.upper(): p for t, p in ds.snapshots.get("positions", {}).items()}
+        fresh = self._new_sources("HOLDS_POSITION", snaps)
         rows: dict[tuple, dict] = {}
         for p in ds.positions:
+            ticker = p.company_ticker.upper()
             r = {
-                "ticker": p.company_ticker.upper(), "key": entity_key(p.person_name),
+                "ticker": ticker, "key": entity_key(p.person_name, "person"),
                 "name": clean(p.person_name), "title": clean(p.title), "role": p.role or "executive",
                 "since": _opt(parse_date(p.since)), "until": _opt(parse_date(p.until)),
                 "source": p.source,
+                "authoritative": ticker in snaps and _under(p.source, snaps[ticker]) and not ds.supplementary,
+                "baseline": ticker in fresh,
             }
             if r["key"]:
                 rows[(r["ticker"], r["key"], r["title"], r["until"])] = r
@@ -322,14 +438,21 @@ class Graph:
         opened = self.run(
             "UNWIND $rows AS r" + merge_person + """
             MERGE (p)-[h:HOLDS_POSITION {title: r.title, current: true}]->(c)
-            ON CREATE SET h.first_seen = $when, h.new = true
-            SET h.role = r.role, h.source = r.source, h.since = coalesce(h.since, r.since),
+            ON CREATE SET h.first_seen = $when, h.opened_run = $run, h.new = true, h.source = r.source,
+                          h.baseline = CASE WHEN r.baseline THEN true END
+            WITH r, h, coalesce(h.sources, [x IN [h.source] WHERE x IS NOT NULL]) AS have
+            SET h.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END
+            // as for stakes: another source can't take the edge over (see _load_shareholdings)
+            WITH r, h, r.authoritative OR h.source = r.source OR h.source IS NULL AS owner
+            SET h.role = CASE WHEN owner THEN r.role ELSE h.role END,
+                h.source = CASE WHEN owner THEN r.source ELSE h.source END,
+                h.since = coalesce(h.since, r.since),
                 h.last_seen = CASE WHEN coalesce(h.last_seen, '') < $when THEN $when ELSE h.last_seen END
             WITH h, h.new AS new
             REMOVE h.new
             RETURN count(CASE WHEN new THEN 1 END) AS n
             """,
-            rows=active, when=when,
+            rows=active, when=when, run=run,
         )[0]["n"]
 
         # Rows that carry their own end date (e.g. a source's history table or a
@@ -342,7 +465,7 @@ class Graph:
             CALL (r, o) {
                 WITH r, o WHERE o IS NOT NULL
                 SET o.current = false, o.until = r.until, o.since = coalesce(o.since, r.since),
-                    o.role = r.role, o.source = r.source
+                    o.role = r.role, o.source = r.source, o.closed_at = $when, o.closed_run = $run
             }
             CALL (r, p, c, o) {
                 WITH r, p, c, o WHERE o IS NULL
@@ -351,7 +474,7 @@ class Graph:
                 SET h.role = r.role, h.source = r.source, h.since = coalesce(h.since, r.since)
             }
             """,
-            rows=ended, when=when,
+            rows=ended, when=when, run=run,
         )
 
         # People missing from a company's complete snapshot have left.
@@ -366,12 +489,109 @@ class Graph:
             UNWIND $scopes AS s
             MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company {ticker: s.ticker})
             WHERE (h.source = s.prefix OR h.source STARTS WITH s.under) AND NOT (p.key + '|' + h.title) IN s.seen
-            SET h.current = false, h.until = $when
+            SET h.current = false, h.until = $when, h.closed_at = $when, h.closed_run = $run
             RETURN count(h) AS n
             """,
-            scopes=scopes, when=when,
+            scopes=scopes, when=when, run=run,
         )[0]["n"]
         return {"positions_opened": opened, "positions_closed": closed + len(ended)}
+
+    def _load_beneficial_owners(self, ds: Dataset, when: str, run: str) -> dict:
+        """Registry beneficial owners: one open edge per owner and company, closed
+        when the company's registry page (a snapshot) no longer lists the owner."""
+        if not ds.beneficial_owners and not ds.snapshots.get("beneficial_owners"):
+            return {}
+        alias_map = {row["a"]: row["key"] for row in self.run(
+            "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+        snaps = {t.upper(): p for t, p in ds.snapshots.get("beneficial_owners", {}).items()}
+        fresh = self._new_sources("BENEFICIAL_OWNER", snaps)
+        rows = {}
+        for b in ds.beneficial_owners:
+            name = clean(b.owner_name)
+            if not name:
+                continue
+            key = entity_key(name, b.owner_type)
+            label = "Company" if key in alias_map else (
+                "Organization" if (b.owner_type or ("organization" if is_organization(name) else "person"))
+                .startswith("org") else "Person")
+            ticker = b.company_ticker.upper()
+            rows[(ticker, key)] = {"ticker": ticker, "key": alias_map.get(key, key), "name": name,
+                                   "label": label, "since": _opt(parse_date(b.since)), "source": b.source,
+                                   "baseline": ticker in fresh}
+        rows = list(rows.values())
+        for label in ("Person", "Organization"):
+            self.run(
+                f"""
+                UNWIND $rows AS r
+                MERGE (e:Entity {{key: r.key}})
+                ON CREATE SET e.name = r.name
+                SET e:{label}
+                """,
+                rows=[r for r in rows if r["label"] == label],
+            )
+        opened = self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (c:Company {ticker: r.ticker})
+            MATCH (e:Entity {key: r.key})
+            WHERE e <> c
+            MERGE (e)-[b:BENEFICIAL_OWNER {current: true}]->(c)
+            ON CREATE SET b.first_seen = $when, b.opened_run = $run, b.new = true,
+                          b.baseline = CASE WHEN r.baseline THEN true END
+            SET b.since = coalesce(r.since, b.since), b.source = r.source,
+                b.last_seen = CASE WHEN coalesce(b.last_seen, '') < $when THEN $when ELSE b.last_seen END
+            WITH b, b.new AS new
+            REMOVE b.new
+            RETURN count(CASE WHEN new THEN 1 END) AS n
+            """,
+            rows=rows, when=when, run=run,
+        )[0]["n"]
+        seen: dict[str, list[str]] = {t: [] for t in snaps}
+        for r in rows:
+            if r["ticker"] in seen:
+                seen[r["ticker"]].append(r["key"])
+        # unlike shareholder tables, an empty list of beneficial owners is common, but
+        # still treat it as "no information" so a failed parse doesn't close everything
+        scopes = [{"ticker": t, "prefix": snaps[t], "under": snaps[t].rstrip("/") + "/", "seen": keys}
+                  for t, keys in seen.items() if keys]
+        closed = self.run(
+            """
+            UNWIND $scopes AS s
+            MATCH (e:Entity)-[b:BENEFICIAL_OWNER {current: true}]->(c:Company {ticker: s.ticker})
+            WHERE (b.source = s.prefix OR b.source STARTS WITH s.under) AND NOT e.key IN s.seen
+            SET b.current = false, b.until = $when, b.closed_at = $when, b.closed_run = $run
+            RETURN count(b) AS n
+            """,
+            scopes=scopes, when=when, run=run,
+        )[0]["n"]
+        return {"beneficial_owners_opened": opened, "beneficial_owners_closed": closed}
+
+    def _load_facts(self, ds: Dataset):
+        """Registry facts: fill empty company properties only."""
+        rows = [{**f.__dict__, "ticker": f.ticker.upper()} for f in ds.facts]
+        self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (c:Company {ticker: r.ticker})
+            SET c.reg_no  = CASE WHEN coalesce(c.reg_no, '')  = '' THEN r.reg_no  ELSE c.reg_no  END,
+                c.address = CASE WHEN coalesce(c.address, '') = '' THEN r.address ELSE c.address END,
+                c.legal_form = CASE WHEN r.legal_form <> '' THEN r.legal_form ELSE c.legal_form END,
+                c.founded = CASE WHEN r.founded <> '' THEN r.founded ELSE c.founded END,
+                c.registry_name = CASE WHEN r.registry_name <> '' THEN r.registry_name ELSE c.registry_name END,
+                c.registry_updated = CASE WHEN r.registry_updated <> '' THEN r.registry_updated
+                                          ELSE c.registry_updated END,
+                c.registry_url = CASE WHEN r.registry_url <> '' THEN r.registry_url ELSE c.registry_url END
+            """,
+            rows=rows,
+        )
+
+    def companies_with_reg(self) -> list[tuple[str, str]]:
+        """(ticker, reg_no) of every company that has a registration number, listed first."""
+        return [(r["t"], r["reg"]) for r in self.run(
+            """
+            MATCH (c:Company) WHERE coalesce(c.reg_no, '') <> ''
+            RETURN c.ticker AS t, c.reg_no AS reg ORDER BY coalesce(c.listed, true) DESC, c.ticker
+            """)]
 
     def _merge_orgs_into_companies(self):
         rows = self.run(
@@ -422,8 +642,9 @@ class Graph:
                                                              count(CASE WHEN NOT r.current THEN 1 END) AS past_positions,
                                                              min(r.first_seen) AS first_observed,
                                                              max(r.last_seen) AS last_observed }
+            CALL () { MATCH ()-[r:BENEFICIAL_OWNER {current: true}]->() RETURN count(r) AS beneficial_owners }
             RETURN companies, unlisted_companies, people, organizations, ownerships, positions,
-                   past_ownerships, past_positions, first_observed, last_observed
+                   beneficial_owners, past_ownerships, past_positions, first_observed, last_observed
             """
         )
         return r[0]
@@ -457,7 +678,7 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (h:Entity)-[r:OWNS]->(e)
                 RETURN collect(CASE WHEN h IS NULL THEN NULL ELSE
-                    {{key: h.key, name: h.name, type: {_TYPE.format("h")},
+                    {{key: h.key, name: h.name, type: {_TYPE.format("h")}, source: r.source, sources: r.sources,
                       percent: r.percent, shares: r.shares, as_of: r.as_of, {period}}} END) AS owners
             }}
             CALL (e) {{
@@ -469,14 +690,26 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (p:Person)-[r:HOLDS_POSITION]->(e)
                 RETURN collect(CASE WHEN p IS NULL THEN NULL ELSE
-                    {{key: p.key, name: p.name, title: r.title, role: r.role, {period}}} END) AS people
+                    {{key: p.key, name: p.name, title: r.title, role: r.role, source: r.source, {period}}} END) AS people
+            }}
+            CALL (e) {{
+                OPTIONAL MATCH (b:Entity)-[r:BENEFICIAL_OWNER]->(e)
+                RETURN collect(CASE WHEN b IS NULL THEN NULL ELSE
+                    {{key: b.key, name: b.name, type: {_TYPE.format("b")}, since: r.since, source: r.source,
+                      {period}}} END) AS beneficial_owners
+            }}
+            CALL (e) {{
+                OPTIONAL MATCH (e)-[r:BENEFICIAL_OWNER]->(t:Company)
+                RETURN collect(CASE WHEN t IS NULL THEN NULL ELSE
+                    {{key: t.key, name: t.name, ticker: t.ticker, since: r.since, {period}}} END) AS beneficially_owns
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:HOLDS_POSITION]->(c:Company)
                 RETURN collect(CASE WHEN c IS NULL THEN NULL ELSE
                     {{key: c.key, name: c.name, ticker: c.ticker, title: r.title, role: r.role, {period}}} END) AS positions
             }}
-            RETURN e {{.*, type: {_TYPE.format("e")}}} AS entity, owners, holdings, people, positions
+            RETURN e {{.*, type: {_TYPE.format("e")}}} AS entity, owners, holdings, people, positions,
+                   beneficial_owners, beneficially_owns
             """,
             key=key,
         )
@@ -484,7 +717,7 @@ class Graph:
             return None
         row = rows[0]
         out = {"entity": row["entity"], "history": {}}
-        for part in ("owners", "holdings", "people", "positions"):
+        for part in ("owners", "holdings", "people", "positions", "beneficial_owners", "beneficially_owns"):
             items = row[part]
             out[part] = [i for i in items if i["current"]]
             # most recently ended first
@@ -498,8 +731,8 @@ class Graph:
         """Other listed companies connected through a shared person or shareholder (now)."""
         return self.run(
             """
-            MATCH (c:Company {key: $key})<-[r1:OWNS|HOLDS_POSITION {current: true}]-(link:Entity)
-                  -[r2:OWNS|HOLDS_POSITION {current: true}]->(o:Company)
+            MATCH (c:Company {key: $key})<-[r1:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]-(link:Entity)
+                  -[r2:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]->(o:Company)
             WHERE o <> c
             RETURN o.key AS key, o.name AS name, o.ticker AS ticker,
                    collect(DISTINCT {key: link.key, name: link.name,
@@ -514,7 +747,7 @@ class Graph:
         rows = self.run(
             f"""
             MATCH (e:Entity {{key: $key}})
-            OPTIONAL MATCH path = (e)-[:OWNS|HOLDS_POSITION*1..{depth}]-(:Entity)
+            OPTIONAL MATCH path = (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*1..{depth}]-(:Entity)
             WHERE all(r IN relationships(path) WHERE r.current)
             WITH e, path LIMIT $limit
             WITH e, collect(path) AS paths
@@ -535,7 +768,7 @@ class Graph:
         """Whole-market graph (trimmed): companies plus entities linked to 2+ companies."""
         rows = self.run(
             """
-            MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
+            MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]->(c:Company)
             WITH x, collect(DISTINCT c) AS cs, collect(r) AS rs
             WHERE size(cs) >= 2 OR x:Company
             WITH x, cs, rs LIMIT $limit
@@ -555,7 +788,7 @@ class Graph:
         rows = self.run(
             f"""
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
-            MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION*..{max_hops}]-(b))
+            MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
             RETURN [n IN nodes(p) | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l <> 'Entity'][0]}}] AS nodes,
                    [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
@@ -566,13 +799,18 @@ class Graph:
         return rows[0] if rows else {"nodes": [], "edges": []}
 
     def ultimate_owners(self, ticker: str, max_depth: int = 5, min_percent: float = 1.0) -> list[dict]:
-        """Look-through ownership: effective % = product of current stakes along each chain."""
+        """Look-through ownership: effective % = product of current stakes along each chain.
+
+        Chains never pass through the same company twice: an ownership loop would
+        otherwise add a partial, depth-dependent echo of the same stake. Loops are
+        reported separately (analysis.cycles)."""
         max_depth = max(1, min(int(max_depth), 8))
         return self.run(
             f"""
             MATCH p = (owner:Entity)-[:OWNS*1..{max_depth}]->(c:Company {{ticker: $ticker}})
             WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL)
               AND NOT (owner)<-[:OWNS {{current: true}}]-(:Entity)
+              AND all(i IN range(0, size(nodes(p)) - 2) WHERE NOT nodes(p)[i] IN nodes(p)[i + 1..])
             WITH owner, p, reduce(x = 100.0, r IN relationships(p) | x * r.percent / 100.0) AS eff
             WITH owner, sum(eff) AS effective_percent,
                  collect([n IN nodes(p) | CASE WHEN n:Company AND coalesce(n.listed, true) THEN n.ticker ELSE n.name END]) AS chains
@@ -589,7 +827,7 @@ class Graph:
         """People who currently hold positions in (or own) several listed companies."""
         return self.run(
             """
-            MATCH (p:Person)-[r:HOLDS_POSITION|OWNS {current: true}]->(c:Company)
+            MATCH (p:Person)-[r:HOLDS_POSITION|OWNS|BENEFICIAL_OWNER {current: true}]->(c:Company)
             WITH p, collect(DISTINCT {ticker: c.ticker, name: c.name, key: c.key,
                                       rel: type(r), title: r.title, percent: r.percent}) AS links,
                  count(DISTINCT c) AS n

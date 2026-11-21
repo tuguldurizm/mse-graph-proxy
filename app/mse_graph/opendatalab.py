@@ -1,23 +1,28 @@
-"""Importer for Open Data Lab Mongolia (opendatalab.mn) datasets.
+"""Open Data Lab Mongolia (www.opendatalab.mn) as a source on top of mse.mn.
 
-Open Data Lab publishes datasets as downloadable files (CSV / XLSX / JSON),
-often via a CKAN data portal. This module:
+Open Data Lab republishes the state legal-entity registry (УБЕГ): for every
+registered company it has a page at /search/<registration number> with the
+registered shareholders, officers, ultimate (beneficial) owners, licences and
+tenders. This module:
 
-* `search(query)`   - lists datasets and their downloadable resources, via
-                      the CKAN API if available, otherwise by scanning the
-                      page for data-file links;
-* `import_table()`  - reads one CSV/XLSX/JSON table and maps its columns to
-                      companies / shareholders / officers by header keywords
-                      (Mongolian or English), returning a `Dataset`.
+* `fetch_registry_page()` / `parse_registry_page()` - download and parse one
+                       registry page (layout verified against the live site);
+* `enrich_companies()` - for each MSE-listed company with a registration
+                       number, turn its registry page into graph records:
+                       registry shareholders (no %), officers, beneficial
+                       owners and company facts;
+* `import_table()`   - import a downloaded CSV/XLSX/JSON table, mapping its
+                       columns to companies / shareholders / officers by
+                       header keywords (Mongolian or English).
 
-Company rows are matched to MSE-listed companies by registration number or
-name. Companies that aren't listed on MSE become *unlisted* :Company nodes
-(listed=false, ticker "~<reg no>"), so ownership chains that pass through
-private holding companies (listed co. <- holding LLC <- people) are kept.
+Registry data supplements mse.mn and never overwrites it: the loader keeps
+MSE's ownership percentages and only fills company properties that are empty.
+Registry entries can be years out of date (a listed JSC often still shows its
+founders), so every record carries its registry URL as `source`.
 
-opendatalab.mn could not be reached while this was written; the portal
-layout is assumed, not verified. `ODL_BASE_URL` / `ODL_CKAN_API` override
-the endpoints, and any dataset file can be imported directly by URL or path.
+Table rows are matched to MSE-listed companies by registration number or name.
+Companies that aren't listed on MSE become *unlisted* :Company nodes
+(listed=false, ticker "~<reg no>").
 """
 from __future__ import annotations
 
@@ -26,18 +31,15 @@ import hashlib
 import io
 import json
 import logging
-import os
 import re
 from pathlib import Path
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from .config import settings
-from .models import Company, Dataset, Position, Shareholding
-from .normalize import clean, entity_key, is_aggregate, parse_int, parse_percent
+from .models import BeneficialOwner, Company, CompanyFacts, Dataset, Position, Shareholding
+from .normalize import clean, entity_key, is_aggregate, is_organization, parse_int, parse_percent
 
 log = logging.getLogger(__name__)
-
-DATA_EXT_RE = re.compile(r"\.(csv|xlsx|xls|json)(?:$|\?)", re.IGNORECASE)
 
 # Header keywords per target field. Order matters: first match wins, and a
 # column is only assigned to one field.
@@ -219,59 +221,7 @@ def import_rows(rows: list[dict], kind: str = "auto", source: str = "opendatalab
     return ds
 
 
-# ---- remote discovery -------------------------------------------------------
-
-def _fetcher():
-    from .scraper import Fetcher
-    return Fetcher()
-
-
-def ckan_api_base() -> str:
-    return os.getenv("ODL_CKAN_API", settings.odl_base_url.rstrip("/") + "/api/3/action")
-
-
-def search(query: str = "", rows: int = 50, fetcher=None) -> list[dict]:
-    """Datasets matching `query`, each with its downloadable resources."""
-    fetcher = fetcher or _fetcher()
-    api = ckan_api_base()
-    raw = fetcher.get(f"{api}/package_search?" + urlencode({"q": query, "rows": rows}), use_cache=False)
-    if raw:
-        try:
-            res = json.loads(raw)["result"]["results"]
-            return [{
-                "id": d.get("name") or d.get("id"),
-                "title": d.get("title", ""),
-                "organization": (d.get("organization") or {}).get("title", ""),
-                "resources": [{"name": r.get("name") or "", "format": (r.get("format") or "").lower(),
-                               "url": r.get("url")} for r in d.get("resources", []) if r.get("url")],
-            } for d in res]
-        except (ValueError, KeyError, TypeError):
-            log.info("CKAN API not available at %s, falling back to link scan", api)
-    return _scan_links(settings.odl_base_url, query, fetcher)
-
-
-def _scan_links(base: str, query: str, fetcher) -> list[dict]:
-    from bs4 import BeautifulSoup
-
-    pages = [base, urljoin(base + "/", "dataset?" + urlencode({"q": query})), urljoin(base + "/", "data")]
-    out, seen = [], set()
-    for page in pages:
-        html = fetcher.get(page, use_cache=False)
-        if not html:
-            continue
-        for a in BeautifulSoup(html, "lxml").find_all("a", href=True):
-            url = urljoin(page, a["href"])
-            if url in seen or not DATA_EXT_RE.search(url):
-                continue
-            title = clean(a.get_text(" ")) or Path(urlsplit(url).path).name
-            if query and query.lower() not in (title + url).lower():
-                continue
-            seen.add(url)
-            out.append({"id": url, "title": title, "organization": "",
-                        "resources": [{"name": title, "format": DATA_EXT_RE.search(url).group(1).lower(),
-                                       "url": url}]})
-    return out
-
+# ---- dataset files ----------------------------------------------------------
 
 def load_source(src: str, fetcher=None) -> tuple[bytes, str]:
     """Read a dataset file from a local path or URL."""
@@ -292,55 +242,221 @@ def import_table(src: str, kind: str = "auto", lookup: dict[str, str] | None = N
                        lookup=lookup, columns=columns)
 
 
-DEFAULT_QUERIES = ["эцсийн өмчлөгч", "хувьцаа эзэмшигч", "beneficial ownership", "shareholder",
-                   "хуулийн этгээд", "удирдлага", "компани"]
+def _fetcher():
+    from .scraper import Fetcher
+    return Fetcher()
 
 
-def auto_import(queries: list[str] | None = None, lookup: dict[str, str] | None = None,
-                fetcher=None) -> tuple[Dataset, list[dict]]:
-    """Search Open Data Lab and import every table that looks like ownership/officer data.
+# ---- company registry pages (www.opendatalab.mn/search/<reg no>) -------------
+#
+# Each registered legal entity has a page at /search/<registration number> made
+# of Bootstrap cards, one per section, each titled by an <h5>:
+#
+#   Үндсэн мэдээлэл               label/value rows: Нэр, Хэлбэр, Регистер, Үүсгэн байгуулагдсан, Хаяг, ...
+#   Хувь эзэмшил                  shareholders: Д/д | Төрөл (Иргэн / Хуулийн этгээд) | Улс | Нэр | Огноо | flag
+#   Удирдах албан тушаалтан       officers:     Д/д | Албан тушаал | Улс | Нэр | Огноо | flag
+#   Үйл ажиллагаа                 activity codes (a <table>)
+#   Эцсийн өмчлөгч                ultimate owners: Дугаар | Ангилал (Иргэн or a reg. no.) | Нэр | Бүртгэсэн
+#   Тусгай зөвшөөрөл              special licences
+#   Оролцсон тендер               public tenders
+#   Хамаарал бүхий нийтийн ...    public officials whose asset declarations mention the company
+#
+# Rows flagged "(хасагдсан)" were removed from the registry; they are kept in
+# the parsed page but not imported. The registry has no ownership percentages.
+# robots.txt asks for a 10 s crawl delay and disallows /search?query=... and
+# ?page= listings, so the client only requests these per-company pages.
 
-    A resource is imported only if its columns map to a company (name, reg no.
-    or ticker) AND to holders or officers; anything else is skipped and
-    reported, so unrelated datasets never end up in the graph.
+SECTIONS = {
+    "info": ["үндсэн мэдээлэл"],
+    "shareholders": ["хувь эзэмшил", "хувь ззэмшил"],     # the site spells it "ззэмшил"
+    "officers": ["удирдах албан тушаалтан"],
+    "activities": ["үйл ажиллагаа"],
+    "beneficial_owners": ["эцсийн өмчлөгч"],
+    "licenses": ["тусгай зөвшөөрөл"],
+    "tenders": ["оролцсон тендер"],
+    "officials": ["хамаарал бүхий нийтийн албан тушаалтан"],
+}
+INFO_FIELDS = {
+    "нэр": "name", "хэлбэр": "legal_form", "төрөл": "kind", "регистер": "reg_no", "регистр": "reg_no",
+    "үүсгэн байгуулагдсан": "founded", "хаяг": "address", "шинэчлэгдсэн огноо": "updated",
+}
+REMOVED = "хасагдсан"
+_REG_RE = re.compile(r"^\d{6,8}$")
+_EMPTY_DATE = {"0001-01-01", "0000-00-00"}
+# Registry spellings of the state as a shareholder ("Өмч Төр" is typed Иргэн in the source).
+_STATE_NAMES = {"өмч төр", "төр өмч", "төр", "төрийн өмч"}
+
+
+def registry_url(reg_no: str) -> str:
+    return settings.odl_base_url.rstrip("/") + "/search/" + re.sub(r"\D", "", reg_no)
+
+
+def _section_key(title: str) -> str | None:
+    t = clean(title).lower()
+    for key, names in SECTIONS.items():
+        if any(t == n or t.startswith(n) for n in names):
+            return key
+    return None
+
+
+def _grid_rows(body) -> list[dict]:
+    """Rows of a card: either a <table> or Bootstrap div.row/div.col-* grid."""
+    from bs4 import Tag
+
+    table = body.find("table")
+    if table is not None:
+        header = [clean(th.get_text(" ")).lower() for th in table.find_all("th")]
+        out = []
+        for tr in table.find_all("tr"):
+            cells = [clean(td.get_text(" ")) for td in tr.find_all("td")]
+            if cells:
+                out.append({**dict(zip(header, cells)), "_removed": False})
+        return out
+    header: list[str] = []
+    out = []
+    for row in body.find_all("div", class_="row"):
+        cols = [c for c in row.children if isinstance(c, Tag) and
+                any(cl.startswith("col") for cl in c.get("class", []))]
+        if not cols:
+            continue
+        texts = [clean(c.get_text(" ")) for c in cols]
+        if not header:
+            if any("font-weight-bold" in c.get("class", []) for c in cols):
+                header = [t.lower() or f"_col{i}" for i, t in enumerate(texts)]
+            continue
+        rec = dict(zip(header, texts))
+        rec["_removed"] = any(REMOVED in t.lower() for t in texts)
+        out.append(rec)
+    return out
+
+
+def parse_registry_page(html: str) -> dict:
+    """Parse one /search/<reg no> page into {"info": {...}, "<section>": [rows], ...}."""
+    from bs4 import BeautifulSoup, Tag
+
+    soup = BeautifulSoup(html, "lxml")
+    page: dict = {"info": {}}
+    for h in soup.find_all("h5"):
+        key = _section_key(h.get_text(" "))
+        if not key:
+            continue
+        body = h.find_parent("div", class_="card-body") or h.parent
+        if key == "info":
+            for row in body.find_all("div", class_="row"):
+                cols = [c for c in row.children if isinstance(c, Tag)]
+                if len(cols) == 2:
+                    label = clean(cols[0].get_text(" ")).lower()
+                    if label in INFO_FIELDS:
+                        page["info"][INFO_FIELDS[label]] = clean(cols[1].get_text(" "))
+        else:
+            page[key] = _grid_rows(body)
+    return page
+
+
+def _get(rec: dict, *names: str) -> str:
+    for n in names:
+        for k, v in rec.items():
+            if k == n or k.startswith(n):
+                return v
+    return ""
+
+
+def _holder_type(text: str) -> str:
+    t = text.lower()
+    if "хуулийн этгээд" in t or "аж ахуй" in t:
+        return "organization"
+    if "иргэн" in t or "хувь хүн" in t:
+        return "person"
+    return ""
+
+
+def _is_group_row(name: str) -> bool:
+    return is_aggregate(name) or bool(re.search(r"(?<!\w)бусад(?!\w)", name.lower()))
+
+
+def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
+    """Turn a parsed registry page into graph records for company `ticker`."""
+    info = page.get("info", {})
+    own_reg = re.sub(r"\D", "", info.get("reg_no", ""))
+    ds = Dataset(facts=[CompanyFacts(
+        ticker=ticker, reg_no=own_reg, legal_form=info.get("legal_form", ""),
+        founded=info.get("founded", ""), address=info.get("address", ""),
+        registry_name=info.get("name", ""), registry_updated=info.get("updated", ""), registry_url=url)])
+
+    for r in page.get("shareholders", []):
+        name = _get(r, "нэр")
+        if r["_removed"] or not name or _is_group_row(name):
+            continue
+        htype = _holder_type(_get(r, "төрөл"))
+        if name.lower() in _STATE_NAMES:
+            name, htype = "Төрийн өмч", "organization"
+        ds.shareholdings.append(Shareholding(ticker, name, None, None, htype,
+                                             as_of=_get(r, "огноо"), source=url))
+
+    for r in page.get("officers", []):
+        name, title = _get(r, "нэр"), _get(r, "албан тушаал")
+        if r["_removed"] or not name:
+            continue
+        board = re.search(r"туз|төлөөлөн удирдах", title.lower()) and "гүйцэтгэх" not in title.lower()
+        ds.positions.append(Position(ticker, name, title, "board" if board else "executive",
+                                     since=_get(r, "огноо"), source=url))
+
+    for r in page.get("beneficial_owners", []):
+        cat, name = _get(r, "ангилал"), _get(r, "нэр")
+        since = _get(r, "бүртгэсэн")
+        since = "" if since in _EMPTY_DATE else since
+        if not name or r["_removed"]:
+            continue
+        if _REG_RE.match(cat):          # a legal entity, listed by its own reg. no.
+            trail = re.search(r"\s+(\d{6,8})$", name)
+            if cat == own_reg or (trail and trail.group(1) == own_reg):
+                continue                # the company itself, or an entity tagged with its number
+            name = re.sub(r"\s+\d{6,8}$", "", name)
+            otype = "organization"
+        else:
+            otype = _holder_type(cat) or ("organization" if is_organization(name) else "person")
+        ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url))
+    # The page is the registry's complete record of this company: a holder, officer
+    # or owner it no longer lists closes the registry's edge (never mse.mn's).
+    ds.supplementary = True
+    for kind in ("shareholdings", "positions", "beneficial_owners"):
+        ds.mark_snapshot(kind, ticker, url)
+    return ds
+
+
+def fetch_registry_page(reg_no: str, fetcher=None) -> tuple[dict | None, str]:
+    """Download and parse the registry page for `reg_no`. Returns (page or None, url)."""
+    url = registry_url(reg_no)
+    html = (fetcher or _fetcher()).get(url)
+    if not html:
+        return None, url
+    page = parse_registry_page(html)
+    got = re.sub(r"\D", "", page["info"].get("reg_no", ""))
+    if got != re.sub(r"\D", "", reg_no):
+        return None, url                # not an entity page (unknown number, error page, ...)
+    return page, url
+
+
+def enrich_companies(companies: list[tuple[str, str]], fetcher=None,
+                     limit: int | None = None) -> tuple[Dataset, list[dict]]:
+    """Fetch the registry page of each (ticker, reg_no) and collect its records.
+
+    Returns the combined Dataset and a per-company report.
     """
     fetcher = fetcher or _fetcher()
-    lookup = dict(lookup or {})
-    seen: set[str] = set()
-    report: list[dict] = []
-    out = Dataset()
-    for q in queries or DEFAULT_QUERIES:
-        for d in search(q, fetcher=fetcher):
-            for r in d["resources"]:
-                url = r["url"]
-                if url in seen or (r["format"] and r["format"] not in ("csv", "xlsx", "xls", "json")):
-                    continue
-                seen.add(url)
-                entry = {"dataset": d["title"], "url": url, "status": "", "rows": 0}
-                report.append(entry)
-                data = fetcher.get_bytes(url)
-                if data is None:
-                    entry["status"] = "download failed"
-                    continue
-                try:
-                    rows = read_table(data, urlsplit(url).path)
-                except Exception as exc:  # unreadable / unsupported file
-                    entry["status"] = f"unreadable: {exc.__class__.__name__}"
-                    continue
-                if not rows:
-                    entry["status"] = "empty"
-                    continue
-                cols = map_columns(list(rows[0]))
-                kind = detect_kind(cols)
-                has_company = any(k in cols for k in ("company_name", "company_reg", "ticker"))
-                if kind == "companies" or not has_company:
-                    entry["status"] = f"skipped ({kind}, columns: {sorted(cols)})"
-                    continue
-                ds = import_rows(rows, kind=kind, source=f"opendatalab:{d['title'] or url}", lookup=lookup)
-                for c in ds.companies:            # later files resolve to the same unlisted nodes
-                    lookup.setdefault(entity_key(c.name), c.ticker)
-                    if c.reg_no:
-                        lookup.setdefault(f"reg:{c.reg_no}", c.ticker)
-                out.extend(ds)
-                entry["status"], entry["rows"] = f"imported {kind}", len(rows)
+    out, report = Dataset(), []
+    todo = [(t, re.sub(r"\D", "", r or "")) for t, r in companies]
+    todo = [(t, r) for t, r in todo if r]
+    for i, (ticker, reg) in enumerate(todo[:limit] if limit else todo):
+        page, url = fetch_registry_page(reg, fetcher)
+        entry = {"ticker": ticker, "reg_no": reg, "url": url}
+        if page is None:
+            entry["status"] = "not found"
+        else:
+            ds = registry_dataset(page, ticker, url)
+            out.extend(ds)
+            entry.update(status="ok", shareholders=len(ds.shareholdings), officers=len(ds.positions),
+                         beneficial_owners=len(ds.beneficial_owners))
+        log.info("ODL [%d/%d] %s %s: %s", i + 1, len(todo), ticker, reg, entry["status"])
+        report.append(entry)
     return out, report

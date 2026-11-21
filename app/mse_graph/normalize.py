@@ -53,17 +53,30 @@ def is_aggregate(name: str) -> bool:
     return bool(_AGGREGATE_RE.match(n)) and len(n) < 40
 
 
-def entity_key(name: str) -> str:
+_LEGAL_FORM_RE = re.compile(r"(?:\s+(?:ххк|хк|төхк|төк|өхк|ххн|llc|jsc))+$")
+_CYR_WORD_RE = re.compile(r"^[а-яёөү][а-яёөү-]+$")
+
+
+def entity_key(name: str, kind: str = "") -> str:
     """Stable merge key for a person or organisation name.
 
     * case-folded, quotes and punctuation removed
     * for people, tokens are sorted so "Б.Батболд" == "Батболд Б."
+    * a Mongolian "Patronymic Given" name is reduced to the initial form MSE
+      uses, so "Батын Болд" / "Батын.Болд" == "Б.Болд" (the registry and
+      Open Data Lab write the patronymic in full)
+    * `kind="organization"` forces an organisation key for names without a
+      legal-form marker (e.g. a registry row typed "Хуулийн этгээд")
     """
     n = _QUOTES_RE.sub("", clean(name)).casefold()
-    if is_organization(n):
-        n = re.sub(r"[^\w\s]", " ", n)
-        return "org:" + _SPACE_RE.sub(" ", n).strip()
-    tokens = [t for t in re.split(r"[\s.,\-]+", n) if t]
+    if kind.startswith("org") or is_organization(n):
+        n = _SPACE_RE.sub(" ", re.sub(r"[^\w\s]", " ", n)).strip()
+        # "Багануур ХК" (MSE) == "Багануур" (registry): ignore a trailing legal form
+        n = _LEGAL_FORM_RE.sub("", n).strip() or n
+        return "org:" + n
+    tokens = [t.strip("-") for t in re.split(r"[\s.,]+", n) if t.strip("-")]
+    if len(tokens) == 2 and all(_CYR_WORD_RE.match(t) for t in tokens):
+        tokens = [tokens[0][0], tokens[1]]
     return "person:" + " ".join(sorted(tokens))
 
 

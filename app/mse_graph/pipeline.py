@@ -1,8 +1,16 @@
-"""Full data pipeline: wait for Neo4j -> scrape mse.mn -> load -> Open Data Lab -> summary.
+"""Full data pipeline: wait for Neo4j -> scrape mse.mn -> load -> Open Data Lab registry -> summary.
 
 Real-data runs never wipe the graph: each load is compared with the previous
 one, so people who left and stakes that changed are kept as history. Every
 scrape is also archived under data/archive/<date>/ (see csv_io.archive).
+The edges a load opened or closed are its changes (history.run_changes). They
+are logged, reported in the status, and sent as alerts when ALERT_WEBHOOK_URL
+or TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set (notify.py).
+
+Scheduling: at start-up a scrape is skipped if the last full one is less than
+PIPELINE_MIN_INTERVAL_HOURS (default 20) old, so a free instance that keeps
+waking up doesn't scrape each time. PIPELINE_INTERVAL_HOURS repeats the run
+while the process stays up; it only helps on an instance that doesn't sleep.
 
 Used by the all-in-one Render deployment (`deploy/start.sh`), where it runs in
 the background next to the web app. Progress goes to the log and to
@@ -10,6 +18,7 @@ the background next to the web app. Progress goes to the log and to
 
     python -m mse_graph.pipeline            # real data
     PIPELINE_DEMO=1 python -m mse_graph.pipeline
+    PIPELINE_INTERVAL_HOURS=24 python -m mse_graph.pipeline   # run again every 24 hours
 """
 from __future__ import annotations
 
@@ -48,6 +57,21 @@ def read_status() -> dict:
         return {"state": "unknown"}
 
 
+def track(g, loaded: dict, ds, source: str) -> None:
+    """Report what one load changed and send alerts. Never raises."""
+    from . import history, notify
+
+    try:
+        changes = history.run_changes(g, loaded["run"], ds)
+        sent = notify.send(changes) if changes else {"sent": 0, "channels": [], "errors": []}
+        set_status("running", f"{source} changes", changes=len(changes),
+                   significant=sum(1 for c in changes if history.is_significant(c)),
+                   alerted=sent["sent"] if sent["channels"] else 0)
+    except Exception as exc:
+        set_status("running", f"{source} change tracking failed", error=str(exc))
+        log.error(traceback.format_exc())
+
+
 def wait_for_neo4j(timeout: int = 600):
     from .graph import Graph
 
@@ -74,7 +98,27 @@ def wait_for_neo4j(timeout: int = 600):
             time.sleep(3)
 
 
-def run() -> None:
+def run_forever() -> None:
+    """Run the pipeline, then again every PIPELINE_INTERVAL_HOURS (if set).
+
+    Demo and discovery runs happen once. A failed run is retried at the next interval.
+    """
+    hours = float(os.getenv("PIPELINE_INTERVAL_HOURS", "0") or 0)
+    first = True
+    while True:
+        run(force=not first)       # scheduled re-runs ignore PIPELINE_MIN_INTERVAL_HOURS
+        first = False
+        if hours <= 0 or os.getenv("PIPELINE_DEMO") == "1":
+            return
+        _status["next_run"] = datetime.fromtimestamp(time.time() + hours * 3600, timezone.utc).isoformat(
+            timespec="seconds")
+        set_status(_status["state"])
+        time.sleep(hours * 3600)
+
+
+def run(force: bool = False) -> None:
+    _status["steps"] = []          # each run reports its own progress
+    _status.pop("next_run", None)
     if os.getenv("DISCOVER") == "1":
         set_status("running", "discovering site structure")
         from . import discover
@@ -97,7 +141,7 @@ def run() -> None:
             else:
                 g.wipe()
                 set_status("running", "loaded demo data", stats=g.load(csv_io.read_dir("data/sample")))
-        elif since is not None and since < min_hours and os.getenv("PIPELINE_FORCE") != "1":
+        elif since is not None and since < min_hours and os.getenv("PIPELINE_FORCE") != "1" and not force:
             # A free instance restarts whenever it wakes up; with a persistent database
             # there is no need to scrape mse.mn again each time.
             set_status("running", f"skipped scrape: last one {since:.1f} h ago "
@@ -116,27 +160,29 @@ def run() -> None:
                 if g.drop_demo_data():
                     set_status("running", "removed demo data")
                 set_status("running", "scraped mse.mn", **ds.summary())
-                set_status("running", "loaded mse.mn", stats=g.load(ds))
+                loaded = g.load(ds)
+                set_status("running", "loaded mse.mn", stats=loaded)
                 if not limit:
                     g.mark_scrape()
+                track(g, loaded, ds, "mse")
             except Exception as exc:
                 set_status("running", "mse.mn scrape failed", error=str(exc))
                 log.error(traceback.format_exc())
 
-            set_status("running", "importing Open Data Lab")
-            if os.getenv("ODL_ENABLE") != "1":
-                set_status("running", "Open Data Lab skipped (set ODL_ENABLE=1)")
+            set_status("running", "importing Open Data Lab registry")
+            if os.getenv("ODL_ENABLE", "1") == "0":
+                set_status("running", "Open Data Lab skipped (ODL_ENABLE=0)")
             else:
                 try:
-                    ods, report = opendatalab.auto_import(lookup=g.company_lookup())
-                    for e in report:
-                        log.info("ODL %-40s %s  %s", e["status"], e["dataset"][:60], e["url"])
+                    companies = g.companies_with_reg()
+                    ods, report = opendatalab.enrich_companies(companies, limit=limit)
                     ods.observed_at = ods.observed_at or date.today().isoformat()
                     csv_io.write_dir(ods, "data/opendatalab")
                     csv_io.archive(ods, part="opendatalab")
-                    set_status("running", "loaded Open Data Lab", datasets=len(report),
-                               imported=sum(1 for e in report if e["status"].startswith("imported")),
-                               stats=g.load(ods))
+                    loaded = g.load(ods)
+                    set_status("running", "loaded Open Data Lab registry", companies=len(report),
+                               found=sum(1 for e in report if e["status"] == "ok"), stats=loaded)
+                    track(g, loaded, ods, "opendatalab")
                 except Exception as exc:
                     set_status("running", "Open Data Lab import failed", error=str(exc))
                     log.error(traceback.format_exc())
@@ -153,4 +199,4 @@ def run() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    run()
+    run_forever()

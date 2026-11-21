@@ -2,17 +2,24 @@
 
     python -m mse_graph.cli scrape   [--limit N] [--out data/scraped]
     python -m mse_graph.cli parse-html <dir> [--out data/scraped]
-    python -m mse_graph.cli load     <csv-dir> [--wipe] [--date YYYY-MM-DD]
+    python -m mse_graph.cli load     <csv-dir> [--wipe] [--date YYYY-MM-DD] [--notify]
     python -m mse_graph.cli stats
     python -m mse_graph.cli history  <name-or-ticker>      current and past positions / stakes
     python -m mse_graph.cli moves                          people who moved between listed companies
-    python -m mse_graph.cli changes  --since YYYY-MM-DD    who joined / left, which stakes changed
+    python -m mse_graph.cli changes  [--since YYYY-MM-DD] [--ticker T] [--all] [--json]
+                                                           who joined / left, which stakes changed
+    python -m mse_graph.cli ownership-history <TICKER>     shareholder percentages over time
+    python -m mse_graph.cli diff     <old-csv-dir> <new-csv-dir>   compare two scrapes, nothing saved
     python -m mse_graph.cli rebuild-history [data/archive] wipe and replay every archived scrape
     python -m mse_graph.cli interlocks | common-owners | board-overlap
     python -m mse_graph.cli owners   <TICKER>
     python -m mse_graph.cli path     <name-or-ticker> <name-or-ticker>
-    python -m mse_graph.cli odl-search <query>
+    python -m mse_graph.cli odl-company <REG_NO>
+    python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--load]
     python -m mse_graph.cli odl-import <file-or-url> [--kind auto|shareholders|executives|companies] [--load]
+    python -m mse_graph.cli cycles | cross-holdings | state
+    python -m mse_graph.cli conflicts [--kind insider_owner|competitor|related_party]
+    python -m mse_graph.cli flags    <TICKER>
 
 Set MSE_PROXY_URL / MSE_PROXY_TOKEN to route all downloads through the fetch proxy.
 """
@@ -21,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -63,11 +71,11 @@ def main(argv=None):
     p.add_argument("dir")
     p.add_argument("--wipe", action="store_true", help="delete the existing graph (and its history) first")
     p.add_argument("--date", help="observation date to record (default: the data's manifest, else today)")
+    p.add_argument("--notify", action="store_true",
+                   help="print what this load changed and send significant changes to the alert channels")
     p = sub.add_parser("history", help="current and past positions / stakes of a person or company")
     p.add_argument("q")
     sub.add_parser("moves", help="people who used to work at one listed company and now at another")
-    p = sub.add_parser("changes", help="positions / stakes that started or ended since a date")
-    p.add_argument("--since", required=True, help="YYYY-MM-DD")
     p = sub.add_parser("rebuild-history", help="wipe the graph and replay every archived scrape in order")
     p.add_argument("root", nargs="?", default="data/archive")
 
@@ -75,14 +83,30 @@ def main(argv=None):
     sub.add_parser("interlocks")
     sub.add_parser("common-owners")
     sub.add_parser("board-overlap")
+    sub.add_parser("cycles", help="ownership loops (A owns B owns ... owns A)")
+    sub.add_parser("cross-holdings", help="listed companies holding shares in listed companies")
+    sub.add_parser("state", help="companies with state / municipal owners, direct and look-through")
+    p = sub.add_parser("conflicts", help="insider owners, same-sector ties, related parties")
+    p.add_argument("--kind", choices=["insider_owner", "competitor", "related_party"])
+    p.add_argument("--min-stake", type=float, default=5.0, help="stake that counts as influence (%%)")
+    p = sub.add_parser("flags", help="governance flags for one company")
+    p.add_argument("ticker")
     p = sub.add_parser("owners", help="look-through (ultimate) owners of a company")
     p.add_argument("ticker")
     p = sub.add_parser("path", help="shortest connection between two entities")
     p.add_argument("a")
     p.add_argument("b")
 
-    p = sub.add_parser("odl-search", help="list Open Data Lab Mongolia datasets")
-    p.add_argument("query", nargs="?", default="")
+    p = sub.add_parser("odl-company", help="show one company's Open Data Lab registry page, parsed")
+    p.add_argument("reg_no")
+    p.add_argument("--raw", action="store_true", help="print every parsed section, not just graph records")
+    p = sub.add_parser("odl-enrich",
+                       help="add Open Data Lab registry data (owners, officers, UBOs) for companies with a reg. no.")
+    p.add_argument("--from", dest="src", metavar="CSV_DIR",
+                   help="take companies from this CSV directory (default: from Neo4j)")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--out", default="data/opendatalab")
+    p.add_argument("--load", action="store_true", help="also load into Neo4j")
     p = sub.add_parser("odl-import", help="import an Open Data Lab dataset file (CSV/XLSX/JSON)")
     p.add_argument("src", help="local path or URL")
     p.add_argument("--kind", default="auto", choices=["auto", "shareholders", "executives", "companies"])
@@ -91,10 +115,18 @@ def main(argv=None):
     p.add_argument("--out", default="data/opendatalab")
     p.add_argument("--load", action="store_true", help="also load into Neo4j")
 
-    p = sub.add_parser("odl-auto", help="search Open Data Lab and import ownership/officer tables")
-    p.add_argument("queries", nargs="*", help="search terms (default: built-in Mongolian/English list)")
-    p.add_argument("--out", default="data/opendatalab")
-    p.add_argument("--load", action="store_true")
+    p = sub.add_parser("changes", help="who joined / left and which stakes changed, newest first")
+    p.add_argument("--ticker")
+    p.add_argument("--source", help="mse, opendatalab, ...")
+    p.add_argument("--since", help="YYYY-MM-DD (default: all)")
+    p.add_argument("--all", action="store_true", help="include small stake moves")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("ownership-history", help="shareholder percentages of a company over time")
+    p.add_argument("ticker")
+    p = sub.add_parser("diff", help="compare two CSV dirs without saving anything")
+    p.add_argument("old")
+    p.add_argument("new")
+    p.add_argument("--json", action="store_true")
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
@@ -102,7 +134,12 @@ def main(argv=None):
 
     if args.cmd in ("scrape", "parse-html"):
         from . import scraper
-        ds = scraper.crawl(limit=args.limit) if args.cmd == "scrape" else scraper.parse_html_dir(args.dir)
+        if args.cmd == "scrape":
+            # same crawler as the pipeline: mse.mn company list + open.mse.mn profiles
+            crawl = scraper.crawl if os.getenv("MSE_SOURCE") == "legacy" else scraper.crawl_open
+            ds = crawl(limit=args.limit)
+        else:
+            ds = scraper.parse_html_dir(args.dir)
         csv_io.write_dir(ds, args.out)
         print(f"wrote {args.out}: {ds.summary()}")
         if getattr(args, "archive", "") and ds.observed_at:
@@ -113,27 +150,47 @@ def main(argv=None):
                 _print(g.load(ds))
         return
 
-    if args.cmd == "odl-search":
-        from . import opendatalab
-        for d in opendatalab.search(args.query):
-            print(f"\n{d['title']}  [{d['organization']}]  id={d['id']}")
-            for r in d["resources"]:
-                print(f"   {r['format'] or '?':5} {r['name']}\n         {r['url']}")
+    if args.cmd == "diff":
+        from . import history
+        _print_changes(history.diff(csv_io.read_dir(args.old), csv_io.read_dir(args.new)), args.json)
         return
 
-    if args.cmd == "odl-auto":
+    if args.cmd == "odl-company":
         from . import opendatalab
-        g = _graph() if args.load else None
+        page, url = opendatalab.fetch_registry_page(args.reg_no)
+        if page is None:
+            sys.exit(f"no registry page for {args.reg_no} ({url})")
+        if args.raw:
+            _print(page)
+        else:
+            ds = opendatalab.registry_dataset(page, page["info"].get("reg_no", args.reg_no), url)
+            _print({"url": url, "info": page["info"],
+                    "shareholders": [s.__dict__ for s in ds.shareholdings],
+                    "officers": [p.__dict__ for p in ds.positions],
+                    "beneficial_owners": [b.__dict__ for b in ds.beneficial_owners],
+                    "other_sections": {k: len(v) for k, v in page.items()
+                                       if k not in ("info", "shareholders", "officers", "beneficial_owners")}})
+        return
+
+    if args.cmd == "odl-enrich":
+        from . import opendatalab
+        g = _graph() if (args.load or not args.src) else None
         try:
-            ds, report = opendatalab.auto_import(args.queries or None,
-                                                 lookup=g.company_lookup() if g else None)
+            if args.src:
+                companies = [(c.ticker, c.reg_no) for c in csv_io.read_dir(args.src).companies]
+            else:
+                companies = g.companies_with_reg()
+            print(f"{sum(1 for _, r in companies if r)} companies have a registration number")
+            ds, report = opendatalab.enrich_companies(companies, limit=args.limit)
             for e in report:
-                print(f"{e['status']:<40} {e['dataset'][:50]}  {e['url']}")
+                print(f"{e['ticker']:<8} {e['reg_no']:<9} {e['status']:<10} "
+                      f"{e.get('shareholders', '')!s:>3} sh {e.get('officers', '')!s:>3} off "
+                      f"{e.get('beneficial_owners', '')!s:>3} ubo  {e['url']}")
             ds.observed_at = ds.observed_at or date.today().isoformat()
             csv_io.write_dir(ds, args.out)
             print(f"wrote {args.out}: {ds.summary()}")
             print(f"archived to {csv_io.archive(ds, part='opendatalab')}")
-            if g:
+            if g and args.load:
                 _print(g.load(ds))
         finally:
             if g:
@@ -163,7 +220,17 @@ def main(argv=None):
                 g.wipe()
             elif not csv_io.is_demo(ds) and g.drop_demo_data():
                 print("removed the demo data before loading real data", file=sys.stderr)
-            _print(g.load(ds, observed_at=args.date))
+            res = g.load(ds, observed_at=args.date)
+            if not args.notify:
+                _print(res)
+            else:
+                from . import history, notify
+                changes = history.run_changes(g, res["run"], ds)
+                print(f"{len(changes)} changes", file=sys.stderr)
+                _print_changes(changes)
+                r = notify.send(changes)
+                print(f"alerts: {r['sent']} sent via {', '.join(r['channels']) or 'no channel configured'}"
+                      + (f"; errors: {r['errors']}" if r["errors"] else ""), file=sys.stderr)
         elif args.cmd == "rebuild-history":
             dirs = csv_io.archived_snapshots(args.root)
             if not dirs:
@@ -183,8 +250,8 @@ def main(argv=None):
                     "past": e["history"]})
         elif args.cmd == "moves":
             _print(g.moves())
-        elif args.cmd == "changes":
-            _print(g.changes(args.since))
+        elif args.cmd in ("changes", "ownership-history"):
+            _history_cmd(g, args)
         elif args.cmd == "stats":
             _print(g.stats())
         elif args.cmd == "interlocks":
@@ -193,10 +260,64 @@ def main(argv=None):
             _print(g.common_owners())
         elif args.cmd == "board-overlap":
             _print(g.board_overlap())
+        elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
+            from . import analysis
+            if args.cmd == "cycles":
+                for c in analysis.cycles(g):
+                    ring = [n["ticker"] or n["name"] for n in c["companies"]]
+                    pcts = " → ".join(f"{a} ({p:g}%)" if p is not None else a
+                                      for a, p in zip(ring, c["percents"]))
+                    loop = f"   loop {c['loop_percent']:g}%" if c["loop_percent"] is not None else ""
+                    print(f"{pcts} → {ring[0]}{loop}")
+            elif args.cmd == "cross-holdings":
+                for x in analysis.cross_holdings(g):
+                    back = f"   (reverse {x['reverse_percent']:g}%)" if x["reverse_percent"] is not None else ""
+                    pct = f"{x['percent']:g}%" if x["percent"] is not None else "?"
+                    print(f"{x['holder']:<6} owns {pct:>7} of {x['company']}{back}")
+            elif args.cmd == "state":
+                for s in analysis.state_ownership(g):
+                    print(f"{s['ticker'] or s['name']:<8} direct {s['direct_percent']:>7g}%"
+                          f"   look-through {s['lookthrough_percent']:>7g}%")
+            elif args.cmd == "conflicts":
+                _print(analysis.conflicts(g, args.kind, args.min_stake))
+            else:
+                for f in analysis.company_flags(g, args.ticker):
+                    print(f"{'!' if f['level'] == 'warn' else '-'} {f['text']}")
         elif args.cmd == "owners":
             _print(g.ultimate_owners(args.ticker))
         elif args.cmd == "path":
             _print(g.shortest_path(_resolve(g, args.a), _resolve(g, args.b)))
+
+
+def _print_changes(changes, as_json=False):
+    from .notify import describe
+    if as_json:
+        _print(changes)
+        return
+    if not changes:
+        print("no changes")
+        return
+    for c in changes:
+        when = c.get("detected_at", "")[:10]
+        print(f"{when:<10} {c['ticker']:<6} {describe(c)}")
+
+
+def _history_cmd(g, args):
+    from . import history
+
+    if args.cmd == "changes":
+        _print_changes(history.recent_changes(g, source=args.source, ticker=args.ticker, since=args.since,
+                                              significant_only=not args.all, limit=5000), args.json)
+        return
+    tl = history.ownership_timeline(g, args.ticker)
+    if not tl["points"]:
+        sys.exit(f"no shareholders recorded for {args.ticker.upper()}")
+    dates = [p["taken_at"] for p in tl["points"]]          # when the scraper saw each state
+    width = max(len(h["name"]) for h in tl["holders"])
+    print(" " * width + "  " + "  ".join(f"{d:>10}" for d in dates))
+    for h in tl["holders"]:
+        cells = "  ".join(f"{'—' if v is None else f'{v:g}%':>10}" for v in h["values"])
+        print(f"{h['name']:<{width}}  {cells}")
 
 
 if __name__ == "__main__":

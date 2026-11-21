@@ -6,6 +6,7 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -26,7 +27,7 @@ async def lifespan(_app):
         from . import pipeline
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-        threading.Thread(target=pipeline.run, name="pipeline", daemon=True).start()
+        threading.Thread(target=pipeline.run_forever, name="pipeline", daemon=True).start()
     yield
     if _graph:
         _graph.close()
@@ -119,6 +120,62 @@ def ultimate_owners(ticker: str, max_depth: int = 5, min_percent: float = 1.0):
     return g().ultimate_owners(ticker, max_depth, min_percent)
 
 
+# ---- history / changes (read from the graph's edge history, see history.py) --------
+
+def _ts(day: str) -> str:
+    """Observation date -> RFC 3339 timestamp for Atom."""
+    return (day or "1970-01-01")[:10] + "T00:00:00Z"
+
+
+@app.get("/api/changes")
+def changes(ticker: str | None = None, key: str | None = None, source: str | None = None,
+            since: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}"),
+            all_: bool = Query(False, alias="all"), limit: int = Query(200, le=2000)):
+    """Detected changes, newest first. Small moves and data gaps are hidden unless all=true."""
+    from . import history
+    return history.recent_changes(g(), source=source, ticker=ticker, key=key, since=since,
+                                  significant_only=not all_, limit=limit)
+
+
+@app.get("/api/companies/{ticker}/ownership-history")
+def ownership_history(ticker: str):
+    from . import history
+    return history.ownership_timeline(g(), ticker)
+
+
+@app.get("/feed.xml", include_in_schema=False)
+def feed(request: Request, ticker: str | None = None, limit: int = Query(100, le=500)):
+    """Atom feed of significant changes, for feed readers or chat integrations."""
+    from . import history
+    from .notify import describe
+
+    items = history.recent_changes(g(), ticker=ticker, significant_only=True, limit=limit)
+    base = str(request.base_url).rstrip("/")
+    updated = _ts(items[0]["detected_at"]) if items else _ts("")
+    title = "MSE граф: өөрчлөлтүүд" + (f" · {ticker.upper()}" if ticker else "")
+    entries = []
+    for c in items:
+        line = f"{c['ticker']}: {describe(c)}"
+        uid = "|".join(str(c.get(k, "")) for k in ("detected_at", "source", "kind", "ticker", "entity_key", "old", "new"))
+        entries.append(
+            "<entry>"
+            f"<id>urn:mse-graph:{xml_escape(uid)}</id>"
+            f"<title>{xml_escape(line)}</title>"
+            f"<updated>{xml_escape(_ts(c['detected_at']))}</updated>"
+            f'<link href="{xml_escape(base)}/?focus=company:{xml_escape(c["ticker"])}"/>'
+            f"<category term=\"{xml_escape(c['kind'])}\"/>"
+            f"<content type=\"text\">{xml_escape(c.get('company', '') + ' — ' + describe(c))}</content>"
+            "</entry>"
+        )
+    xml = ('<?xml version="1.0" encoding="utf-8"?>'
+           '<feed xmlns="http://www.w3.org/2005/Atom">'
+           f"<title>{xml_escape(title)}</title><id>urn:mse-graph:feed:{xml_escape(ticker or 'all')}</id>"
+           f"<updated>{xml_escape(updated)}</updated>"
+           f'<link rel="self" href="{xml_escape(str(request.url))}"/>'
+           + "".join(entries) + "</feed>")
+    return Response(xml, media_type="application/atom+xml")
+
+
 @app.get("/api/analysis/interlocks")
 def interlocks(min_companies: int = 2):
     return g().interlocks(min_companies)
@@ -140,7 +197,34 @@ def moves():
     return g().moves()
 
 
-@app.get("/api/changes")
-def changes(since: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"), limit: int = 500):
-    """Positions and stakes that started or ended on or after `since`."""
-    return g().changes(since, limit)
+# ---- governance checks (analysis.py) ---------------------------------------------
+
+@app.get("/api/analysis/cycles")
+def cycles(max_len: int = 6):
+    from . import analysis
+    return analysis.cycles(g(), max_len)
+
+
+@app.get("/api/analysis/cross-holdings")
+def cross_holdings():
+    from . import analysis
+    return analysis.cross_holdings(g())
+
+
+@app.get("/api/analysis/conflicts")
+def conflicts(kind: str | None = Query(None, pattern="^(insider_owner|competitor|related_party)$"),
+              min_stake: float = 5.0):
+    from . import analysis
+    return analysis.conflicts(g(), kind, min_stake)
+
+
+@app.get("/api/analysis/state-ownership")
+def state_ownership():
+    from . import analysis
+    return analysis.state_ownership(g())
+
+
+@app.get("/api/companies/{ticker}/flags")
+def company_flags(ticker: str, min_stake: float = 5.0):
+    from . import analysis
+    return analysis.company_flags(g(), ticker, min_stake)

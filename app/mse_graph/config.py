@@ -35,8 +35,8 @@ class Settings:
     proxy_url: str = field(default_factory=lambda: os.getenv("MSE_PROXY_URL", ""))
     proxy_token: str = field(default_factory=lambda: os.getenv("MSE_PROXY_TOKEN", ""))
 
-    # Open Data Lab Mongolia
-    odl_base_url: str = field(default_factory=lambda: os.getenv("ODL_BASE_URL", "https://opendatalab.mn"))
+    # Open Data Lab Mongolia. The bare domain often times out; the www host answers.
+    odl_base_url: str = field(default_factory=lambda: os.getenv("ODL_BASE_URL", "https://www.opendatalab.mn"))
 
 
 settings = Settings()
