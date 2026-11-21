@@ -662,10 +662,16 @@ def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
     return ds
 
 
-def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None) -> Dataset:
+def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None,
+               shard: tuple[int, int] | None = None) -> Dataset:
+    from . import shard as sharding
+
     fetcher = fetcher or Fetcher()
     companies = list_companies_api(fetcher)
     log.info("company list: %d companies", len(companies))
+    if shard:
+        companies = sharding.select(companies, shard, key=lambda c: c.ticker)
+        log.info("shard %d/%d: %d companies", shard[0], shard[1], len(companies))
     ds = Dataset(observed_at=date.today().isoformat())
     for i, c in enumerate(companies[:limit] if limit else companies):
         page = Dataset(companies=[c])

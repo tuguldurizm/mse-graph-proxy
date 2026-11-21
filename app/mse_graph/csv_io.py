@@ -3,8 +3,8 @@
 CSV is the hand-off format between the scraper (or manual research from
 annual reports / FRC filings) and the Neo4j loader. A data directory holds:
 
-    companies.csv      ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url
-    shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source
+    companies.csv      ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url,other_names
+    shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source,holder_ticker
     executives.csv     company_ticker,person_name,title,role,since,until,source
     manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}, "supplementary": true}   (optional)
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import json
 import re
 from dataclasses import fields
@@ -147,6 +148,28 @@ def archived_snapshots(root: str | Path = "data/archive") -> list[Path]:
             out.append(day)
         out += sorted(p for p in day.iterdir() if p.is_dir())
     return out
+
+
+MANUAL_ROOT = "data/manual"
+
+
+def manual_dirs(root: str | Path = MANUAL_ROOT) -> list[Path]:
+    """Hand-curated datasets kept in the repository, one sub-directory each
+    (e.g. data/manual/shunkhlai), in name order."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return [d for d in sorted(root.iterdir())
+            if d.is_dir() and any((d / fname).exists() for fname, _ in FILES.values())]
+
+
+def dir_digest(path: str | Path) -> str:
+    """Fingerprint of a data directory's files, to tell whether it changed since it was loaded."""
+    h = hashlib.sha1()
+    for f in sorted(Path(path).iterdir()):
+        if f.is_file() and (f.name in {fname for fname, _ in FILES.values()} | {MANIFEST}):
+            h.update(f.name.encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
 
 
 def is_demo(ds: Dataset) -> bool:

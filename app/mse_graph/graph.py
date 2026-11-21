@@ -132,12 +132,17 @@ def company_key(ticker: str) -> str:
 
 class Graph:
     def __init__(self, uri=None, user=None, password=None, database=None):
-        self.driver = GraphDatabase.driver(
-            uri or settings.neo4j_uri,
-            auth=(user or settings.neo4j_user, password or settings.neo4j_password),
-            notifications_min_severity="OFF",
-        )
+        uri = uri or settings.neo4j_uri
+        auth = (user or settings.neo4j_user, password or settings.neo4j_password)
         self.database = database or settings.neo4j_database or None   # None: server default
+        if uri.startswith(("http://", "https://")):
+            # Query API over HTTPS, for environments that can't open Bolt (port 7687)
+            from .http_driver import HttpDriver
+            self.driver = HttpDriver(uri, auth, database=self.database)
+            self.http = True
+        else:
+            self.driver = GraphDatabase.driver(uri, auth=auth, notifications_min_severity="OFF")
+            self.http = False
 
     def close(self):
         self.driver.close()
@@ -154,6 +159,8 @@ class Graph:
             yield s
 
     def run(self, cypher: str, **params) -> list[dict[str, Any]]:
+        if self.http:
+            return self.driver.run(cypher, params)
         with self.session() as s:
             return [r.data() for r in s.run(cypher, **params)]
 
@@ -225,6 +232,27 @@ class Graph:
                            RETURN duration.inSeconds(m.last_scrape, datetime()).seconds / 3600.0 AS h""")
         return rows[0]["h"] if rows else None
 
+    def manual_digest(self, name: str) -> str | None:
+        """Fingerprint of the hand-curated dataset `name` as last loaded (see pipeline.load_manual)."""
+        rows = self.run("MATCH (m:Meta {key: $k}) RETURN m.digest AS d", k="manual:" + name)
+        return rows[0]["d"] if rows else None
+
+    def mark_manual(self, name: str, digest: str) -> None:
+        self.run("MERGE (m:Meta {key: $k}) SET m.digest = $d, m.loaded_at = datetime()",
+                 k="manual:" + name, d=digest)
+
+    def mark_baseline(self, run: str) -> int:
+        """Mark the edges a load opened as a baseline, so they are not reported as changes."""
+        return self.run(
+            """MATCH ()-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {opened_run: $run}]->()
+               SET r.baseline = true RETURN count(r) AS n""", run=run)[0]["n"]
+
+    def missing_tickers(self, tickers) -> set[str]:
+        """Those of `tickers` that have no :Company node."""
+        rows = self.run("UNWIND $t AS t OPTIONAL MATCH (c:Company {ticker: t}) "
+                        "WITH t, c WHERE c IS NULL RETURN t", t=sorted(tickers))
+        return {r["t"] for r in rows}
+
     def drop_demo_data(self) -> bool:
         """Remove the fictional demo graph before real data is loaded on top of it."""
         if not self.has_demo_data():
@@ -247,8 +275,11 @@ class Graph:
         run = run or new_run_id()
         companies = []
         for c in ds.companies:
+            others = [n.strip() for n in (c.other_names or "").split("|") if n.strip()]
             aliases = sorted({entity_key(n) for n in (c.name, c.name_en) if n} |
-                             {entity_key(n) for n in _org_variants(c.name)})
+                             {entity_key(n) for n in _org_variants(c.name)} |
+                             # a bare former name ("Шунхлайгрупп") has no legal-form marker
+                             {entity_key(n, k) for n in others for k in ("", "organization")})
             companies.append({**c.__dict__, "ticker": c.ticker.upper(),
                               "key": company_key(c.ticker), "aliases": aliases})
         self.run(
@@ -298,32 +329,49 @@ class Graph:
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
         snaps = {t.upper(): p for t, p in ds.snapshots.get("shareholdings", {}).items()}
         fresh = self._new_sources("OWNS", snaps)
+        # "holdings" snapshots are keyed by the holder: a company's own list of its
+        # stakes in other companies (subsidiaries, associates)
+        hsnaps = {t.upper(): p for t, p in ds.snapshots.get("holdings", {}).items()}
+        fresh_holders = self._new_holders(hsnaps)
 
         by_pair: dict[tuple, dict] = {}
+        held: dict[str, list[str]] = {t: [] for t in hsnaps}   # holder -> targets it reported
         for h in ds.shareholdings:
             name = clean(h.holder_name)
             if not name or is_aggregate(name):
                 continue  # "Бусад" / "Others" / totals are not real holders
+            holder = h.holder_ticker.upper()
             key = entity_key(name, h.holder_type)
-            if key in alias_map or entity_key(name) in alias_map:
+            if holder:
+                key, label = company_key(holder), "Company"
+            elif key in alias_map or entity_key(name) in alias_map:
                 key, label = alias_map.get(key) or alias_map[entity_key(name)], "Company"
             else:
                 htype = h.holder_type or ("organization" if is_organization(name) else "person")
                 label = "Organization" if htype.startswith("org") else "Person"
             ticker = h.company_ticker.upper()
             prefix = snaps.get(ticker)
+            in_holdings = holder in hsnaps and _under(h.source, hsnaps[holder])
+            if in_holdings:
+                held[holder].append(ticker)
             row = {
                 "ticker": ticker, "key": key, "name": name, "label": label,
                 "percent": h.percent, "shares": h.shares, "as_of": _opt(parse_date(h.as_of)),
                 "source": h.source,
                 # rows from a complete snapshot of the company define its current owners
                 "in_snapshot": prefix is not None and _under(h.source, prefix),
-                "baseline": ticker in fresh,
+                "in_holdings": in_holdings,
             }
-            # ... and, unless the source only supplements others, may take edges over
-            row["authoritative"] = row["in_snapshot"] and not ds.supplementary
+            # what a source reports the first time it covers a company is not a change
+            row["baseline"] = ((row["in_snapshot"] and ticker in fresh)
+                               or (in_holdings and holder in fresh_holders))
+            # ... and, unless the source only supplements others, may take edges over.
+            # A holder's complete list of its own stakes counts too, below the target's
+            # own shareholder table, which wins when both list the same stake.
+            row["rank"] = 2 if row["in_snapshot"] else 1 if in_holdings else 0
+            row["authoritative"] = row["rank"] > 0 and not ds.supplementary
             prev = by_pair.get((ticker, key))
-            if prev is None or row["in_snapshot"] or not prev["in_snapshot"]:
+            if prev is None or row["rank"] >= prev["rank"]:
                 by_pair[(ticker, key)] = row   # one row per holder and company
         holdings = list(by_pair.values())
 
@@ -407,8 +455,33 @@ class Graph:
             """,
             scopes=scopes, when=when, run=run,
         )[0]["n"]
+        # Stakes missing from a company's complete list of its own stakes were sold.
+        # As above, an empty list closes nothing.
+        scopes = [{"ticker": t, "prefix": hsnaps[t], "under": hsnaps[t].rstrip("/") + "/", "seen": seen_}
+                  for t, seen_ in held.items() if seen_]
+        closed += self.run(
+            """
+            UNWIND $scopes AS s
+            MATCH (c:Company {ticker: s.ticker})-[o:OWNS {current: true}]->(t:Company)
+            WHERE (o.source = s.prefix OR o.source STARTS WITH s.under) AND NOT t.ticker IN s.seen
+            SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
+            RETURN count(o) AS n
+            """,
+            scopes=scopes, when=when, run=run,
+        )[0]["n"]
+        # from now on, new stakes of these companies are changes, not their baseline
+        self.run("UNWIND $t AS t MATCH (c:Company {ticker: t}) SET c.holdings_first_seen = $when",
+                 t=sorted(fresh_holders), when=when)
         return {"ownerships_opened": res["opened"], "ownerships_changed": res["changed"],
                 "ownerships_closed": closed, "ownerships_conflicting": res["conflicting"]}
+
+    def _new_holders(self, hsnaps: dict[str, str]) -> set[str]:
+        """Companies whose own list of stakes in other companies is read for the first time."""
+        if not hsnaps:
+            return set()
+        rows = self.run("UNWIND $t AS t MATCH (c:Company {ticker: t}) WHERE c.holdings_first_seen IS NULL "
+                        "RETURN c.ticker AS t", t=list(hsnaps))
+        return {r["t"] for r in rows}
 
     def _load_positions(self, ds: Dataset, when: str, run: str) -> dict:
         snaps = {t.upper(): p for t, p in ds.snapshots.get("positions", {}).items()}

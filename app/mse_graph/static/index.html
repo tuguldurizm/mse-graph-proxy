@@ -180,14 +180,16 @@ async function showDetails(d) {
   if (flags.length) html += `<h2>Анхаарах зүйлс</h2><ul>${flags.map(f =>
     `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`;
   const pct = p => p != null ? `${p}%` : '';
+  // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
+  const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
   const reg = o => o.percent == null && /opendatalab/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
   html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}</span><span>${pct(o.percent)}${reg(o)}</span>`);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
-               b => `<span>${esc(b.ticker || b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
+               b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
-  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(h.ticker || h.name)}</span><span>${pct(h.percent)}</span>`);
+  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}</span><span>${pct(h.percent)}</span>`);
   html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
@@ -197,7 +199,7 @@ async function showDetails(d) {
   html += list('Өмнөх хувьцаа эзэмшигчид', h.owners,
                o => `<span>${esc(o.name)} ${pct(o.percent)}</span>${period(o)}`);
   html += list('Өмнө эзэмшиж байсан', h.holdings,
-               x => `<span>${esc(x.ticker || x.name)} ${pct(x.percent)}</span>${period(x)}`);
+               x => `<span>${esc(co(x))} ${pct(x.percent)}</span>${period(x)}`);
   html += list('Өмнөх эцсийн өмчлөгч (бүртгэл)', h.beneficial_owners,
                b => `<span>${esc(b.name)}</span>${period(b)}`);
   html += list('Өмнөх албан тушаал', h.positions,

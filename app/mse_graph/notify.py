@@ -66,7 +66,8 @@ def format_message(changes: list[dict], max_items: int | None = None) -> str:
     for t, cs in sorted(by_co.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         if shown >= max_items:
             break
-        lines.append(f"\n{t} · {cs[0].get('company', t)}")
+        name = cs[0].get("company", t)
+        lines.append(f"\n{name}" if t.startswith("~") else f"\n{t} · {name}")   # unlisted: no ticker
         for c in cs:
             if shown >= max_items:
                 break

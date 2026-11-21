@@ -1,6 +1,6 @@
 """Command line entry point.
 
-    python -m mse_graph.cli scrape   [--limit N] [--out data/scraped]
+    python -m mse_graph.cli scrape   [--limit N] [--shard K/N|auto] [--out data/scraped]
     python -m mse_graph.cli parse-html <dir> [--out data/scraped]
     python -m mse_graph.cli load     <csv-dir> [--wipe] [--date YYYY-MM-DD] [--notify]
     python -m mse_graph.cli stats
@@ -15,7 +15,7 @@
     python -m mse_graph.cli owners   <TICKER>
     python -m mse_graph.cli path     <name-or-ticker> <name-or-ticker>
     python -m mse_graph.cli odl-company <REG_NO>
-    python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--load]
+    python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--shard K/N|auto] [--load]
     python -m mse_graph.cli odl-import <file-or-url> [--kind auto|shareholders|executives|companies] [--load]
     python -m mse_graph.cli egress-check [--reg REG_NO]   fetch one registry page through each opendatalab.mn route
     python -m mse_graph.cli cycles | cross-holdings | state
@@ -55,6 +55,9 @@ def _print(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
 
 
+SHARD_HELP = "only slice K/N of the companies, or 'auto' = today's slice of 7 (all covered in a week)"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="mse_graph")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -62,6 +65,7 @@ def main(argv=None):
 
     p = sub.add_parser("scrape", help="crawl mse.mn and write CSVs")
     p.add_argument("--limit", type=int)
+    p.add_argument("--shard", help=SHARD_HELP)
     p.add_argument("--out", default="data/scraped")
     p.add_argument("--archive", default="data/archive", help="dated archive root ('' to skip)")
     p.add_argument("--load", action="store_true", help="also load into Neo4j")
@@ -79,6 +83,14 @@ def main(argv=None):
     p = sub.add_parser("history", help="current and past positions / stakes of a person or company")
     p.add_argument("q")
     sub.add_parser("moves", help="people who used to work at one listed company and now at another")
+    p = sub.add_parser("load-manual",
+                       help="load the hand-curated datasets in data/manual/ (only new or changed ones)")
+    p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
+    p.add_argument("--force", action="store_true", help="load every dataset even if it is unchanged")
+    p = sub.add_parser("validate-manual",
+                       help="compare data/manual/ datasets with the Open Data Lab registry data in the graph")
+    p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
+    p.add_argument("--summary", action="store_true", help="counts only, no per-company details")
     p = sub.add_parser("rebuild-history", help="wipe the graph and replay every archived scrape in order")
     p.add_argument("root", nargs="?", default="data/archive")
 
@@ -108,6 +120,7 @@ def main(argv=None):
     p.add_argument("--from", dest="src", metavar="CSV_DIR",
                    help="take companies from this CSV directory (default: from Neo4j)")
     p.add_argument("--limit", type=int)
+    p.add_argument("--shard", help=SHARD_HELP)
     p.add_argument("--out", default="data/opendatalab")
     p.add_argument("--load", action="store_true", help="also load into Neo4j")
     p = sub.add_parser("odl-import", help="import an Open Data Lab dataset file (CSV/XLSX/JSON)")
@@ -143,8 +156,14 @@ def main(argv=None):
         from . import scraper
         if args.cmd == "scrape":
             # same crawler as the pipeline: mse.mn company list + open.mse.mn profiles
-            crawl = scraper.crawl if os.getenv("MSE_SOURCE") == "legacy" else scraper.crawl_open
-            ds = crawl(limit=args.limit)
+            from . import shard
+            part = shard.parse(args.shard)
+            if os.getenv("MSE_SOURCE") == "legacy":
+                if part:
+                    sys.exit("--shard needs the default open.mse.mn crawler (unset MSE_SOURCE)")
+                ds = scraper.crawl(limit=args.limit)
+            else:
+                ds = scraper.crawl_open(limit=args.limit, shard=part)
         else:
             ds = scraper.parse_html_dir(args.dir)
         csv_io.write_dir(ds, args.out)
@@ -187,6 +206,15 @@ def main(argv=None):
                 companies = [(c.ticker, c.reg_no) for c in csv_io.read_dir(args.src).companies]
             else:
                 companies = g.companies_with_reg()
+            from . import shard
+            part = shard.parse(args.shard)
+            if part:
+                from .manual import with_registry_tickers
+                everything = companies
+                companies = shard.select(companies, part, key=lambda c: c[1] or c[0])
+                print(f"shard {part[0]}/{part[1]}: {len(companies)} companies")
+                # the companies of data/manual/ are re-checked on every run
+                companies = with_registry_tickers(companies, everything)
             print(f"{sum(1 for _, r in companies if r)} companies have a registration number")
             ds, report = opendatalab.enrich_companies(companies, limit=args.limit)
             for e in report:
@@ -257,6 +285,13 @@ def main(argv=None):
                 r = notify.send(changes)
                 print(f"alerts: {r['sent']} sent via {', '.join(r['channels']) or 'no channel configured'}"
                       + (f"; errors: {r['errors']}" if r["errors"] else ""), file=sys.stderr)
+        elif args.cmd == "load-manual":
+            from .manual import load_manual
+            _print(load_manual(g, args.root, force=args.force))
+        elif args.cmd == "validate-manual":
+            from .manual import validate_manual
+            rep = validate_manual(g, args.root)
+            _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
         elif args.cmd == "rebuild-history":
             dirs = csv_io.archived_snapshots(args.root)
             if not dirs:
@@ -268,6 +303,9 @@ def main(argv=None):
                 when = ds.observed_at or (d.parent.name if d.parent != Path(args.root) else d.name)
                 res = g.load(ds, observed_at=when)
                 print(f"{d}: {res['changes']}", file=sys.stderr)
+            from .manual import load_manual
+            for r in load_manual(g, force=True):
+                print(f"manual dataset {r['dataset']}: {r['status']}", file=sys.stderr)
             _print(g.stats())
         elif args.cmd == "history":
             e = g.entity(_resolve(g, args.q))

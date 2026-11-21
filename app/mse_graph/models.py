@@ -15,6 +15,10 @@ class Company:
     website: str = ""
     listed: bool = True
     url: str = ""
+    # Other names the company is recorded under, "|"-separated (e.g. a former name
+    # still used by older registry records). Shareholder rows under any of them
+    # link to this company.
+    other_names: str = ""
 
 
 @dataclass
@@ -26,6 +30,9 @@ class Shareholding:
     holder_type: str = ""            # "person" | "organization" | "" (auto-detect)
     as_of: str = ""
     source: str = ""
+    # Set when the holder is a company reporting its own stake in `company_ticker`
+    # (a subsidiary or associate, from its "stakes in other companies" table).
+    holder_ticker: str = ""
 
 
 @dataclass
@@ -74,7 +81,9 @@ class Dataset:
     # stamps first_seen / last_seen / until with it; empty means "today".
     observed_at: str = ""
     # Which parts of this dataset are a *complete* picture of a company right
-    # now, as {"shareholdings" | "positions": {ticker: source_prefix}}. For those,
+    # now, as {"shareholdings" | "positions" | "holdings": {ticker: source_prefix}}.
+    # "holdings" is keyed by the *holder*: the company's own stakes in other
+    # companies (rows with holder_ticker set). For those,
     # the loader closes open edges (sets `until`) whose source starts with the
     # prefix but that are missing from this dataset - i.e. people who left and
     # holders who sold. An Open Data Lab registry page marks its company too,

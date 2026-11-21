@@ -218,6 +218,12 @@ WHERE ($ticker IS NULL OR c.ticker = $ticker) AND $key IS NULL
   AND coalesce(CASE WHEN $run IS NULL THEN c.first_seen >= $since ELSE c.first_run = $run END, false)
   // the very first load adds every company: that is the baseline, not a change
   AND c.first_seen > $origin
+  // an unlisted company (a subsidiary, a registry shareholder) is news only if it
+  // came with a change, not with a source's baseline (e.g. a first read of a
+  // company's list of subsidiaries)
+  AND (coalesce(c.listed, true) OR EXISTS {
+         MATCH ()-[r:OWNS|HOLDS_POSITION]->(c) WHERE r.opened_run = c.first_run AND NOT coalesce(r.baseline, false) }
+       OR NOT EXISTS { MATCH ()-[r:OWNS|HOLDS_POSITION]->(c) WHERE r.opened_run = c.first_run })
 RETURN c.ticker AS ticker, c.name AS company, c.first_seen AS date
 """
 
@@ -304,23 +310,48 @@ def changes(g, *, run: str | None = None, since: str | None = None, ticker: str 
     return out
 
 
+def _under(source: str | None, prefix: str) -> bool:
+    """`source` is the page `prefix` or one of its sub-pages (same rule as graph._under)."""
+    source = source or ""
+    return source == prefix or source.startswith(prefix.rstrip("/") + "/")
+
+
 def missing_data(g, ds: Dataset) -> list[dict]:
     """`data_missing` records for one load: companies whose complete page came back
     without shareholder (or officer) rows while the graph still holds open ones."""
     out = []
     for section, rows, rel in (("shareholders", ds.shareholdings, "OWNS"),
                                ("officers", ds.positions, "HOLDS_POSITION")):
-        snaps = ds.snapshots.get("shareholdings" if rel == "OWNS" else "positions", {})
-        have = {r.company_ticker.upper() for r in rows}
-        empty = [t.upper() for t in snaps if t.upper() not in have]
+        snaps = {t.upper(): p for t, p in ds.snapshots.get("shareholdings" if rel == "OWNS" else "positions",
+                                                            {}).items()}
+        # only rows and edges of the company's own page count (not, e.g., a parent
+        # company reporting its stake in it)
+        have = {r.company_ticker.upper() for r in rows
+                if r.company_ticker.upper() in snaps and _under(r.source, snaps[r.company_ticker.upper()])}
+        empty = [{"t": t, "prefix": p, "under": p.rstrip("/") + "/"} for t, p in snaps.items() if t not in have]
         if not empty:
             continue
         for r in g.run(f"""
-                UNWIND $tickers AS t
-                MATCH (c:Company {{ticker: t}})<-[r:{rel} {{current: true}}]-()
-                RETURN c.ticker AS ticker, c.name AS company, count(r) AS n""", tickers=empty):
+                UNWIND $scopes AS s
+                MATCH (c:Company {{ticker: s.t}})<-[r:{rel} {{current: true}}]-()
+                WHERE r.source = s.prefix OR r.source STARTS WITH s.under
+                RETURN c.ticker AS ticker, c.name AS company, count(r) AS n""", scopes=empty):
             out.append({"kind": "data_missing", "ticker": r["ticker"], "company": r["company"],
                         "section": section, "count": r["n"]})
+    # a company's list of its own stakes in other companies came back empty
+    snaps = ds.snapshots.get("holdings", {})
+    have = {r.holder_ticker.upper() for r in ds.shareholdings
+            if r.holder_ticker and _under(r.source, snaps.get(r.holder_ticker.upper(), "\0"))}
+    scopes = [{"t": t.upper(), "under": p.rstrip("/") + "/", "prefix": p}
+              for t, p in snaps.items() if t.upper() not in have]
+    if scopes:
+        for r in g.run("""
+                UNWIND $scopes AS s
+                MATCH (c:Company {ticker: s.t})-[r:OWNS {current: true}]->(:Company)
+                WHERE r.source = s.prefix OR r.source STARTS WITH s.under
+                RETURN c.ticker AS ticker, c.name AS company, count(r) AS n""", scopes=scopes):
+            out.append({"kind": "data_missing", "ticker": r["ticker"], "company": r["company"],
+                        "section": "holdings", "count": r["n"]})
     return out
 
 
