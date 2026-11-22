@@ -1,0 +1,13 @@
+company_ticker,holder_name,percent,shares,holder_type,as_of,source,holder_ticker
+~OCHIR-UNDRAA-HOLDING,Тардай Гантөмөр,,,person,,https://www.oug.mn/about/governance,
+~2734745,Очир Ундраа Холдинг ХХК,,,organization,2024-04-15,https://www.opendatalab.mn/search/2734745,~OCHIR-UNDRAA-HOLDING
+~2734745,Тардай Гантөмөр,,,person,2024-04-15,https://www.opendatalab.mn/search/2734745,
+~2659603,ОЧУН Капитал Хувийн ХОС,,,organization,,https://www.opendatalab.mn/search/2659603,~6504914
+~OCHUN-GROUP,Очир Ундраа Холдинг ХХК,,,organization,,https://oug.mn/,~OCHIR-UNDRAA-HOLDING
+~6273475,ОЧУН Групп ХХК,,,organization,,https://oug.mn/,~OCHUN-GROUP
+~PRACTICAL-INSURANCE,ОЧУН Групп ХХК,,,organization,,https://oug.mn/,~OCHUN-GROUP
+~2619687,Очир Ундраа Холдинг ХХК,,,organization,,https://bcmongolia.org/en/members-2/organizations/item/ochun-securities-llc.html,~OCHIR-UNDRAA-HOLDING
+~5607752,Очир Ундраа Холдинг ХХК,,,organization,,https://oug.mn/,~OCHIR-UNDRAA-HOLDING
+~MERA-ENGINEERING,Очир Ундраа Холдинг ХХК,,,organization,,https://oug.mn/,~OCHIR-UNDRAA-HOLDING
+~AZOT,Очир Ундраа Холдинг ХХК,,,organization,,https://oug.mn/,~OCHIR-UNDRAA-HOLDING
+~BLASTTECH,Очир Ундраа Холдинг ХХК,,,organization,,https://oug.mn/,~OCHIR-UNDRAA-HOLDING

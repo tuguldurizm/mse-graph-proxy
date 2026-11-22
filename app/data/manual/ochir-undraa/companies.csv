@@ -1,0 +1,13 @@
+ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url,other_names
+~OCHIR-UNDRAA-HOLDING,Очир Ундраа Холдинг ХХК,Ochir Undraa Holding LLC,,Holding,,,https://oug.mn,false,https://worki.mn/company/ochirundraaholding,Очир Ундраа Групп|Ochir Undraa Group
+~2659603,Очир-Ундраа ХХК,Ochir Undraa LLC,,Mining services,2659603,,https://ochirundraa.mn,false,https://www.opendatalab.mn/search/2659603,Очир Ундраа ХХК
+~2734745,Очир Ундраа ОМЗ ББСБ,Ochir Undraa OMZ NBFI (OCHUN Finance),,Finance,2734745,,,false,https://www.opendatalab.mn/search/2734745,OCHUN Finance
+~2619687,Мера ХХК,MERA LLC,,Mining services,2619687,,,false,https://www.opendatalab.mn/search/2619687,МЕРА ХХК
+~5607752,Мера Сервис ХХК,MERA Service LLC,,Mining services,5607752,,,false,https://www.opendatalab.mn/search/5607752,МЕРА Сервис ХХК
+~6273475,ОЧУН ҮЦК ХХК,OCHUN Securities LLC,,Finance,6273475,,,false,https://www.opendatalab.mn/search/6273475,Очун ҮЦК|OCHUN Investments LLC
+~6504914,ОЧУН Капитал Хувийн ХОС,OCHUN Capital Private Fund,,Finance,6504914,,,false,https://www.opendatalab.mn/search/6504914,Очун Капитал Хувийн Хос
+~OCHUN-GROUP,ОЧУН Групп ХХК,OCHUN Group LLC,,Finance,,,,false,,
+~PRACTICAL-INSURANCE,Практикал Даатгал ХХК,Practical Insurance LLC,,Insurance,,,,false,https://opendatalab.mn/search/7279?model=TBidder,Практикалдаатгал
+~AZOT,Азот ХХК,Azot LLC,,Mining services,,,,false,https://oug.mn/product/421359,
+~BLASTTECH,Бласттек ХХК,Blasttech LLC,,Mining services,,,https://blast.mn,false,https://blast.mn/bidnij-tuhaj,
+~MERA-ENGINEERING,МЕРА Инженеринг ХХК,MERA Engineering LLC,,Engineering,,,,false,,
