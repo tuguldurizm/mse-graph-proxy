@@ -17,6 +17,10 @@ from pathlib import Path
 from . import csv_io
 
 REGISTRY_HOST = "opendatalab.mn"
+# A dataset row whose source starts with this was taken from a search-engine result that
+# quotes the page, not from the page itself (e.g. "search:https://www.opendatalab.mn/search/<reg>").
+# It never counts as the registry (or mse.mn) reporting the edge; only the import reading the page does.
+UNVERIFIED_PREFIX = "search:"
 MSE_HOSTS = ("mse.mn",)
 
 
@@ -152,7 +156,7 @@ RETURN c.ticker AS ticker, c.name AS name, c.reg_no AS reg_no, c.registry_url AS
 
 def _has(sources: list[str], hosts) -> bool:
     hosts = (hosts,) if isinstance(hosts, str) else hosts
-    return any(h in (s or "") for s in sources for h in hosts)
+    return any(h in (s or "") for s in sources if not (s or "").startswith(UNVERIFIED_PREFIX) for h in hosts)
 
 
 def _compare(edges: list[dict], manual_sources: set[str], who) -> dict:
