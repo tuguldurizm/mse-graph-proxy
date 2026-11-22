@@ -56,6 +56,13 @@
   .rv { display:block; cursor:default; }
   .rv:hover { background:none; }
   .rv .name { cursor:pointer; color:var(--accent); }
+  .cov { color:var(--muted); font-size:11px; cursor:default; display:block; padding:2px 6px 6px; }
+  .cov:hover { background:none; }
+  .rf.error { border-left-color:#c0392b; background:color-mix(in srgb, #c0392b 10%, transparent); }
+  .sorts { display:flex; gap:4px; flex-wrap:wrap; cursor:default; }
+  .sorts:hover { background:none; }
+  .sorts button { font-size:12px; padding:2px 7px; }
+  .sorts button.on { border-color:var(--accent); color:var(--accent); }
   .flag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--accent); color:var(--accent); margin-left:4px; }
   @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
 </style>
@@ -97,6 +104,10 @@
     <button data-g="conflicts">Ашиг сонирхлын зөрчил</button>
     <button data-g="state">Төрийн оролцоо</button>
     <button id="btnReview">Нэгтгэлийн хяналт / Review</button>
+  </div>
+  <div class="row">
+    <button id="btnConc">Эзэмшлийн төвлөрөл</button>
+    <button id="btnQuality">Өгөгдлийн чанар</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -176,12 +187,13 @@ const FACT_LABELS = {name: 'Нэр', name_en: 'Англи нэр', address: 'Х�
 async function showDetails(d) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
   // Company extras load in parallel; the flags go right under the company facts.
-  const [uo, hist, chg, flags] = await Promise.all(isCo ? [
+  const [uo, hist, chg, flags, conc] = await Promise.all(isCo ? [
     api(`/api/companies/${t}/ultimate-owners`),
     api(`/api/companies/${t}/ownership-history`).catch(() => null),
     api(`/api/changes?ticker=${t}&limit=30`).catch(() => []),
     api(`/api/companies/${t}/flags`).catch(() => []),
-  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), []]);
+    api(`/api/companies/${t}/concentration`).catch(() => null),
+  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null]);
 
   let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
   for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['register_no','Регистр'],
@@ -211,6 +223,7 @@ async function showDetails(d) {
   if (own && (own.nominee.holders || own.treasury.holders))
     html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
             (own.treasury.holders ? ` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
+  html += concBlock(conc);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
@@ -286,10 +299,15 @@ function historyTable(h) {
 // ---- governance checks -------------------------------------------------------------
 const roleStr = rs => rs.map(esc).join(', ');
 const group = t => `<li class="group">${t}</li>`;
+// what an analysis rests on (issue #27): "158/160 компанид үндэслэсэн; бүртгэлийн эзэмшигч 2/160"
+const covText = c => !c || !c.parts ? '' : `${c.parts[0].companies}/${c.of} компанид үндэслэсэн (${esc(c.parts[0].label)})` +
+  c.parts.slice(1).map(p => `; ${esc(p.label)}: ${p.companies}/${p.of}`).join('');
+const covLine = c => c && c.parts ? `<li class="cov" title="${esc(c.text)}">${covText(c)}</li>` : '';
 const GOV = {
   structure: async () => {
-    const [cyc, cross] = await Promise.all([api('/api/analysis/cycles'), api('/api/analysis/cross-holdings')]);
-    return group('Тойрог эзэмшил') + (cyc.map(c => {
+    const [cycR, crossR] = await Promise.all([api('/api/analysis/cycles'), api('/api/analysis/cross-holdings')]);
+    const cyc = cycR.items, cross = crossR.items;
+    return covLine(cycR.coverage) + group('Тойрог эзэмшил') + (cyc.map(c => {
       const ring = c.companies.map(n => esc(n.ticker || n.name));
       return `<li data-key="${esc(c.companies[0].key)}"><span>${ring.join(' → ')} → ${ring[0]}</span>
         <span class="meta">${c.loop_percent != null ? fmtPct(c.loop_percent) : ''}</span></li>`;
@@ -299,9 +317,9 @@ const GOV = {
        <span class="meta">${fmtPct(x.percent)}</span></li>`).join('') || '<li class="meta">Олдсонгүй</li>');
   },
   conflicts: async () => {
-    const rs = await api('/api/analysis/conflicts');
+    const res = await api('/api/analysis/conflicts'), rs = res.items;
     const by = k => rs.filter(r => r.kind === k);
-    return group('Ижил салбарын компаниудад оролцоотой') + (by('competitor').map(r =>
+    return covLine(res.coverage) + group('Ижил салбарын компаниудад оролцоотой') + (by('competitor').map(r =>
       `<li class="rf warn" data-key="${esc(r.key)}"><b>${esc(r.name)}</b> · ${esc(r.sector)}<br>
        <span class="meta">${r.companies.map(c => `${esc(c.ticker || c.name)}: ${roleStr(c.roles)}`).join(' · ')}</span></li>`).join('')
        || '<li class="meta">Олдсонгүй</li>')
@@ -316,8 +334,8 @@ const GOV = {
     }).join('') || '<li class="meta">Олдсонгүй</li>');
   },
   state: async () => {
-    const rs = await api('/api/analysis/state-ownership');
-    return group('Шууд / look-through') + (rs.map(s =>
+    const res = await api('/api/analysis/state-ownership'), rs = res.items;
+    return covLine(res.coverage) + group('Шууд / look-through') + (rs.map(s =>
       `<li data-key="${esc(s.key)}"><span>${esc(s.ticker || s.name)} <span class="meta">${esc(s.name)}</span></span>
        <span>${s.direct_percent ? fmtPct(s.direct_percent) : '—'} / ${fmtPct(s.lookthrough_percent)}</span></li>`).join('')
        || '<li class="meta">Олдсонгүй</li>');
@@ -349,7 +367,7 @@ async function showReview() {
   const [q, st, ds] = await Promise.all([api('/api/analysis/resolution'), api('/api/review/status'),
                                          api('/api/review/decisions')]);
   rvStatus = st;
-  let html = st.writable ? '' : '<li class="meta">Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.</li>';
+  let html = covLine(q.coverage) + (st.writable ? '' : '<li class="meta">Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.</li>');
   const pend = st.pending_export || {};
   if (pend.identity || pend.reviewed)
     html += `<li class="meta">Git-д ороогүй шийдвэр: ${pend.identity + pend.reviewed} (review-export)</li>`;
@@ -404,6 +422,7 @@ document.getElementById('details').addEventListener('click', ev => {
 });
 document.getElementById('analysis').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
+  const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
@@ -438,7 +457,7 @@ document.getElementById('findPath').onclick = async () => {
 };
 
 document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => {
-  const kind = b.dataset.a, rs = await api(`/api/analysis/${kind}`), ul = document.getElementById('analysis');
+  const kind = b.dataset.a, res = await api(`/api/analysis/${kind}`), rs = res.items, ul = document.getElementById('analysis');
   if (kind === 'board-overlap') {
     ul.innerHTML = rs.map(r => `<li data-key="company:${esc(r.company_a)}"><span>${esc(r.company_a)} ↔ ${esc(r.company_b)}</span>
       <span class="meta">${r.shared_people.map(esc).join(', ')}</span></li>`).join('');
@@ -453,11 +472,65 @@ document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () =>
       if (n.nominees.length) ul.innerHTML += group('Номини / кастодиан (харилцагчдын нэрийн өмнөөс)') +
         n.nominees.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
           <span class="meta">${r.companies} компани</span></li>`).join('');
-      if (!rs.length && n.nominees.length) return;
+      if (!rs.length && n.nominees.length) { ul.innerHTML = covLine(res.coverage) + ul.innerHTML; return; }
     }
   }
   if (!rs.length) ul.innerHTML = '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = covLine(res.coverage) + ul.innerHTML;
 });
+
+// ---- ownership concentration (issue #7) -------------------------------------------
+const CONC_SORT = { hhi: 'HHI', top1: 'Top-1', top3: 'Top-3', free_float: 'Чөлөөт хувьцаа' };
+const OWNER_KIND = { state: 'төр', listed_company: 'бүртгэлтэй компани', organization: 'бусад байгууллага',
+                     individual: 'хувь хүн', nominee: 'номини' };
+const mixText = m => Object.entries(m || {}).filter(([, v]) => v > 0)
+  .map(([k, v]) => `${OWNER_KIND[k] || k} ${fmtPct(v)}`).join(', ');
+async function showConcentration(sort = 'hhi') {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api(`/api/analysis/concentration?sort=${sort}`), s = r.summary;
+  let html = covLine(r.coverage);
+  html += `<li class="sorts">${Object.entries(CONC_SORT).map(([k, l]) =>
+    `<button data-sort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
+  html += `<li class="meta" style="cursor:default">${s.companies} компани · хяналттай (look-through ≥ 50%): ${s.controlled}` +
+          (s.median_hhi != null ? ` · медиан HHI ${s.median_hhi} · медиан top-1 ${fmtPct(s.median_top1)} · медиан чөлөөт ~${fmtPct(s.median_free_float)}` : '') + '</li>';
+  html += r.items.map(c => `<li class="rv${c.plausible ? '' : ' rf error'}" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
+      <div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · чөлөөт ~${fmtPct(c.free_float_estimate)}${c.plausible ? '' : ` · нийлбэр ${fmtPct(c.total_percent)}!`}</div>
+      <div class="meta">${c.largest ? `Том эзэмшигч: ${esc(c.largest.name)} ${fmtPct(c.largest.percent)}` : ''}${c.largest_lookthrough && (!c.largest || c.largest_lookthrough.key !== c.largest.key) ? ` · look-through: ${esc(c.largest_lookthrough.name)} ${fmtPct(c.largest_lookthrough.percent)}` : ''}</div>
+      <div class="meta">${mixText(c.owner_mix)}</div></li>`).join('') || '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = html;
+}
+document.getElementById('btnConc').onclick = () => showConcentration();
+function concBlock(r) {
+  const c = r && r.concentration;
+  if (!c) return '';
+  return `<h2>Эзэмшлийн төвлөрөл</h2><div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · ` +
+    `чөлөөт хувьцаа ~${fmtPct(c.free_float_estimate)} (тооцоо)${c.plausible ? '' : ` · нийлбэр ${fmtPct(c.total_percent)} — 100%-иас их!`}</div>` +
+    (c.largest_lookthrough ? `<div class="meta">Look-through хамгийн том: ${esc(c.largest_lookthrough.name)} ${fmtPct(c.largest_lookthrough.percent)}</div>` : '') +
+    `<div class="meta">${mixText(c.owner_mix)}</div>` +
+    (r.coverage ? `<div class="meta" style="font-size:11px">${covText(r.coverage)}</div>` : '');
+}
+
+// ---- data-quality report (issue #8) --------------------------------------------------
+const LEVEL_MN = { error: 'алдаа', warn: 'анхааруулга', info: 'тэмдэглэл' };
+async function showQuality() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api('/api/quality');
+  let html = covLine(r.coverage);
+  html += `<li class="meta" style="cursor:default">${r.of} компани: алдаатай ${r.levels.error}, анхааруулгатай ${r.levels.warn}, тэмдэглэлтэй ${r.levels.info}, асуудалгүй ${r.clean}</li>`;
+  html += group('Асуудал бүрээр');
+  html += Object.entries(r.summary).filter(([, v]) => v.companies).sort((a, b) => b[1].companies - a[1].companies)
+    .map(([, v]) => `<li class="rf ${v.level}" style="cursor:default"><span>${esc(v.text)}</span><span class="meta">${v.companies}</span></li>`).join('');
+  html += group('Компаниуд (ноцтой нь эхэндээ)');
+  html += r.companies.slice(0, 200).map(c => `<li class="rv rf ${c.level}" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
+      ${c.issues.map(i => `<div class="meta">${esc(LEVEL_MN[i.level])}: ${esc(i.text)}</div>`).join('')}</li>`).join('')
+      || '<li class="meta">Асуудал олдсонгүй</li>';
+  ul.innerHTML = html;
+}
+document.getElementById('btnQuality').onclick = showQuality;
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');
