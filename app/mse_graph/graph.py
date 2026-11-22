@@ -653,17 +653,22 @@ class Graph:
                 c.registry_name = CASE WHEN r.registry_name <> '' THEN r.registry_name ELSE c.registry_name END,
                 c.registry_updated = CASE WHEN r.registry_updated <> '' THEN r.registry_updated
                                           ELSE c.registry_updated END,
-                c.registry_url = CASE WHEN r.registry_url <> '' THEN r.registry_url ELSE c.registry_url END
+                c.registry_url = CASE WHEN r.registry_url <> '' THEN r.registry_url ELSE c.registry_url END,
+                c.register_no = CASE WHEN r.register_no <> '' THEN r.register_no ELSE c.register_no END
             """,
             rows=rows,
         )
 
     def companies_with_reg(self) -> list[tuple[str, str]]:
-        """(ticker, reg_no) of every company that has a registration number, listed first."""
+        """(ticker, number to look up in the registry) of every company that has one, listed first.
+
+        The 7-digit register number (`register_no`) wins over `reg_no`, which for
+        listed companies is mse.mn's 10-digit state registration number."""
         return [(r["t"], r["reg"]) for r in self.run(
             """
-            MATCH (c:Company) WHERE coalesce(c.reg_no, '') <> ''
-            RETURN c.ticker AS t, c.reg_no AS reg ORDER BY coalesce(c.listed, true) DESC, c.ticker
+            MATCH (c:Company) WHERE coalesce(c.register_no, c.reg_no, '') <> ''
+            RETURN c.ticker AS t, coalesce(c.register_no, c.reg_no) AS reg
+            ORDER BY coalesce(c.listed, true) DESC, c.ticker
             """)]
 
     def _merge_orgs_into_companies(self):
@@ -693,11 +698,12 @@ class Graph:
     def company_lookup(self) -> dict[str, str]:
         """alias key / "reg:<no>" -> ticker, for matching external datasets to companies."""
         out = {}
-        for r in self.run("MATCH (c:Company) RETURN c.ticker AS t, c.aliases AS aliases, c.reg_no AS reg"):
+        for r in self.run("MATCH (c:Company) RETURN c.ticker AS t, c.aliases AS aliases, "
+                          "[x IN [c.reg_no, c.register_no] WHERE coalesce(x, '') <> ''] AS regs"):
             for a in r["aliases"] or []:
                 out.setdefault(a, r["t"])
-            if r["reg"]:
-                out["reg:" + "".join(r["reg"].split())] = r["t"]
+            for reg in r["regs"]:
+                out["reg:" + "".join(reg.split())] = r["t"]
         return out
 
     # ---- queries ------------------------------------------------------------

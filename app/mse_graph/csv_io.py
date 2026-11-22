@@ -17,7 +17,7 @@ the raw observations (`cli rebuild-history`).
 Open Data Lab enrichment adds two optional files:
 
     beneficial_owners.csv  company_ticker,owner_name,owner_type,since,source
-    company_facts.csv      ticker,reg_no,legal_form,founded,address,registry_name,registry_updated,registry_url
+    company_facts.csv      ticker,reg_no,legal_form,founded,address,registry_name,registry_updated,registry_url,register_no
 """
 from __future__ import annotations
 

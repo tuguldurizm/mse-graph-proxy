@@ -38,12 +38,33 @@ freight), which a loan record links to Шунхлай Групп. That may be th
 | Company | Owner(s) | Source |
 |---|---|---|
 | АПУ ХК (APU) | Шунхлай Холдинг ХХК 56.03%, HEINEKEN 25%, Steppe Beverage KFT 5.53% (as of 2025-04) | Wikipedia, APU Company |
-| Скайтел ХХК (Skytel) | Шунхлай Холдинг 50%, Алтай Холдинг 50% (since 2010-12) | Wikipedia, Skytel (Mongolia) |
+| Скайтел ХХК (Skytel) | Шунхлай Холдинг 50% (2010-12, when Altai Holding held the other half). The registry now lists Shunkhlai Holding as its only shareholder | Wikipedia, Skytel (Mongolia); registry |
 | Медиа Групп ХХК (Media Group) | Шунхлай Холдинг 100% (filing 2025-12) | Journalism Trust Initiative report |
 | NTV Broadcasting Co Ltd | Медиа Групп | Media Ownership Monitor (Global Media Registry) |
-| Дижитал Концепт ХХК (GS25 master franchise) | Шунхлай Холдинг + GS Retail Co., Ltd. (JV, split unknown) | Asia Economy 2024, Inside Retail 2021 |
-| Шунхлай ХХК (petroleum, founded 1993), Шунхлай Петролиум, Шунхлай Трейдинг, Шунхлайговь, АПУ Трейдинг, Спиртбалбурам, СББ Трейд | group companies | sg.mn; isee.mn "TOP-100" article |
-| АПУ Дэйри, Mongolia Motors (Hyundai/Kia), Сантранс Ложистикс, GSB Capital NBFI, SG Investment and Securities Brokerage, S Systems, Zero Technology, DSG | group companies | sg.mn management team page |
+| Дижитал Концепт ХХК (GS25 master franchise) | Шунхлай Холдинг, АПУ ХК and Жи Эс Рэтайл Ко.Лтд (GS Retail); shares not given | registry; Asia Economy 2024, Inside Retail 2021 |
+| СББ Трейд ХХК, АПУ Дэйри ХХК | АПУ ХК | registry |
+| Шунхлай ХХК (petroleum, founded 1993), Шунхлай Петролиум, Шунхлай Трейдинг, Жи Эс Би Капитал ББСБ, Эс Системс | Шунхлай Холдинг (registry confirms) | sg.mn; isee.mn "TOP-100" article; registry |
+| Шунхлайговь, АПУ Трейдинг, Спиртбалбурам, Mongolia Motors (Hyundai/Kia), Сантранс Ложистикс, SG Investment and Securities Brokerage, Zero Technology, DSG | group companies (no registration number yet, so not checked) | sg.mn; isee.mn |
+
+APU's register number is set in `company_facts.csv` (`register_no` 2702673). mse.mn gives the
+10-digit state registration number (9010001005), which Open Data Lab doesn't know.
+
+## Checked against Open Data Lab (2026-11-21)
+
+The pipeline compared the dataset with the registry pages of the 10 companies that have a number:
+
+- **Confirmed:** Shunkhlai Holding owns Shunkhlai LLC, Shunkhlai Petroleum, Shunkhlai Trading,
+  GSB Capital, S Systems, Skytel and Digital Concept, and П.Батсайхан is an officer of the holding.
+- **Corrected here:**
+  - SBB Trade and APU Dairy are owned by **APU JSC**, not by the holding directly.
+  - Digital Concept's co-owners are APU JSC and GS Retail, which the registry spells Жи Эс Рэтайл Ко.Лтд.
+  - Altai Holding is no longer a Skytel shareholder.
+  - The rows that were taken back are deleted from the graph on the next load. Retracted research
+    is not kept as history.
+- **What the registry adds:** the holding's own shareholders are individuals: Пүрэв Батсайхан,
+  Б Ганбат, Батмөнх Цэлмэг, Батхүү Ганхөлөг, Батхүү Цэлмүүнүжин and Халзан Тунгалаг. It also adds
+  each subsidiary's officers, for example Жагдагдагва Мөнхнаран as executive director of the petroleum companies.
+  These are registry records in the graph, so they're not repeated in these CSVs.
 
 People: **П.Батсайхан** (Purev Batsaikhan), founder. He was General Director of Shunkhlai LLC
 1993–1996, has been President of Shunkhlai Holding since 2008 (MarketScreener), and has chaired
@@ -59,6 +80,7 @@ APU's board since 2002 (APU 2024 half-year report).
   Beverage. The Media Ownership Monitor describes Media Group as owned 50/50 by Г.Батхүү and
   П.Батсайхан (from a 2014 asset declaration), and Г.Батхүү as chairman of the group's board.
   Neither claim is included here. The newer filing (100% Shunkhlai Holding) is used instead.
+  The registry lists two of Г.Батхүү's children among the holding's shareholders.
 * **The names are as found.** Where no Mongolian name was found, the English one is used (NTV Broadcasting,
   Mongolia Motors, GSB Capital, ...). The Heineken entity is written `HEINEKEN`. If mse.mn writes
   it differently, APU will show two Heineken holders until this file is changed to match.

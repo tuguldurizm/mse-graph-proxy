@@ -68,6 +68,10 @@ class CompanyFacts:
     registry_name: str = ""          # name as registered (often without ХК / ХХК)
     registry_updated: str = ""
     registry_url: str = ""
+    # The 7-digit register number (Регистрийн дугаар) that Open Data Lab pages use,
+    # when `reg_no` holds something else: mse.mn gives listed companies' 10-digit
+    # state registration number (e.g. APU: 9010001005, register no. 2702673).
+    register_no: str = ""
 
 
 @dataclass

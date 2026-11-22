@@ -43,13 +43,64 @@ def load_manual(g, root: str | Path | None = None, force: bool = False) -> list[
         g.drop_demo_data()
         loaded = g.load(ds)
         g.mark_baseline(loaded["run"])
+        removed = drop_retracted(g, ds)
         missing = sorted(g.missing_tickers(_referenced(ds) - _own(ds)))
         if missing:
             out.append({"dataset": d.name, "status": "partial", "missing_companies": missing})
         else:
             g.mark_manual(d.name, digest)
-            out.append({"dataset": d.name, "status": "loaded", **ds.summary()})
+            out.append({"dataset": d.name, "status": "loaded", **ds.summary(),
+                        **({"retracted": removed} if removed else {})})
     return out
+
+
+def drop_retracted(g, ds) -> int:
+    """Delete the records an earlier version of the dataset added and this one takes back.
+
+    A record counts as the dataset's own when every source it cites is a source the
+    dataset uses and none is mse.mn or the registry: those keep their own edges, and
+    a scrape or a registry page closes them in the usual way. Retracted research is
+    deleted rather than closed, because it was never true, so it is no history.
+    Only current edges into the dataset's companies are looked at.
+    """
+    from .graph import company_key
+    from .normalize import clean, entity_key, is_aggregate
+
+    alias = {r["a"]: r["key"] for r in g.run("MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+    owns, posts = set(), set()
+    for h in ds.shareholdings:
+        name = clean(h.holder_name)
+        if not name or is_aggregate(name):
+            continue
+        if h.holder_ticker:
+            key = company_key(h.holder_ticker)
+        else:
+            k = entity_key(name, h.holder_type)
+            key = alias.get(k) or alias.get(entity_key(name)) or k
+        owns.add((h.company_ticker.upper(), key))
+    for p in ds.positions:
+        if not p.until:
+            posts.add((p.company_ticker.upper(), entity_key(p.person_name, "person"), clean(p.title)))
+    sources = {x.source for x in ds.shareholdings + ds.positions if x.source}
+    rows = g.run(
+        """
+        MATCH (e:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
+        WHERE c.ticker IN $tickers
+        RETURN elementId(r) AS id, type(r) AS rel, e.key AS key, c.ticker AS ticker, r.title AS title,
+               coalesce(r.sources, [x IN [r.source] WHERE x IS NOT NULL]) AS sources
+        """, tickers=sorted(_own(ds) | _referenced(ds)))
+    stale = []
+    for r in rows:
+        srcs = [x for x in r["sources"] if x]
+        if not srcs or not set(srcs) <= sources or _has(srcs, (REGISTRY_HOST,) + MSE_HOSTS):
+            continue
+        listed = ((r["ticker"], r["key"]) in owns if r["rel"] == "OWNS"
+                  else (r["ticker"], r["key"], r["title"]) in posts)
+        if not listed:
+            stale.append(r["id"])
+    if stale:
+        g.run("MATCH ()-[r]->() WHERE elementId(r) IN $ids DELETE r", ids=stale)
+    return len(stale)
 
 
 def _own(ds) -> set[str]:
@@ -57,7 +108,8 @@ def _own(ds) -> set[str]:
 
 
 def _referenced(ds) -> set[str]:
-    return {x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners}
+    return ({x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners}
+            | {f.ticker.upper() for f in ds.facts})
 
 
 def registry_tickers(root: str | Path | None = None) -> set[str]:
