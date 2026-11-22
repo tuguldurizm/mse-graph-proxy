@@ -64,6 +64,8 @@ from pathlib import Path
 from .normalize import clean, entity_key
 
 OVERRIDES_FILE = "data/overrides/identity.csv"
+# Part of the manual datasets' digest (manual.load_manual): when records change, each reloads once.
+RECORDS_VERSION = "records-v1"
 
 KINDS = ("shareholder", "officer", "beneficial_owner", "company")
 METHODS = ("exact_key", "initial_match", "alias", "holder_ticker", "register_no", "manual_override")

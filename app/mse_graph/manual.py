@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import csv_io
 from .normalize import IDENTITY_VERSION
+from .records import RECORDS_VERSION
 
 REGISTRY_HOST = "opendatalab.mn"
 # A dataset row whose source starts with this was taken from a search-engine result that
@@ -41,8 +42,10 @@ def load_manual(g, root: str | Path | None = None, force: bool = False) -> list[
     out = []
     for d in csv_io.manual_dirs(_root(root)):
         # the identity rules are part of it: when they change (normalize.IDENTITY_VERSION),
-        # every dataset loads once more, so its rows land on the people the new rules give
-        digest = csv_io.dir_digest(d) + "|id:" + IDENTITY_VERSION
+        # every dataset loads once more, so its rows land on the people the new rules give.
+        # So are source records (records.RECORDS_VERSION): the first load after #37 gives the
+        # dataset's edges their records, which identity overrides need to move them.
+        digest = csv_io.dir_digest(d) + "|id:" + IDENTITY_VERSION + "|rec:" + RECORDS_VERSION
         if not force and g.manual_digest(d.name) == digest:
             # idempotent, so it also runs for unchanged datasets: cleans edges an earlier load left
             drop_unverified_twins(g, csv_io.read_dir(d))
