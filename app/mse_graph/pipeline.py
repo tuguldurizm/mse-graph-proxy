@@ -271,7 +271,7 @@ def _run(force: bool = False) -> None:
                 # the database persists (e.g. Neo4j Aura): never wipe real data and its history
                 set_status("running", "demo mode: database already holds real data, left untouched")
             else:
-                g.wipe()
+                g.wipe(keep_decisions=True)
                 set_status("running", "loaded demo data", stats=g.load(csv_io.read_dir("data/sample")))
         elif since is not None and since < min_hours and os.getenv("PIPELINE_FORCE") != "1" and not force:
             # A free instance restarts whenever it wakes up; with a persistent database

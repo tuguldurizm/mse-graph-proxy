@@ -110,6 +110,8 @@ SCHEMA = [
     # source records (issue #37, records.py)
     "CREATE CONSTRAINT record_id IF NOT EXISTS FOR (r:Record) REQUIRE r.record_id IS UNIQUE",
     "CREATE INDEX record_name_key IF NOT EXISTS FOR (r:Record) ON (r.name_key)",
+    # decisions made on the review queue (issue #6, review.py); wipes keep them
+    "CREATE CONSTRAINT decision_id IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE",
 ]
 # the relationships source records are behind
 EDGE_TYPES = "OWNS|HOLDS_POSITION|BENEFICIAL_OWNER"
@@ -149,6 +151,9 @@ REGISTRY_MARK = "opendatalab.mn"
 ISO_DATE = r"\d{4}(-\d{2}){0,2}"
 # Two stakes differing by less than this many percentage points count as equal.
 PERCENT_TOLERANCE = 0.001
+
+# the record kind behind each relationship type (records.py)
+_REL_KIND = {"OWNS": "shareholder", "HOLDS_POSITION": "officer", "BENEFICIAL_OWNER": "beneficial_owner"}
 
 _TYPE = "[l IN labels({0}) WHERE l IN ['Company', 'Person', 'Organization']][0]"
 
@@ -699,10 +704,15 @@ class Graph:
             """, rows=rows, when=when)
 
     def identity_overrides(self, overrides: list | None = None) -> list:
-        """The identity overrides (records.read_overrides, or `overrides`) with their
+        """The identity overrides in force (the overrides file and the review decisions
+        stored in the graph, review.overrides_in_force; or `overrides`) with their
         companies and company targets resolved to the graph's tickers and keys. A row
         whose company target isn't in the graph is left out (and logged)."""
-        rows = rec.read_overrides() if overrides is None else list(overrides)
+        if overrides is None:
+            from .review import overrides_in_force
+            rows = overrides_in_force(self)
+        else:
+            rows = list(overrides)
         if not rows:
             return []
         aliases = None
@@ -770,6 +780,27 @@ class Graph:
             for r in todo:
                 if r["old"] != target:
                     moved.setdefault(r["old"], {}).setdefault(target, set()).add(r["rid"])
+        # relationships without records (loaded before #37) follow the node's own name
+        bare_done: set[tuple] = set()
+        for o in ovs:
+            rels = [rel for rel, kind in _REL_KIND.items() if kind in o.kinds()]
+            rows = self.run(
+                f"""
+                MATCH (n:Entity)-[r:{'|'.join(rels)}]->(c:Company)
+                WHERE n <> c AND ($t = '*' OR c.ticker = $t) AND size(coalesce(r.records, [])) = 0
+                  AND (n.key IN $keys OR toLower(n.name) = toLower($name)) AND n.key <> $target
+                  AND ($src = '' OR any(s IN coalesce(r.sources, [r.source]) WHERE s STARTS WITH $src))
+                RETURN DISTINCT elementId(n) AS n, n.name AS name, elementId(c) AS c, type(r) AS rel
+                """, rels=rels, t=o.company, keys=sorted(o.keys), name=o.name, target=o.target, src=o.source)
+            rows = [r for r in rows if (r["n"], r["c"], r["rel"]) not in bare_done]
+            bare_done.update((r["n"], r["c"], r["rel"]) for r in rows)
+            if o.source:
+                rows = []       # without records, an edge can't be divided by source: left to the records
+            for r in rows:
+                target = self._override_target(o, r["name"])
+                n = self._move_edges(r["n"], target, only=r["c"], rels=(r["rel"],), bare=True)
+                out["edges_moved"] += n
+                moved.setdefault(r["n"], {}).setdefault(target, set())
         for old, targets in moved.items():
             got = self._rebuild_edges(old, {rid for ids in targets.values() for rid in ids})
             out["edges_moved"] += got["moved"]
@@ -786,6 +817,10 @@ class Graph:
 
     def _override_target(self, o, name: str) -> str:
         """The element id of an override's target node, created if missing (people and organisations)."""
+        # a key that comes back (a revoked merge) no longer resolves to the node it was merged into
+        self.run("""MATCH (e:Entity) WHERE $k IN coalesce(e.former_keys, []) AND NOT EXISTS {
+                        MATCH (x:Entity {key: $k}) }
+                    SET e.former_keys = [x IN e.former_keys WHERE x <> $k]""", k=o.target)
         if o.label == "Person":
             return self._person_node(o.target, name, person_name(name))
         if o.label == "Organization":
@@ -1002,20 +1037,26 @@ class Graph:
         self._move_edges(old, new)
         self._absorb_node(old, new)
 
-    def _move_edges(self, old: str, new: str, only: str | None = None, method: str | None = None) -> None:
+    def _move_edges(self, old: str, new: str, only: str | None = None, method: str | None = None,
+                    rels: tuple = ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"), bare: bool = False) -> int:
         """Move node `old`'s edges to node `new` (element ids), as _merge_node describes.
         With `only` (a node's element id), just the edges between `old` and that node.
         The source records behind them follow (REFERS_TO, issue #37); `method` is then
-        how they are decided, e.g. "initial_match" (default: unchanged)."""
-        for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
-            for pattern, twin in (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
-                                  ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)")):
+        how they are decided, e.g. "initial_match" (default: unchanged). With `bare`, only
+        `old`'s outgoing edges that list no records move, and no records do (apply_overrides).
+        Returns the number of edges moved."""
+        n = 0
+        for rel in rels:
+            patterns = (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
+                        ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)"))
+            for pattern, twin in patterns[:1] if bare else patterns:
                 create = "(n)-[y:{rel}]->(t)" if pattern.startswith("(o)") else "(t)-[y:{rel}]->(n)"
-                self.run(
+                got = self.run(
                     f"""
                     MATCH (o) WHERE elementId(o) = $old
                     MATCH (n) WHERE elementId(n) = $new
                     MATCH {pattern.format(rel=rel)} WHERE t <> n AND t <> o AND ($only IS NULL OR elementId(t) = $only)
+                      AND (NOT $bare OR size(coalesce(r.records, [])) = 0)
                     OPTIONAL MATCH {twin.format(rel=rel)}
                     WHERE coalesce(r.current, false) AND coalesce(x.post, x.title, '') = coalesce(r.post, r.title, '')
                     WITH n, r, t, head(collect(x)) AS x
@@ -1038,8 +1079,12 @@ class Graph:
                     }}
                     WITH r
                     DELETE r
-                    """, old=old, new=new, only=only)
-        self._move_refs(old, new, only, method)
+                    RETURN count(*) AS n
+                    """, old=old, new=new, only=only, bare=bare)
+                n += got[0]["n"] if got else 0
+        if not bare:
+            self._move_refs(old, new, only, method)
+        return n
 
     def _move_refs(self, old: str, new: str, only: str | None = None, method: str | None = None) -> None:
         """Re-point the records that refer to node `old` to node `new` (element ids); with
@@ -1200,8 +1245,11 @@ class Graph:
             """, t=t)
         return rows[0]["t"] if rows else t
 
-    def wipe(self):
-        self.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 5000 ROWS")
+    def wipe(self, keep_decisions: bool = False):
+        """Delete the graph. `keep_decisions` keeps the review decisions (review.py), which
+        `load --wipe`, `rebuild-history` and the switch from demo to real data do."""
+        self.run("MATCH (n) WHERE NOT ($keep AND n:Decision) "
+                 "CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 5000 ROWS", keep=keep_decisions)
 
     def has_demo_data(self) -> bool:
         return self.run("RETURN EXISTS { ()-[r]->() WHERE r.source = $s } AS demo", s=DEMO_SOURCE)[0]["demo"]
@@ -1268,7 +1316,7 @@ class Graph:
         """Remove the fictional demo graph before real data is loaded on top of it."""
         if not self.has_demo_data():
             return False
-        self.wipe()
+        self.wipe(keep_decisions=True)
         return True
 
     # ---- loading ------------------------------------------------------------

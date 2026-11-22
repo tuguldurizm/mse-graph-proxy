@@ -235,13 +235,73 @@ def position_roles():
 
 
 @app.get("/api/analysis/resolution")
-def resolution():
-    """The entity-resolution review queue (issue #6). So far: initial-form people
-    ("Б.Батболд") that a full registry name may stand for but the rule didn't link
-    (issue #36): two fitting full names at one company, or one at other companies only."""
-    people = g().ambiguous_people()
-    return {"ambiguous_people": people, "counts": {
-        r: sum(1 for p in people if p["reason"] == r) for r in ("several_at_company", "no_shared_company")}}
+def resolution(min_companies: int = Query(6, ge=2), min_sectors: int = Query(4, ge=2)):
+    """The entity-resolution review queue (issue #6, review.py): initial-form people a
+    full registry name may stand for (`ambiguous_people`, #36), nodes that may be several
+    people (`suspicious_people`) and keys that may be one entity (`possible_duplicates`).
+    Items a reviewer decided or dismissed are left out."""
+    from . import review
+    return review.queue(g(), min_companies, min_sectors)
+
+
+# ---- review decisions (issue #6) -----------------------------------------------------
+# Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
+# Without either, the review is read-only: a public site never takes decisions from anyone.
+
+def _review_password() -> str:
+    return os.getenv("REVIEW_PASSWORD") or os.getenv("APP_PASSWORD") or ""
+
+
+@app.get("/api/review/status")
+def review_status():
+    from . import review
+    return {"writable": bool(_review_password()), "pending_export": review.pending(g())}
+
+
+@app.get("/api/review/decisions")
+def review_decisions():
+    from . import review
+    return review.decisions(g())
+
+
+@app.post("/api/review/decide")
+async def review_decide(request: Request):
+    """Record a decision and apply it at once. Body (JSON): `action` (merge | split |
+    keep_apart | dismiss | revoke), and `key`, `into`, `companies`, `new_key`, `item`, `id`,
+    `by`, `note` as the action needs (review.decide)."""
+    from . import review
+    pw = _review_password()
+    if not pw:
+        raise HTTPException(403, "the review is read-only here: set REVIEW_PASSWORD to take decisions")
+    if not hmac.compare_digest(request.headers.get("x-review-password", "").encode(), pw.encode()):
+        raise HTTPException(401, "wrong review password")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "send a JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "send a JSON object")
+    args = {k: body.get(k) for k in ("key", "into", "new_key", "item", "id", "by", "note") if body.get(k)}
+    if body.get("companies"):
+        args["companies"] = [str(c) for c in body["companies"]][:50]
+    try:
+        return review.decide(g(), str(body.get("action") or ""), **{k: (v if k == "companies" else str(v))
+                                                                    for k, v in args.items()})
+    except review.ReviewError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/review/export/{name}", include_in_schema=False)
+def review_export(name: str):
+    """The overrides files as they would be with the graph's decisions (to commit to git)."""
+    from . import review
+    if name == "identity.csv":
+        text = review.identity_csv(review.overrides_in_force(g()))
+    elif name == "reviewed.csv":
+        text = review.reviewed_csv(review.all_reviewed(g()))
+    else:
+        raise HTTPException(404, "identity.csv or reviewed.csv")
+    return Response(text, media_type="text/csv; charset=utf-8")
 
 
 @app.get("/api/records")

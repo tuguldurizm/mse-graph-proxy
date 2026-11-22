@@ -1,0 +1,4 @@
+# Review queue items a reviewer dismissed or decided (issue #6, mse_graph/review.py).
+# item: ambiguous:<key> | suspicious:<key> | pair:<key a>|<key b> (keys sorted).
+# Written by `python -m mse_graph.cli review-export`; such items stay out of the queue.
+item,decided_by,decided_at,note

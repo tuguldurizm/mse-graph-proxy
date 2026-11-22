@@ -51,6 +51,11 @@
   .rf.warn { border-left-color:#d08a1e; background:color-mix(in srgb, #d08a1e 10%, transparent); }
   .group { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; cursor:default; padding-top:10px; }
   .group:hover { background:none; }
+  .acts { display:flex; gap:4px; flex-wrap:wrap; margin-top:4px; }
+  .acts button { font-size:12px; padding:2px 7px; }
+  .rv { display:block; cursor:default; }
+  .rv:hover { background:none; }
+  .rv .name { cursor:pointer; color:var(--accent); }
   .flag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--accent); color:var(--accent); margin-left:4px; }
   @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
 </style>
@@ -91,6 +96,7 @@
     <button data-g="structure">Тойрог / хөндлөн эзэмшил</button>
     <button data-g="conflicts">Ашиг сонирхлын зөрчил</button>
     <button data-g="state">Төрийн оролцоо</button>
+    <button id="btnReview">Нэгтгэлийн хяналт / Review</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -302,10 +308,78 @@ document.getElementById('btnChanges').onclick = async () => {
     : '<li class="meta">Өөрчлөлт бүртгэгдээгүй байна (2+ snapshot хэрэгтэй)</li>';
 };
 
+// ---- entity-resolution review queue (issue #6) -----------------------------------
+// Decisions need the review password (REVIEW_PASSWORD on the server); it is kept for this tab only.
+const RV_REASON = {
+  several_at_company: 'нэг компанид тохирох хэд хэдэн бүтэн нэр', no_shared_company: 'бүтэн нэр нь өөр компанид',
+  many_companies: 'олон компанид албан тушаалтай', many_sectors: 'олон салбарт', different_full_names: 'өөр өөр бүтэн нэр',
+  one_letter: 'нэг үсгээр зөрүүтэй', transliteration: 'латин / кирилл, ижил төстэй үсэг', missing_initial: 'эцгийн нэрийн үсэггүй',
+};
+const nameLink = (key, name) => `<span class="name" data-open="${esc(key)}">${esc(name || key)}</span>`;
+const act = (label, payload) => `<button data-act="${esc(JSON.stringify(payload))}">${esc(label)}</button>`;
+let rvStatus = null;
+async function showReview() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const [q, st, ds] = await Promise.all([api('/api/analysis/resolution'), api('/api/review/status'),
+                                         api('/api/review/decisions')]);
+  rvStatus = st;
+  let html = st.writable ? '' : '<li class="meta">Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.</li>';
+  const pend = st.pending_export || {};
+  if (pend.identity || pend.reviewed)
+    html += `<li class="meta">Git-д ороогүй шийдвэр: ${pend.identity + pend.reviewed} (review-export)</li>`;
+  html += group(`Эргэлзээтэй эцгийн нэрийн үсэгтэй хүмүүс (${q.ambiguous_people.length})`);
+  html += q.ambiguous_people.map(p => `<li class="rv">${nameLink(p.key, p.name)}
+      <span class="meta">${p.companies.map(esc).join(', ')} · ${esc(RV_REASON[p.reason] || p.reason)}</span>
+      ${p.candidates.map(c => `<div class="meta">≈ ${nameLink(c.key, c.name)} (${c.companies.map(esc).join(', ')})</div>`).join('')}
+      <div class="acts">${p.candidates.map(c => act(`= ${c.name}`, {action: 'merge', key: p.key, into: c.key})).join('')}
+        ${act('Тусдаа хүн', {action: 'keep_apart', key: p.key})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+  html += group(`Нэг хүн мөн эсэх нь сэжигтэй (${q.suspicious_people.length})`);
+  html += q.suspicious_people.map(p => `<li class="rv">${nameLink(p.key, p.name)}
+      <span class="meta">${p.reasons.map(r => esc(RV_REASON[r] || r)).join(' · ')}${p.full_names.length ? ' · ' + p.full_names.map(esc).join(', ') : ''}</span>
+      <div class="meta">${p.companies.map(c => `${esc(c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name)}${c.sector ? ' (' + esc(c.sector) + ')' : ''}`).join(', ')}</div>
+      <div class="acts">${p.companies.map(c => act(`${c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name}: өөр хүн`,
+          {action: 'split', key: p.key, companies: [c.ticker]})).join('')}
+        ${act('Нэг хүн, зөв', {action: 'dismiss', item: p.item})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+  html += group(`Давхардсан байж магадгүй (${q.possible_duplicates.length})`);
+  html += q.possible_duplicates.map(p => `<li class="rv">${nameLink(p.a.key, p.a.name)} ↔ ${nameLink(p.b.key, p.b.name)}
+      <span class="meta">${esc(RV_REASON[p.reason] || p.reason)}${p.shared.length ? ' · хамтын: ' + p.shared.map(esc).join(', ') : ''}</span>
+      <div class="meta">${esc(p.a.companies.join(', '))} | ${esc(p.b.companies.join(', '))}</div>
+      <div class="acts">${act('Нэгтгэх', {action: 'merge', key: p.suggest.merge, into: p.suggest.into})}
+        ${act('Өөр', {action: 'dismiss', item: p.item})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+  const groups = [...new Map(ds.map(d => [d.group, d])).values()].slice(0, 30);
+  html += group(`Шийдвэрүүд (${groups.length})`);
+  html += groups.map(d => `<li class="rv"><span>${esc(d.action)} · ${esc(d.type === 'identity' ? `${d.before || ''} → ${d.target}` : d.item)}</span>
+      <span class="meta">${esc(d.decided_by)} · ${esc(d.decided_at)}${d.note ? ' · ' + esc(d.note) : ''}</span>
+      <div class="acts">${act('Буцаах', {action: 'revoke', id: d.group})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+  ul.innerHTML = html;
+}
+async function decide(payload) {
+  if (rvStatus && !rvStatus.writable) return alert('Шийдвэр гаргах боломжгүй: серверт REVIEW_PASSWORD тохируулаагүй.');
+  let pw = null;
+  try { pw = sessionStorage.getItem('reviewPassword'); } catch {}
+  if (!pw) { pw = prompt('Хяналтын нууц үг (REVIEW_PASSWORD):'); if (!pw) return; }
+  if (payload.action !== 'dismiss' && payload.action !== 'keep_apart') {
+    const what = payload.action === 'merge' ? `${payload.key} → ${payload.into}`
+               : payload.action === 'split' ? `${payload.key}: ${payload.companies.join(', ')} тусдаа` : payload.id;
+    if (!confirm(`${payload.action}: ${what}?`)) return;
+  }
+  const note = payload.action === 'revoke' ? '' : (prompt('Тайлбар (заавал биш):') || '');
+  const r = await fetch('/api/review/decide', {method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Review-Password': pw}, body: JSON.stringify({...payload, note})});
+  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} return alert('Нууц үг буруу.'); }
+  if (!r.ok) return alert(`Алдаа: ${(await r.json().catch(() => ({}))).detail || r.status}`);
+  try { sessionStorage.setItem('reviewPassword', pw); } catch {}
+  await showReview();
+}
+document.getElementById('btnReview').onclick = showReview;
+
 document.getElementById('details').addEventListener('click', ev => {
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 document.getElementById('analysis').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
+  const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 
