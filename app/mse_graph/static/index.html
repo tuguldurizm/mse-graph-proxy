@@ -147,6 +147,8 @@ async function open(key) {
     api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}`),
     api(`/api/entity?key=${encodeURIComponent(key)}`),
   ]);
+  // an old link (company:APU, company:~2702673) resolves to the node's current key
+  key = selected = (d && d.entity && d.entity.key) || key;
   draw(g, { focus: key });
   network.selectNodes([key]);
   showDetails(d);

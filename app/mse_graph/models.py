@@ -10,7 +10,10 @@ class Company:
     name_en: str = ""
     mse_id: str = ""                 # numeric id used in mse.mn URLs
     sector: str = ""
-    reg_no: str = ""                 # state registration number
+    # A number as the source gave it (either kind). The loader sorts it into
+    # register_no / state_reg_no (normalize.split_reg_numbers), so the graph only
+    # stores those two.
+    reg_no: str = ""
     address: str = ""
     website: str = ""
     listed: bool = True
@@ -19,6 +22,11 @@ class Company:
     # still used by older registry records). Shareholder rows under any of them
     # link to this company.
     other_names: str = ""
+    # The registry's 7-digit register number (Регистрийн дугаар, APU: 2702673): one
+    # company node per register number (issue #35).
+    register_no: str = ""
+    # mse.mn's 10-digit state registration number (APU: 9010001005).
+    state_reg_no: str = ""
 
 
 @dataclass
@@ -33,6 +41,9 @@ class Shareholding:
     # Set when the holder is a company reporting its own stake in `company_ticker`
     # (a subsidiary or associate, from its "stakes in other companies" table).
     holder_ticker: str = ""
+    # For an organisation: "state" | "foreign" | "fund" | "other" when the source says
+    # so; otherwise the loader guesses from the name (normalize.org_type_from_name).
+    org_type: str = ""
 
 
 @dataclass
@@ -57,6 +68,7 @@ class BeneficialOwner:
     # The owner's own registration number, when the registry gives one (legal
     # entities in the ownership chain). Discovery follows it (discovery.py).
     owner_reg_no: str = ""
+    org_type: str = ""               # as Shareholding.org_type
 
 
 @dataclass
@@ -64,16 +76,16 @@ class CompanyFacts:
     """Registry facts for an existing company. Loading only fills empty properties,
     so it never overwrites what mse.mn says."""
     ticker: str
-    reg_no: str = ""
+    reg_no: str = ""                 # either kind of number, as Company.reg_no
     legal_form: str = ""             # e.g. "Хувьцаат компани"
     founded: str = ""
     address: str = ""
     registry_name: str = ""          # name as registered (often without ХК / ХХК)
     registry_updated: str = ""
     registry_url: str = ""
-    # The 7-digit register number (Регистрийн дугаар) that Open Data Lab pages use,
-    # when `reg_no` holds something else: mse.mn gives listed companies' 10-digit
-    # state registration number (e.g. APU: 9010001005, register no. 2702673).
+    # The 7-digit register number (Регистрийн дугаар) that Open Data Lab pages use.
+    # Unlike a company row's, it replaces the one the graph has: the registry page
+    # (or discovery) is the authority on it.
     register_no: str = ""
 
 

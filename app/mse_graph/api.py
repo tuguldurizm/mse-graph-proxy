@@ -94,7 +94,7 @@ def search(q: str = Query(..., min_length=1), limit: int = 20):
 
 @app.get("/api/entity")
 def entity(key: str):
-    e = g().entity(key)
+    e = g().entity(key)     # old keys (company:APU, company:~2702673) still resolve
     if not e:
         raise HTTPException(404, "not found")
     return e
@@ -133,6 +133,8 @@ def changes(ticker: str | None = None, key: str | None = None, source: str | Non
             all_: bool = Query(False, alias="all"), limit: int = Query(200, le=2000)):
     """Detected changes, newest first. Small moves and data gaps are hidden unless all=true."""
     from . import history
+    ticker = g().resolve_ticker(ticker) if ticker else None
+    key = g().resolve_key(key) if key else None
     return history.recent_changes(g(), source=source, ticker=ticker, key=key, since=since,
                                   significant_only=not all_, limit=limit)
 
@@ -140,7 +142,7 @@ def changes(ticker: str | None = None, key: str | None = None, source: str | Non
 @app.get("/api/companies/{ticker}/ownership-history")
 def ownership_history(ticker: str):
     from . import history
-    return history.ownership_timeline(g(), ticker)
+    return history.ownership_timeline(g(), g().resolve_ticker(ticker))
 
 
 @app.get("/feed.xml", include_in_schema=False)
@@ -149,6 +151,7 @@ def feed(request: Request, ticker: str | None = None, limit: int = Query(100, le
     from . import history
     from .notify import describe
 
+    ticker = g().resolve_ticker(ticker) if ticker else None
     items = history.recent_changes(g(), ticker=ticker, significant_only=True, limit=limit)
     base = str(request.base_url).rstrip("/")
     updated = _ts(items[0]["detected_at"]) if items else _ts("")

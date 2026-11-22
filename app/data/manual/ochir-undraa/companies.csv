@@ -1,4 +1,4 @@
-ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url,other_names
+ticker,name,name_en,mse_id,sector,register_no,address,website,listed,url,other_names
 ~OCHIR-UNDRAA-HOLDING,Очир Ундраа Холдинг ХХК,Ochir Undraa Holding LLC,,Holding,,,https://oug.mn,false,https://worki.mn/company/ochirundraaholding,Очир Ундраа Групп|Ochir Undraa Group
 ~2659603,Очир-Ундраа ХХК,Ochir Undraa LLC,,Mining services,2659603,,https://ochirundraa.mn,false,https://www.opendatalab.mn/search/2659603,Очир Ундраа ХХК
 ~2734745,Очир Ундраа ОМЗ ББСБ,Ochir Undraa OMZ NBFI (OCHUN Finance),,Finance,2734745,,,false,https://www.opendatalab.mn/search/2734745,OCHUN Finance

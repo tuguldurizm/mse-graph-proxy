@@ -19,30 +19,14 @@ accordingly.
 """
 from __future__ import annotations
 
-import re
-
 from .graph import Graph
-from .normalize import clean
-
-# Name markers of state or municipal owners (Mongolian / English).
-STATE_MARKERS = [
-    "төрийн", "засгийн газар", "яам", "аймгийн", "нийслэлийн", "дүүргийн", "төк", "төхк",
-    "эрдэнэс монгол", "монгол банк", "нийгмийн даатгалын сан",
-    "government", "ministry", "state property", "state-owned", "state owned", "municipal",
-    "erdenes mongol", "bank of mongolia",
-]
-_STATE_RE = re.compile(r"(?<![\w])(" + "|".join(re.escape(m) for m in STATE_MARKERS) + r")(?![\w])",
-                       re.IGNORECASE)
+from .normalize import is_state
 
 # Holdings at or above this are treated as influence (besides board/executive posts).
 DEFAULT_MIN_STAKE = 5.0
 
-_NODE = "{key: n.key, name: n.name, ticker: n.ticker, type: [l IN labels(n) WHERE l <> 'Entity'][0]}"
+_NODE = "{key: n.key, name: n.name, ticker: n.ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}"
 _SIMPLE = "all(i IN range(0, size(nodes(p)) - 2) WHERE NOT nodes(p)[i] IN nodes(p)[i + 1..])"
-
-
-def is_state(name: str) -> bool:
-    return bool(_STATE_RE.search(clean(name).lower()))
 
 
 def _co(n) -> str:
@@ -133,7 +117,7 @@ def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dic
                                      roles: roles}) AS companies
         WHERE size(companies) >= 2
         RETURN 'competitor' AS kind, x.key AS key, x.name AS name,
-               [l IN labels(x) WHERE l <> 'Entity'][0] AS type,
+               [l IN labels(x) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                companies[0].sector AS sector, companies
         ORDER BY size(companies) DESC, name
         """,
@@ -194,8 +178,14 @@ def conflicts(g: Graph, kind: str | None = None, min_stake: float = DEFAULT_MIN_
 # ---- state ownership -------------------------------------------------------------
 
 def state_entities(g: Graph) -> list[dict]:
-    rows = g.run("MATCH (e:Entity) WHERE e:Organization OR e:Company RETURN e.key AS key, e.name AS name")
-    return [r for r in rows if is_state(r["name"] or "")]
+    """State and municipal bodies and state-owned companies.
+
+    An organisation's `org_type` decides (set from its source, else from its name, see
+    normalize.org_type_from_name). Companies have no `org_type`, so their name does."""
+    rows = g.run("""MATCH (e:Entity) WHERE e:Organization OR e:Company
+                    RETURN e.key AS key, e.name AS name, CASE WHEN e:Company THEN null ELSE e.org_type END AS t""")
+    return [{"key": r["key"], "name": r["name"]} for r in rows
+            if (r["t"] == "state" if r["t"] else is_state(r["name"] or ""))]
 
 
 def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
@@ -260,8 +250,8 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
     level is "warn" for structures that usually need a closer look (loops, mutual
     holdings, competitor ties) and "info" for common, disclosure-worthy ones.
     """
-    ticker = ticker.upper()
-    me = "company:" + ticker
+    ticker = g.resolve_ticker(ticker)
+    me = g.company_keys().get(ticker, "company:" + ticker)
     flags: list[dict] = []
 
     def add(kind, level, text, keys=()):

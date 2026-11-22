@@ -199,3 +199,74 @@ def post_key(title: str | None, role: str | None = None) -> str:
     if std in ("other_executive", "unknown"):
         return std + ":" + _TITLE_KEY_RE.sub(" ", clean(title).casefold()).strip()
     return std
+
+
+# ---- registration numbers and organisation types (issue #35) ----------------------
+
+_REGISTER_RE = re.compile(r"\d{6,8}")
+
+
+def split_reg_numbers(*numbers: str | None) -> tuple[str, str]:
+    """(register_no, state_reg_no) from whatever numbers a source gave.
+
+    `register_no` is always the registry's 6-8 digit register number (Регистрийн
+    дугаар, e.g. APU 2702673), the one Open Data Lab pages use. Anything else, such
+    as the 10-digit state registration number mse.mn gives (APU 9010001005), is the
+    `state_reg_no`. The first number of each kind wins.
+    """
+    register = state = ""
+    for number in numbers:
+        n = re.sub(r"\s", "", clean(number))
+        if not n:
+            continue
+        if _REGISTER_RE.fullmatch(n):
+            register = register or n
+        else:
+            state = state or n
+    return register, state
+
+
+ORG_TYPES = ("state", "foreign", "fund", "other")
+
+# Name markers of state or municipal owners (Mongolian / English).
+STATE_MARKERS = [
+    "төрийн", "засгийн газар", "яам", "аймгийн", "нийслэлийн", "дүүргийн", "төк", "төхк",
+    "эрдэнэс монгол", "монгол банк", "нийгмийн даатгалын сан",
+    "government", "ministry", "state property", "state-owned", "state owned", "municipal",
+    "erdenes mongol", "bank of mongolia",
+]
+_STATE_RE = re.compile(r"(?<![\w])(" + "|".join(re.escape(m) for m in STATE_MARKERS) + r")(?![\w])",
+                       re.IGNORECASE)
+# Investment and pension funds.
+_FUND_RE = re.compile(r"(?<![\w])(сан|фонд|fund|funds|trust|etf)(?![\w])", re.IGNORECASE)
+# Foreign legal forms. Only names written wholly in Latin letters count: Mongolian
+# companies use "LLC" / "JSC" in English, which say nothing about where they are from.
+_FOREIGN_RE = re.compile(
+    r"(?<![\w])(ltd|limited|inc|incorporated|gmbh|pte|plc|ag|s\.a\.|sa|b\.v\.|bv|n\.v\.|nv|"
+    r"k\.k\.|co\., ltd|pty|srl|s\.r\.l\.|oy|ab|corp|corporation|kabushiki kaisha)(?![\w])",
+    re.IGNORECASE)
+_CYRILLIC_RE = re.compile(r"[а-яёөүА-ЯЁӨҮ]")
+# Changes whenever the name rules change, so graph.consolidate_companies re-types organisations.
+ORG_TYPES_VERSION = hashlib.sha1(
+    (_STATE_RE.pattern + _FUND_RE.pattern + _FOREIGN_RE.pattern).encode()).hexdigest()[:12]
+
+
+def is_state(name: str | None) -> bool:
+    """Whether a name marks a state or municipal body or a state-owned company."""
+    return bool(_STATE_RE.search(clean(name).lower()))
+
+
+def org_type_from_name(name: str | None) -> str:
+    """The organisation type a name suggests (one of ORG_TYPES), for sources that don't say.
+
+    State markers win ("Нийгмийн даатгалын сан" is the state's), then funds, then foreign
+    legal forms of Latin-script names. Everything else is "other".
+    """
+    n = clean(name)
+    if is_state(n):
+        return "state"
+    if _FUND_RE.search(n):
+        return "fund"
+    if not _CYRILLIC_RE.search(n) and _FOREIGN_RE.search(n):
+        return "foreign"
+    return "other"

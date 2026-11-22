@@ -2,9 +2,18 @@
 
 Graph model
 -----------
-(:Entity:Company      {key, ticker, name, name_en, sector, reg_no, address, website, mse_id, url, listed, aliases})
+(:Entity:Company[:Listed] {key, ticker, name, name_en, sector, register_no, state_reg_no, address, website,
+                           mse_id, url, listed, aliases, former_tickers, former_keys})
 (:Entity:Person       {key, name})
-(:Entity:Organization {key, name})           -- non-listed corporate / state shareholders
+(:Entity:Organization {key, name, org_type, register_no?})  -- shareholders outside the company lists
+
+A company is one legal entity (issue #35): its key is `company:<register_no>`
+(the registry's 7-digit number) when known, else `company:<TICKER>`; unlisted
+companies have internal `~...` tickers. `state_reg_no` is mse.mn's 10-digit
+number. Nodes found to be the same entity are merged (consolidate_companies), and
+their old tickers and keys still resolve (resolve_key, resolve_ticker). An
+organisation's `org_type` is "state", "foreign", "fund" or "other": from its
+source when it says (`org_type_by: 'source'`), else from its name.
 
 (holder:Entity)-[:OWNS {percent, shares, as_of, source, sources, <history>}]->(:Company)
 (:Person)-[:HOLDS_POSITION {post, role_std, title, titles, role, since, source, sources, <history>}]->(:Company)
@@ -62,8 +71,8 @@ from neo4j import GraphDatabase
 
 from .config import settings
 from .models import Dataset
-from .normalize import ROLES_VERSION, clean, entity_key, is_aggregate, is_organization, parse_date, \
-    post_key, role_std
+from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, clean, entity_key, is_aggregate, \
+    is_organization, org_type_from_name, parse_date, post_key, role_std, split_reg_numbers
 from .opendatalab import REGISTER_NO_RE
 
 SCHEMA = [
@@ -75,8 +84,9 @@ SCHEMA = [
     "CREATE INDEX position_current IF NOT EXISTS FOR ()-[r:HOLDS_POSITION]-() ON (r.current)",
     "CREATE INDEX owns_until IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.until)",
     "CREATE INDEX position_until IF NOT EXISTS FOR ()-[r:HOLDS_POSITION]-() ON (r.until)",
-    "CREATE INDEX company_reg_no IF NOT EXISTS FOR (c:Company) ON (c.reg_no)",
+    "DROP INDEX company_reg_no IF EXISTS",       # `reg_no` was split into the two below (#35)
     "CREATE INDEX company_register_no IF NOT EXISTS FOR (c:Company) ON (c.register_no)",
+    "CREATE INDEX company_state_reg_no IF NOT EXISTS FOR (c:Company) ON (c.state_reg_no)",
     # registry numbers discovery tried and should leave alone for a while (discovery.py)
     "CREATE CONSTRAINT registry_lead_reg IF NOT EXISTS FOR (l:RegistryLead) REQUIRE l.reg IS UNIQUE",
 ]
@@ -115,7 +125,7 @@ ISO_DATE = r"\d{4}(-\d{2}){0,2}"
 # Two stakes differing by less than this many percentage points count as equal.
 PERCENT_TOLERANCE = 0.001
 
-_TYPE = "[l IN labels({0}) WHERE l <> 'Entity'][0]"
+_TYPE = "[l IN labels({0}) WHERE l IN ['Company', 'Person', 'Organization']][0]"
 
 
 def _opt(value):
@@ -142,8 +152,10 @@ def new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
 
-def company_key(ticker: str) -> str:
-    return "company:" + ticker.upper()
+def company_key(ticker: str, register_no: str = "") -> str:
+    """A company's node key: its register number when known, else its ticker (issue #35)."""
+    reg, _ = split_reg_numbers(register_no)
+    return "company:" + (reg or ticker.upper())
 
 
 class Graph:
@@ -190,6 +202,8 @@ class Graph:
             self.run(stmt, today=_today())
         self.migrate_positions()
         self.rekey_entities()
+        # what the last start or load merged and re-keyed (the pipeline logs it)
+        self.consolidated = self.consolidate_companies()
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -338,6 +352,257 @@ class Graph:
             self.run("MATCH (o:Entity {key: $old}) DETACH DELETE o", old=old)
         return len(moves)
 
+    # ---- one node per legal entity (issue #35) ----------------------------------
+
+    def consolidate_companies(self) -> dict:
+        """One :Company node per legal entity, keyed by its register number.
+
+        * `reg_no` (either kind of number, from graphs before #35) is split into
+          `register_no` (the registry's 7-digit number) and `state_reg_no` (mse.mn's
+          10-digit one);
+        * companies with the same `register_no` are merged into one node: the listed
+          one if any, else the one with a real ticker, else the oldest. The others'
+          tickers and keys are kept in `former_tickers` / `former_keys`, so they still
+          resolve (resolve_key, resolve_ticker, canonicalize);
+        * an :Organization whose register number (its own `register_no`, or the
+          `owner_reg` of its beneficial-owner edges) is a company's is merged into it;
+        * every company's key is `company:<register_no>`, else `company:<TICKER>`, and
+          listed companies carry the `Listed` label;
+        * organisations get an `org_type` from their name where no source gave one.
+
+        Runs on every start and after every load. Returns what it changed.
+        """
+        out = {"split_numbers": self._split_reg_numbers(),
+               "companies_merged": 0, "organizations_merged": 0}
+        groups = self.run(
+            """
+            MATCH (c:Company) WHERE c.register_no =~ $re
+            WITH c.register_no AS reg, collect(c) AS cs WHERE size(cs) > 1
+            RETURN reg, [c IN cs | {id: elementId(c), ticker: c.ticker, listed: coalesce(c.listed, true),
+                                    first: coalesce(c.first_seen, '')}] AS cs
+            """, re=REGISTER_NO_RE)
+        for grp in groups:
+            keep, *rest = sorted(grp["cs"], key=lambda c: (not c["listed"], c["ticker"].startswith("~"),
+                                                           c["first"], c["ticker"]))
+            for c in rest:
+                self._merge_node(c["id"], keep["id"])
+                out["companies_merged"] += 1
+        pairs = self.run(
+            """
+            MATCH (o:Organization) WHERE NOT o:Company
+            OPTIONAL MATCH (o)-[b:BENEFICIAL_OWNER]->()
+            WITH o, collect(DISTINCT b.owner_reg) + collect(DISTINCT o.register_no) AS regs
+            UNWIND regs AS reg
+            MATCH (c:Company {register_no: reg})     // a company's register_no is always a register number
+            RETURN DISTINCT elementId(o) AS org, elementId(c) AS company, reg ORDER BY reg
+            """)
+        merged = set()
+        for p in pairs:
+            if p["org"] not in merged:      # an organisation named with two numbers goes to the first
+                self._merge_node(p["org"], p["company"])
+                merged.add(p["org"])
+        out["organizations_merged"] = len(merged)
+        out["rekeyed"] = self.run(
+            """
+            MATCH (c:Company)
+            WITH c, 'company:' + CASE WHEN c.register_no =~ $re THEN c.register_no ELSE c.ticker END AS want
+            WHERE c.key IS NULL OR c.key <> want
+            SET c.former_keys = CASE WHEN c.key IS NULL OR c.key IN coalesce(c.former_keys, [])
+                                     THEN c.former_keys ELSE coalesce(c.former_keys, []) + c.key END,
+                c.key = want
+            RETURN count(c) AS n
+            """, re=REGISTER_NO_RE)[0]["n"]
+        self.run("MATCH (c:Company) WHERE coalesce(c.listed, true) AND NOT c:Listed SET c:Listed")
+        self.run("MATCH (c:Company:Listed) WHERE c.listed = false REMOVE c:Listed")
+        out["org_types"] = self._type_organizations()
+        return out
+
+    def _split_reg_numbers(self) -> int:
+        """Move the `reg_no` of graphs before #35 into `register_no` / `state_reg_no`."""
+        rows = self.run("""MATCH (c:Company) WHERE c.reg_no IS NOT NULL
+                           RETURN elementId(c) AS id, c.reg_no AS reg_no, c.register_no AS register_no,
+                                  c.state_reg_no AS state_reg_no""")
+        updates = []
+        for r in rows:
+            register, state = split_reg_numbers(r["register_no"], r["state_reg_no"], r["reg_no"])
+            if register and r["register_no"] and register != r["register_no"]:
+                register = r["register_no"]
+            updates.append({"id": r["id"], "register": register or None, "state": state or None})
+        self.run("""UNWIND $rows AS r MATCH (c) WHERE elementId(c) = r.id
+                    SET c.register_no = r.register, c.state_reg_no = r.state REMOVE c.reg_no""", rows=updates)
+        return len(updates)
+
+    def _type_organizations(self) -> int:
+        """`org_type` from the name for organisations no source typed, when the rules changed."""
+        rows = self.run("""MATCH (o:Organization) WHERE NOT o:Company AND coalesce(o.org_type_by, '') <> 'source'
+                             AND coalesce(o.org_type_v, '') <> $v
+                           RETURN elementId(o) AS id, o.name AS name""", v=ORG_TYPES_VERSION)
+        self.run("""UNWIND $rows AS r MATCH (o) WHERE elementId(o) = r.id
+                    SET o.org_type = r.t, o.org_type_by = 'name', o.org_type_v = $v""",
+                 rows=[{"id": r["id"], "t": org_type_from_name(r["name"])} for r in rows], v=ORG_TYPES_VERSION)
+        return len(rows)
+
+    def _merge_node(self, old: str, new: str) -> None:
+        """Merge node `old` into node `new` (element ids): edges, names and history.
+
+        Every period (past or current) of every edge moves over, except a current edge
+        `new` already has to or from the same node (for positions: the same seat); that
+        one only adds its sources and spellings to the edge `new` keeps. Edges between
+        the two nodes are dropped. `new` keeps its own properties and takes the ones it
+        lacks; the old ticker, key and names are remembered (`former_tickers`,
+        `former_keys`, `merged_aliases`)."""
+        for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
+            for pattern, twin in (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
+                                  ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)")):
+                create = "(n)-[y:{rel}]->(t)" if pattern.startswith("(o)") else "(t)-[y:{rel}]->(n)"
+                self.run(
+                    f"""
+                    MATCH (o) WHERE elementId(o) = $old
+                    MATCH (n) WHERE elementId(n) = $new
+                    MATCH {pattern.format(rel=rel)} WHERE t <> n AND t <> o
+                    OPTIONAL MATCH {twin.format(rel=rel)}
+                    WHERE coalesce(r.current, false) AND coalesce(x.post, x.title, '') = coalesce(r.post, r.title, '')
+                    WITH n, r, t, head(collect(x)) AS x
+                    CALL (n, r, t, x) {{
+                        WITH n, r, t WHERE x IS NULL
+                        CREATE {create.format(rel=rel)}
+                        SET y = properties(r)
+                    }}
+                    CALL (r, x) {{
+                        WITH r, x WHERE x IS NOT NULL
+                        WITH r, x, coalesce(x.sources, [v IN [x.source] WHERE v IS NOT NULL]) AS have
+                        SET x.sources = have + [v IN coalesce(r.sources, [r.source]) WHERE v IS NOT NULL
+                                                AND NOT v IN have],
+                            x.titles = CASE WHEN r.titles IS NULL THEN x.titles ELSE
+                                coalesce(x.titles, []) + [v IN r.titles WHERE NOT v IN coalesce(x.titles, [])] END,
+                            x.first_seen = CASE WHEN r.first_seen < x.first_seen THEN r.first_seen
+                                                ELSE x.first_seen END
+                    }}
+                    """, old=old, new=new)
+        po, pn = (self.run("MATCH (x) WHERE elementId(x) = $id RETURN properties(x) AS p", id=i)[0]["p"]
+                  for i in (old, new))
+        fill = {k: v for k, v in po.items() if k not in pn and k not in _OWN_PROPS}
+        company = "ticker" in pn
+        merged = {"former_keys": _add(pn.get("former_keys"), po.get("former_keys"), [po.get("key")],
+                                      skip=pn.get("key"))}
+        if company:
+            names = [a for a in (po.get("aliases") or []) + (po.get("merged_aliases") or []) + [po.get("key")]
+                     if a and a.startswith("org:")]
+            merged.update({
+                "former_tickers": _add(pn.get("former_tickers"), po.get("former_tickers"), [po.get("ticker")],
+                                       skip=pn.get("ticker")),
+                "merged_aliases": _add(pn.get("merged_aliases"), names),
+                "aliases": _add(pn.get("aliases"), names),
+                "listed": bool(pn.get("listed", True)) or bool(po.get("listed", False)),
+            })
+        if po.get("first_seen") and pn.get("first_seen") and po["first_seen"] < pn["first_seen"]:
+            merged["first_seen"] = po["first_seen"]
+            merged["first_run"] = po.get("first_run")
+        self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
+                    SET n += $props DETACH DELETE o""", old=old, new=new, props={**fill, **merged})
+
+    def canonicalize(self, ds: Dataset) -> dict[str, str]:
+        """Point a dataset's tickers at the nodes the graph keeps for them (in place).
+
+        A ticker that was merged away (a `~<register no>` of a company that turned out
+        to be listed), or a company row whose register number another company already
+        has, is rewritten to that company's ticker, in every row and snapshot. Two rows
+        of one dataset with the same register number become one company. Such company
+        rows are marked `merge_only` (see load()): they add names and fill gaps, but
+        never rename the company or change whether it is listed.
+        Returns {old ticker: new ticker} for the tickers it rewrote."""
+        rows = self.run("MATCH (c:Company) RETURN c.ticker AS t, c.register_no AS reg, "
+                        "coalesce(c.former_tickers, []) AS former, coalesce(c.listed, true) AS listed")
+        have = {r["t"] for r in rows}
+        former = {f: r["t"] for r in rows for f in r["former"]}
+        by_reg = {r["reg"]: r["t"] for r in rows if r["reg"]}
+        tmap: dict[str, str] = {}
+
+        def canon(ticker: str, reg: str = "") -> str:
+            t = ticker.upper()
+            if t in tmap:
+                return tmap[t]
+            if t in have:
+                return t
+            if t in former:
+                return former[t]
+            if reg and reg in by_reg:
+                return by_reg[reg]
+            if t.startswith("~") and t[1:] in by_reg:
+                return by_reg[t[1:]]
+            return t
+
+        # listed rows first, so a listed company keeps its ticker within one dataset too
+        for c in sorted(ds.companies, key=lambda c: not c.listed):
+            reg, _ = split_reg_numbers(c.register_no, c.reg_no)
+            t = c.ticker.upper()
+            new = canon(t, reg)
+            if new != t:
+                tmap[t] = new
+            elif reg and reg not in by_reg:
+                by_reg[reg] = t
+        for t in {x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners} | \
+                 {x.holder_ticker.upper() for x in ds.shareholdings if x.holder_ticker} | \
+                 {f.ticker.upper() for f in ds.facts} | \
+                 {t.upper() for scopes in ds.snapshots.values() for t in scopes}:
+            new = canon(t)
+            if new != t:
+                tmap[t] = new
+        if not tmap:
+            return {}
+        for c in ds.companies:
+            if c.ticker.upper() in tmap:
+                c.merged_from, c.ticker = c.ticker.upper(), tmap[c.ticker.upper()]
+                c.merge_only = True
+        for x in ds.shareholdings + ds.positions + ds.beneficial_owners:
+            x.company_ticker = tmap.get(x.company_ticker.upper(), x.company_ticker)
+        for x in ds.shareholdings:
+            if x.holder_ticker:
+                x.holder_ticker = tmap.get(x.holder_ticker.upper(), x.holder_ticker)
+        for f in ds.facts:
+            f.ticker = tmap.get(f.ticker.upper(), f.ticker)
+        for kind, scopes in ds.snapshots.items():
+            ds.snapshots[kind] = {tmap.get(t.upper(), t): p for t, p in scopes.items()}
+        return tmap
+
+    def company_keys(self) -> dict[str, str]:
+        """ticker (and former ticker) -> the company's node key."""
+        out = {}
+        for r in self.run("MATCH (c:Company) RETURN c.ticker AS t, c.key AS key, "
+                          "coalesce(c.former_tickers, []) AS former"):
+            for t in r["former"]:
+                out.setdefault(t, r["key"])
+            out[r["t"]] = r["key"]
+        return out
+
+    def resolve_key(self, key: str) -> str:
+        """The current key of the node `key` names: old company keys (`company:APU`,
+        `company:~2702673`), a ticker or a register / state registration number after
+        `company:` all lead to the company. Unknown keys come back unchanged."""
+        key = (key or "").strip()
+        if not key.startswith("company:"):
+            return key
+        t = key[len("company:"):].strip()
+        rows = self.run(
+            """
+            MATCH (c:Company)
+            WHERE c.key = $key OR $key IN coalesce(c.former_keys, []) OR c.ticker IN [$t, toUpper($t)]
+               OR toUpper($t) IN coalesce(c.former_tickers, []) OR c.register_no = $t OR c.state_reg_no = $t
+            RETURN c.key AS key ORDER BY (c.key = $key) DESC, (c.ticker = toUpper($t)) DESC LIMIT 1
+            """, key=key, t=t)
+        return rows[0]["key"] if rows else key
+
+    def resolve_ticker(self, ticker: str) -> str:
+        """The ticker the graph keeps for `ticker` (it may be a former ticker or a register number)."""
+        t = (ticker or "").strip().upper()
+        rows = self.run(
+            """
+            MATCH (c:Company)
+            WHERE c.ticker = $t OR $t IN coalesce(c.former_tickers, []) OR c.register_no = $t OR c.state_reg_no = $t
+            RETURN c.ticker AS t ORDER BY (c.ticker = $t) DESC LIMIT 1
+            """, t=t)
+        return rows[0]["t"] if rows else t
+
     def wipe(self):
         self.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 5000 ROWS")
 
@@ -422,6 +687,7 @@ class Graph:
         self.init_schema()
         when = observed_at or ds.observed_at or _today()
         run = run or new_run_id()
+        self.canonicalize(ds)
         companies = []
         for c in ds.companies:
             others = [n.strip() for n in (c.other_names or "").split("|") if n.strip()]
@@ -429,22 +695,35 @@ class Graph:
                              {entity_key(n) for n in _org_variants(c.name)} |
                              # a bare former name ("Шунхлайгрупп") has no legal-form marker
                              {entity_key(n, k) for n in others for k in ("", "organization")})
-            companies.append({**c.__dict__, "ticker": c.ticker.upper(),
-                              "key": company_key(c.ticker), "aliases": aliases})
+            register, state = split_reg_numbers(c.register_no, c.state_reg_no, c.reg_no)
+            companies.append({**{k: v for k, v in c.__dict__.items() if k != "reg_no"},
+                              "ticker": c.ticker.upper(), "register_no": register, "state_reg_no": state,
+                              "key": company_key(c.ticker, register), "aliases": aliases,
+                              "merge_only": bool(getattr(c, "merge_only", False)),
+                              "merged_from": getattr(c, "merged_from", None)})
+        # a company's own rows first: a merged-in row (merge_only) only adds to them
+        companies.sort(key=lambda r: r["merge_only"])
+        fill = lambda f: (f"c.{f} = CASE WHEN r.{f} <> '' AND (NOT r.merge_only OR coalesce(c.{f}, '') = '') "  # noqa: E731
+                          f"THEN r.{f} ELSE c.{f} END")
         self.run(
-            """
+            f"""
             UNWIND $rows AS r
-            MERGE (c:Entity:Company {ticker: r.ticker})
-            ON CREATE SET c.first_seen = $when, c.first_run = $run
-            SET c.key = r.key, c.name = r.name, c.listed = r.listed,
-                c.aliases = r.aliases,
-                c.name_en  = CASE WHEN r.name_en  <> '' THEN r.name_en  ELSE c.name_en  END,
-                c.sector   = CASE WHEN r.sector   <> '' THEN r.sector   ELSE c.sector   END,
-                c.reg_no   = CASE WHEN r.reg_no   <> '' THEN r.reg_no   ELSE c.reg_no   END,
-                c.address  = CASE WHEN r.address  <> '' THEN r.address  ELSE c.address  END,
-                c.website  = CASE WHEN r.website  <> '' THEN r.website  ELSE c.website  END,
-                c.mse_id   = CASE WHEN r.mse_id   <> '' THEN r.mse_id   ELSE c.mse_id   END,
-                c.url      = CASE WHEN r.url      <> '' THEN r.url      ELSE c.url      END
+            MERGE (c:Entity:Company {{ticker: r.ticker}})
+            ON CREATE SET c.first_seen = $when, c.first_run = $run, c.key = r.key
+            SET c.name = CASE WHEN r.merge_only THEN coalesce(c.name, r.name) ELSE r.name END,
+                c.listed = CASE WHEN r.merge_only THEN coalesce(c.listed, r.listed) ELSE r.listed END,
+                c.merged_aliases = CASE WHEN r.merge_only THEN coalesce(c.merged_aliases, []) +
+                    [a IN r.aliases WHERE NOT a IN coalesce(c.merged_aliases, [])] ELSE c.merged_aliases END,
+                c.former_tickers = CASE WHEN r.merged_from IS NULL OR r.merged_from = c.ticker
+                                          OR r.merged_from IN coalesce(c.former_tickers, []) THEN c.former_tickers
+                                        ELSE coalesce(c.former_tickers, []) + r.merged_from END
+            // aliases: the company's own names, plus those of the rows and nodes merged into it
+            SET c.aliases = CASE WHEN r.merge_only THEN coalesce(c.aliases, []) ELSE r.aliases END
+            SET c.aliases = c.aliases + [a IN coalesce(c.merged_aliases, []) WHERE NOT a IN c.aliases],
+                {fill("name_en")}, {fill("sector")}, {fill("address")}, {fill("website")},
+                {fill("mse_id")}, {fill("url")}, {fill("state_reg_no")},
+                c.register_no = CASE WHEN coalesce(c.register_no, '') = '' AND r.register_no <> ''
+                                     THEN r.register_no ELSE c.register_no END
             """,
             rows=companies, when=when, run=run,
         )
@@ -457,6 +736,9 @@ class Graph:
         changes.update(self._load_positions(ds, when, run))
         changes.update(self._load_beneficial_owners(ds, when, run))
         self._load_facts(ds)
+        merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
+        if merged["companies_merged"] or merged["organizations_merged"]:
+            changes.update({k: merged[k] for k in ("companies_merged", "organizations_merged")})
         return {**self.stats(), "observed_at": when, "run": run, "changes": changes}
 
     def _new_sources(self, rel: str, snaps: dict[str, str]) -> set[str]:
@@ -476,6 +758,7 @@ class Graph:
     def _load_shareholdings(self, ds: Dataset, when: str, run: str) -> dict:
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+        tkeys = self.company_keys()
         snaps = {t.upper(): p for t, p in ds.snapshots.get("shareholdings", {}).items()}
         fresh = self._new_sources("OWNS", snaps)
         # "holdings" snapshots are keyed by the holder: a company's own list of its
@@ -492,7 +775,7 @@ class Graph:
             holder = h.holder_ticker.upper()
             key = entity_key(name, h.holder_type)
             if holder:
-                key, label = company_key(holder), "Company"
+                key, label = tkeys.get(holder) or company_key(holder), "Company"
             elif key in alias_map or entity_key(name) in alias_map:
                 key, label = alias_map.get(key) or alias_map[entity_key(name)], "Company"
             else:
@@ -504,7 +787,7 @@ class Graph:
             if in_holdings:
                 held[holder].append(ticker)
             row = {
-                "ticker": ticker, "key": key, "name": name, "label": label,
+                "ticker": ticker, "key": key, "name": name, "label": label, "org_type": _org_type(h.org_type),
                 "percent": h.percent, "shares": h.shares, "as_of": _opt(parse_date(h.as_of)),
                 "source": h.source,
                 # rows from a complete snapshot of the company define its current owners
@@ -534,6 +817,7 @@ class Graph:
                 """,
                 rows=[h for h in holdings if h["label"] == label],
             )
+        self._set_org_types(holdings)
         res = self.run(
             """
             UNWIND $rows AS r
@@ -623,6 +907,12 @@ class Graph:
                  t=sorted(fresh_holders), when=when)
         return {"ownerships_opened": res["opened"], "ownerships_changed": res["changed"],
                 "ownerships_closed": closed, "ownerships_conflicting": res["conflicting"]}
+
+    def _set_org_types(self, rows: list[dict]) -> None:
+        """Record the `org_type` a source gave for an organisation; it wins over the name rule."""
+        typed = [{"key": r["key"], "t": r["org_type"]} for r in rows if r["label"] == "Organization" and r["org_type"]]
+        self.run("""UNWIND $rows AS r MATCH (o:Organization {key: r.key}) WHERE NOT o:Company
+                    SET o.org_type = r.t, o.org_type_by = 'source'""", rows=typed)
 
     def _new_holders(self, hsnaps: dict[str, str]) -> set[str]:
         """Companies whose own list of stakes in other companies is read for the first time."""
@@ -743,8 +1033,8 @@ class Graph:
         # An owner the registry names by its registration number is that company,
         # whatever it is called on the page.
         reg_map = {row["reg"]: row["key"] for row in self.run(
-            """MATCH (c:Company) UNWIND [x IN [c.reg_no, c.register_no] WHERE x =~ $re] AS reg
-               RETURN reg, c.key AS key""", re=REGISTER_NO_RE)}
+            "MATCH (c:Company) WHERE c.register_no =~ $re RETURN c.register_no AS reg, c.key AS key",
+            re=REGISTER_NO_RE)}
         snaps = {t.upper(): p for t, p in ds.snapshots.get("beneficial_owners", {}).items()}
         fresh = self._new_sources("BENEFICIAL_OWNER", snaps)
         rows = {}
@@ -763,7 +1053,7 @@ class Graph:
                 key = alias_map.get(key, key)
             ticker = b.company_ticker.upper()
             rows[(ticker, key)] = {"ticker": ticker, "key": key, "name": name, "reg": reg or None,
-                                   "label": label, "since": _opt(parse_date(b.since)), "source": b.source,
+                                   "label": label, "org_type": _org_type(b.org_type), "since": _opt(parse_date(b.since)), "source": b.source,
                                    "baseline": ticker in fresh}
         rows = list(rows.values())
         for label in ("Person", "Organization"):
@@ -776,6 +1066,12 @@ class Graph:
                 """,
                 rows=[r for r in rows if r["label"] == label],
             )
+        # an organisation the registry names by its number: once a company has that
+        # number, consolidate_companies merges the two
+        self.run("""UNWIND $rows AS r MATCH (o:Organization {key: r.key}) WHERE NOT o:Company
+                    SET o.register_no = coalesce(o.register_no, r.reg)""",
+                 rows=[r for r in rows if r["label"] == "Organization" and r["reg"]])
+        self._set_org_types(rows)
         opened = self.run(
             """
             UNWIND $rows AS r
@@ -816,12 +1112,16 @@ class Graph:
 
     def _load_facts(self, ds: Dataset):
         """Registry facts: fill empty company properties only."""
-        rows = [{**f.__dict__, "ticker": f.ticker.upper()} for f in ds.facts]
+        rows = []
+        for f in ds.facts:
+            register, state = split_reg_numbers(f.register_no, f.reg_no)
+            rows.append({**f.__dict__, "ticker": f.ticker.upper(), "register_no": register, "state_reg_no": state})
         self.run(
             """
             UNWIND $rows AS r
             MATCH (c:Company {ticker: r.ticker})
-            SET c.reg_no  = CASE WHEN coalesce(c.reg_no, '')  = '' THEN r.reg_no  ELSE c.reg_no  END,
+            SET c.state_reg_no = CASE WHEN coalesce(c.state_reg_no, '') = '' AND r.state_reg_no <> ''
+                                      THEN r.state_reg_no ELSE c.state_reg_no END,
                 c.address = CASE WHEN coalesce(c.address, '') = '' THEN r.address ELSE c.address END,
                 c.legal_form = CASE WHEN r.legal_form <> '' THEN r.legal_form ELSE c.legal_form END,
                 c.founded = CASE WHEN r.founded <> '' THEN r.founded ELSE c.founded END,
@@ -837,14 +1137,13 @@ class Graph:
     def companies_with_reg(self, retry_days: int = 30) -> list[tuple[str, str]]:
         """(ticker, number to look up in the registry) of every company that has one, listed first.
 
-        The 7-digit register number (`register_no`) wins over `reg_no`, which for
-        listed companies is mse.mn's 10-digit state registration number. Only numbers
-        that can be register numbers count, and a number the registry answered "not
-        found" for is left out for `retry_days` (see note_registry_checks)."""
+        Only the 7-digit register number (`register_no`) counts: mse.mn's 10-digit state
+        registration number (`state_reg_no`) is not one the registry knows. A number the
+        registry answered "not found" for is left out for `retry_days` (see note_registry_checks)."""
         return [(r["t"], r["reg"]) for r in self.run(
             """
             MATCH (c:Company)
-            WITH c, coalesce(c.register_no, c.reg_no) AS reg
+            WITH c, c.register_no AS reg
             WHERE reg =~ $re AND NOT EXISTS {
                 MATCH (l:RegistryLead {reg: reg}) WHERE l.status = 'not found' AND l.checked_at >= $after }
             RETURN c.ticker AS t, reg
@@ -900,7 +1199,7 @@ class Graph:
             WITH reg, collect(DISTINCT e) AS owners, min(coalesce(c.discovery_depth, 0)) + 1 AS depth,
                  collect(DISTINCT c.ticker) AS via
             WHERE depth <= $max_depth
-              AND NOT EXISTS { MATCH (x:Company) WHERE x.reg_no = reg OR x.register_no = reg }
+              AND NOT EXISTS { MATCH (x:Company) WHERE x.register_no = reg }
               AND NOT EXISTS { MATCH (l:RegistryLead {reg: reg}) WHERE l.checked_at >= $after }
             RETURN reg, owners[0].name AS name, owners[0].key AS owner_key, depth, via
             ORDER BY depth, size(via) DESC, reg
@@ -912,7 +1211,7 @@ class Graph:
         return self.run(
             """
             MATCH (c:Company) WHERE c.registry_url IS NULL
-            WITH c, coalesce(c.register_no, c.reg_no) AS reg
+            WITH c, c.register_no AS reg
             WHERE reg =~ $re AND NOT EXISTS {
                 MATCH (l:RegistryLead {reg: reg}) WHERE l.checked_at >= $after }
             RETURN c.ticker AS ticker, c.name AS name, reg, coalesce(c.discovery_depth, 0) AS depth
@@ -925,7 +1224,7 @@ class Graph:
             """
             MATCH (c:Company)
             RETURN c.ticker AS t, coalesce(c.listed, true) AS listed,
-                   [x IN [c.register_no, c.reg_no] WHERE x =~ $re][0] AS reg
+                   CASE WHEN c.register_no =~ $re THEN c.register_no END AS reg
             """, re=REGISTER_NO_RE)}
 
     def listed_without_register_no(self) -> list[dict]:
@@ -933,8 +1232,8 @@ class Graph:
         return self.run(
             """
             MATCH (c:Company) WHERE coalesce(c.listed, true)
-              AND NOT coalesce(c.register_no, c.reg_no, '') =~ $re
-            RETURN c.ticker AS ticker, c.name AS name, c.reg_no AS reg_no ORDER BY c.ticker
+              AND NOT coalesce(c.register_no, '') =~ $re
+            RETURN c.ticker AS ticker, c.name AS name, c.state_reg_no AS reg_no ORDER BY c.ticker
             """, re=REGISTER_NO_RE)
 
     def mark_discovered(self, rows: list[dict]) -> None:
@@ -993,7 +1292,7 @@ class Graph:
         """alias key / "reg:<no>" -> ticker, for matching external datasets to companies."""
         out = {}
         for r in self.run("MATCH (c:Company) RETURN c.ticker AS t, c.aliases AS aliases, "
-                          "[x IN [c.reg_no, c.register_no] WHERE coalesce(x, '') <> ''] AS regs"):
+                          "[x IN [c.register_no, c.state_reg_no] WHERE coalesce(x, '') <> ''] AS regs"):
             for a in r["aliases"] or []:
                 out.setdefault(a, r["t"])
             for reg in r["regs"]:
@@ -1030,7 +1329,7 @@ class Graph:
             WHERE toLower(e.name) CONTAINS $q OR toLower(coalesce(e.name_en,'')) CONTAINS $q
                OR toLower(coalesce(e.ticker,'')) = $q
             RETURN e.key AS key, e.name AS name, e.ticker AS ticker,
-                   [l IN labels(e) WHERE l <> 'Entity'][0] AS type,
+                   [l IN labels(e) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                    COUNT { (e)--() } AS degree
             ORDER BY (toLower(coalesce(e.ticker,'')) = $q) DESC, degree DESC, name
             LIMIT $limit
@@ -1042,8 +1341,10 @@ class Graph:
         """An entity with its current links, plus `history`: the links that ended.
 
         Ended stakes include earlier sizes of a stake that is still held
-        (e.g. 12% until 2026-03-01, then the current 15%).
+        (e.g. 12% until 2026-03-01, then the current 15%). Old company keys resolve
+        (resolve_key).
         """
+        key = self.resolve_key(key)
         period = "current: r.current, since: r.since, until: r.until, first_seen: r.first_seen, last_seen: r.last_seen"
         rows = self.run(
             f"""
@@ -1119,6 +1420,7 @@ class Graph:
 
     def neighborhood(self, key: str, depth: int = 1, limit: int = 300) -> dict:
         depth = max(1, min(int(depth), 3))
+        key = self.resolve_key(key)
         rows = self.run(
             f"""
             MATCH (e:Entity {{key: $key}})
@@ -1131,7 +1433,7 @@ class Graph:
             UNWIND nodes AS n WITH collect(DISTINCT n) AS nodes, rels
             UNWIND (CASE WHEN rels = [] THEN [null] ELSE rels END) AS r
             WITH nodes, collect(DISTINCT r) AS rels
-            RETURN [n IN nodes | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l <> 'Entity'][0]}}] AS nodes,
+            RETURN [n IN nodes | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                   percent: r.percent, title: r.title, role: r.role}}] AS edges
             """,
@@ -1150,7 +1452,7 @@ class Graph:
             UNWIND rs AS r
             WITH collect(DISTINCT x) + collect(DISTINCT endNode(r)) AS ns, collect(DISTINCT r) AS rels
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
-            RETURN [n IN nodes | n {.key, .name, .ticker, type: [l IN labels(n) WHERE l <> 'Entity'][0]}] AS nodes,
+            RETURN [n IN nodes | n {.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
                    [r IN rels | {source: startNode(r).key, target: endNode(r).key, type: type(r),
                                  percent: r.percent, title: r.title, role: r.role}] AS edges
             """,
@@ -1160,12 +1462,13 @@ class Graph:
 
     def shortest_path(self, a: str, b: str, max_hops: int = 8) -> dict:
         max_hops = max(1, min(int(max_hops), 12))
+        a, b = self.resolve_key(a), self.resolve_key(b)
         rows = self.run(
             f"""
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
             MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
-            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l <> 'Entity'][0]}}] AS nodes,
+            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                               percent: r.percent, title: r.title, role: r.role}}] AS edges
             """,
@@ -1180,6 +1483,7 @@ class Graph:
         otherwise add a partial, depth-dependent echo of the same stake. Loops are
         reported separately (analysis.cycles)."""
         max_depth = max(1, min(int(max_depth), 8))
+        ticker = self.resolve_ticker(ticker)
         return self.run(
             f"""
             MATCH p = (owner:Entity)-[:OWNS*1..{max_depth}]->(c:Company {{ticker: $ticker}})
@@ -1191,7 +1495,7 @@ class Graph:
                  collect([n IN nodes(p) | CASE WHEN n:Company AND coalesce(n.listed, true) THEN n.ticker ELSE n.name END]) AS chains
             WHERE effective_percent >= $min
             RETURN owner.key AS key, owner.name AS name,
-                   [l IN labels(owner) WHERE l <> 'Entity'][0] AS type,
+                   [l IN labels(owner) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                    round(effective_percent, 3) AS effective_percent, chains
             ORDER BY effective_percent DESC
             """,
@@ -1220,7 +1524,7 @@ class Graph:
             MATCH (h:Entity)-[o:OWNS {current: true}]->(c:Company)
             WITH h, collect({ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}) AS stakes
             WHERE size(stakes) >= $min
-            RETURN h.key AS key, h.name AS name, [l IN labels(h) WHERE l <> 'Entity'][0] AS type,
+            RETURN h.key AS key, h.name AS name, [l IN labels(h) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                    size(stakes) AS companies, stakes
             ORDER BY companies DESC, name LIMIT $limit
             """,
@@ -1281,6 +1585,28 @@ class Graph:
             """,
             since=since, limit=limit,
         )
+
+
+def _org_type(value: str | None) -> str:
+    """A source's organisation type if it is one of ORG_TYPES, else ""."""
+    v = clean(value).lower()
+    return v if v in ORG_TYPES else ""
+
+
+# Properties of a merged-away node that _merge_node never copies onto the node it keeps.
+_OWN_PROPS = {"key", "ticker", "former_keys", "former_tickers", "aliases", "merged_aliases", "listed",
+              "org_type", "org_type_by", "org_type_v",
+              "first_seen", "first_run"}
+
+
+def _add(*lists, skip=None) -> list:
+    """The items of `lists` in order, once each, without None and `skip`."""
+    out = []
+    for items in lists:
+        for x in items or []:
+            if x is not None and x != skip and x not in out:
+                out.append(x)
+    return out
 
 
 def _org_variants(name: str) -> list[str]:
