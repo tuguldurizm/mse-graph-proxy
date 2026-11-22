@@ -5,4 +5,5 @@ httpx[socks]>=0.27   # [socks]: socks5:// routes in ODL_PROXY_URL
 beautifulsoup4>=4.12
 lxml>=5.0
 openpyxl>=3.1
+networkx>=3.2         # group detection (#28): Louvain communities
 pytest>=8.0

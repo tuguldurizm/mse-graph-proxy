@@ -287,6 +287,42 @@ def data_quality():
     return quality.report(g())
 
 
+# ---- groups and control (issue #28): groups.py ------------------------------------------
+
+@app.get("/api/analysis/groups")
+def control_groups(min_companies: int = Query(1, ge=1), listed: bool = False):
+    """One group per top owner (an owner no one controls): the companies it controls (> 50%
+    through majority chains) or influences (the largest block, >= 20%), with the chain and
+    the look-through %. Only current stakes with a percent count."""
+    from . import groups
+    return _covered("groups", groups.control_groups(g(), min_companies=min_companies, listed_only=listed))
+
+
+@app.get("/api/analysis/groups/owner")
+def control_group(key: str):
+    """The control group of one owner (any holder), with its subgraph."""
+    from . import groups, quality
+    grp = groups.group_of(g(), key)
+    if not grp:
+        raise HTTPException(404, f"no entity {key}")
+    return {"group": grp, "graph": groups.group_subgraph(g(), grp["key"]),
+            "coverage": quality.coverage(g(), "groups")}
+
+
+@app.get("/api/analysis/communities")
+def communities(fresh: bool = False):
+    """Detected groups (Louvain on the combined graph), as last written by the pipeline
+    (`group_id`), else computed now; plus how well they recover the hand-curated groups."""
+    from . import groups
+    return _covered("communities", groups.communities(g(), fresh=fresh))
+
+
+@app.get("/api/graph/community")
+def community_graph(id: str):
+    from . import groups
+    return groups.community_subgraph(g(), id)
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.

@@ -29,6 +29,10 @@
                                                            largest holders, free float, HHI per company (#7)
     python -m mse_graph.cli quality [--summary] [--json]   data problems per listed company (#8)
     python -m mse_graph.cli coverage                       how many listed companies each kind of data covers (#27)
+    python -m mse_graph.cli groups [--owner NAME] [--min-companies N] [--listed] [--json]
+                                                           who controls / influences which companies (#28)
+    python -m mse_graph.cli communities [--write] [--json] detected groups and their score against the
+                                                           hand-curated groups (#28); --write sets group_id
 
 Every analysis command ends with a coverage line (on stderr for the JSON ones, so stdout
 stays JSON): how many of the listed companies its result rests on (issue #27).
@@ -134,6 +138,14 @@ def main(argv=None):
     p.add_argument("--summary", action="store_true", help="only the number of companies per problem")
     p.add_argument("--json", action="store_true")
     sub.add_parser("coverage", help="how many listed companies each kind of data covers (#27)")
+    p = sub.add_parser("groups", help="control groups: what each top owner controls or influences (#28)")
+    p.add_argument("--owner", help="one owner (name, ticker or key), also one that is itself controlled")
+    p.add_argument("--min-companies", type=int, default=1)
+    p.add_argument("--listed", action="store_true", help="only groups with a listed company")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("communities", help="detected groups (Louvain) and their score against data/manual, data/mcs (#28)")
+    p.add_argument("--write", action="store_true", help="write group_id onto the nodes")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("flags", help="governance flags for one company")
     p.add_argument("ticker")
     p = sub.add_parser("owners", help="look-through (ultimate) owners of a company")
@@ -403,6 +415,8 @@ def main(argv=None):
             _coverage(g, "board-overlap")
         elif args.cmd in ("concentration", "quality", "coverage"):
             _quality_cmd(g, args)
+        elif args.cmd in ("groups", "communities"):
+            _groups_cmd(g, args)
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":
@@ -433,6 +447,53 @@ def main(argv=None):
             _print(g.ultimate_owners(args.ticker))
         elif args.cmd == "path":
             _print(g.shortest_path(_resolve(g, args.a), _resolve(g, args.b)))
+
+
+def _groups_cmd(g, args) -> None:
+    """Control groups and detected groups (issue #28, groups.py)."""
+    from . import groups
+    f = lambda v: "-" if v is None else f"{v:g}"
+    if args.cmd == "communities":
+        found = groups.detect(g)
+        score = groups.curated_score(g, found)
+        written = groups.write_communities(g, found) if args.write else None
+        if args.json:
+            _print({"communities": found, "curated": score, "written": written})
+            _coverage(g, "communities")
+            return
+        for c in found:
+            names = ", ".join(m["ticker"] if m["ticker"] and not m["ticker"].startswith("~") else m["name"]
+                              for m in c["members"][:8])
+            print(f"{c['id']:<34} {c['size']:>4} nodes {c['companies']:>3} companies {c['listed']:>3} listed  {names}")
+        print(f"{len(found)} groups")
+        print("hand-curated groups recovered (share of their companies in one detected group):")
+        for s in score:
+            print(f"  {s['dataset']:<14} {f(s['score']):>6}  {s['in_main_group']}/{s['in_graph']} in {s['group'] or '-'}"
+                  f" ({s['groups']} groups, {s['companies']} companies in the dataset)")
+        if written:
+            print(f"group_id written: {written['nodes']} nodes in {written['communities']} groups")
+        _coverage(g, "communities", sys.stdout)
+        return
+    if args.owner:
+        key = args.owner if ":" in args.owner else _resolve(g, args.owner)
+        one = groups.group_of(g, key)
+        res = [one] if one else []
+    else:
+        res = groups.control_groups(g, min_companies=args.min_companies, listed_only=args.listed)
+    if args.json:
+        _print(res)
+        _coverage(g, "groups")
+        return
+    for grp in res:
+        print(f"{grp['name']} ({grp['type']}): controls {grp['controlled']}, influences {grp['influenced']}, "
+              f"{grp['listed_companies']} listed")
+        for c in grp["companies"]:
+            chain = " → ".join(f"{a} ({p:g}%)" if p is not None else a
+                               for a, p in zip(c["chain"][1:], c["chain_percents"]))
+            print(f"  {c['level']:<9} {c['ticker'] or c['name']:<12} block {f(c['block_percent']):>6}%"
+                  f"  look-through {f(c['lookthrough_percent']):>6}%   via {chain}")
+    print(f"{len(res)} groups")
+    _coverage(g, "groups", sys.stdout)
 
 
 def _coverage(g, analysis: str, out=None) -> None:

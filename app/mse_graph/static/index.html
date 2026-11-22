@@ -109,6 +109,10 @@
     <button id="btnConc">Эзэмшлийн төвлөрөл</button>
     <button id="btnQuality">Өгөгдлийн чанар</button>
   </div>
+  <div class="row">
+    <button id="btnGroups">Хяналтын бүлэг</button>
+    <button id="btnCommunities">Илрүүлсэн бүлгүүд</button>
+  </div>
   <ul id="analysis"></ul>
 </aside>
 <main>
@@ -424,6 +428,8 @@ document.getElementById('analysis').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
   const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
+  const gr = ev.target.closest('li[data-group]'); if (gr) return showGroup(gr.dataset.group);
+  const cm = ev.target.closest('li[data-community]'); if (cm) return showCommunity(cm.dataset.community);
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 
@@ -531,6 +537,51 @@ async function showQuality() {
   ul.innerHTML = html;
 }
 document.getElementById('btnQuality').onclick = showQuality;
+
+// ---- groups and control (issue #28) -------------------------------------------------
+// control: > 50% through majority chains; influence: the largest block and >= 20%
+const CTL_MN = { control: 'хяналт', influence: 'нөлөө' };
+const coName = c => c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name;
+async function showGroups() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api('/api/analysis/groups');
+  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Эзэмшигч бүрийн хяналт (&gt; 50%, хяналттай компаниудаар дамжуулан) ба нөлөө (хамгийн том багц, ≥ 20%). Хувьгүй бүртгэлийн мөр тооцогдохгүй.</li>`;
+  html += r.items.slice(0, 200).map(x => `<li class="rv" data-group="${esc(x.key)}">
+      <span class="name">${esc(x.name)} <span class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</span></span>
+      <div class="meta">${x.companies.slice(0, 6).map(c => `${esc(coName(c))} ${CTL_MN[c.level]} ${fmtPct(c.block_percent)}`).join(' · ')}${x.companies.length > 6 ? ' …' : ''}</div></li>`).join('')
+    || '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = html;
+}
+async function showGroup(key) {
+  const r = await api(`/api/analysis/groups/owner?key=${encodeURIComponent(key)}`), x = r.group;
+  draw(r.graph, { focus: x.key });
+  document.getElementById('details').innerHTML =
+    `<div><b style="color:var(--ink)">${esc(x.name)}</b> <span class="tag ${x.type}">${x.type}</span></div>` +
+    `<div class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</div>` +
+    list('Компаниуд', x.companies, c => `<span>${esc(coName(c))} <span class="meta">${CTL_MN[c.level]} · ` +
+      `${c.chain.map(esc).join(' → ')}</span></span><span class="meta">${fmtPct(c.block_percent)} / look-through ${fmtPct(c.lookthrough_percent)}</span>`) +
+    `<div class="meta" style="font-size:11px">${covText(r.coverage)}</div>`;
+}
+async function showCommunities() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api('/api/analysis/communities');
+  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Эзэмшил, эцсийн өмчлөгч, албан тушаалын холбоосоор автоматаар илрүүлсэн бүлгүүд (Louvain)${r.detected_at ? ' · ' + esc(r.detected_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}.</li>`;
+  const cur = (r.curated || []).filter(s => s.in_graph);
+  if (cur.length) html += group('Гараар бүрдүүлсэн бүлгүүдтэй тулгалт') + cur.map(s =>
+    `<li class="meta" style="cursor:default">${esc(s.dataset)}: ${s.in_main_group}/${s.in_graph} компани нэг бүлэгт${s.score != null ? ` (${Math.round(s.score * 100)}%)` : ''}</li>`).join('');
+  html += group('Бүлгүүд') + r.communities.slice(0, 200).map(c => `<li class="rv" data-community="${esc(c.id)}">
+      <span class="name">${esc(coName(c.anchor))} <span class="meta">${c.companies} компани (бүртгэлтэй ${c.listed}) · ${c.people} хүн</span></span>
+      <div class="meta">${c.members.slice(0, 8).map(m => esc(coName(m))).join(', ')}${c.size > 8 ? ' …' : ''}</div></li>`).join('')
+    || '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = html;
+}
+async function showCommunity(id) {
+  draw(await api(`/api/graph/community?id=${encodeURIComponent(id)}`));
+}
+document.getElementById('btnGroups').onclick = showGroups;
+document.getElementById('btnCommunities').onclick = showCommunities;
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');

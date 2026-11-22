@@ -132,6 +132,8 @@ ANALYSES = {
     "resolution": ("officers", "registry_officers"),
     "concentration": ("holdings", "holdings_plausible", "registry_owners"),
     "quality": ("holdings", "officers", "register_no", "registry", "sector"),
+    "groups": ("holdings", "holdings_plausible", "registry_owners"),
+    "communities": ("holders", "officers", "registry_owners", "registry_officers"),
 }
 
 
