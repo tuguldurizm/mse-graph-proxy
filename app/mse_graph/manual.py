@@ -41,6 +41,8 @@ def load_manual(g, root: str | Path | None = None, force: bool = False) -> list[
     for d in csv_io.manual_dirs(_root(root)):
         digest = csv_io.dir_digest(d)
         if not force and g.manual_digest(d.name) == digest:
+            # idempotent, so it also runs for unchanged datasets: cleans edges an earlier load left
+            drop_unverified_twins(g, csv_io.read_dir(d))
             out.append({"dataset": d.name, "status": "unchanged"})
             continue
         ds = csv_io.read_dir(d)
@@ -48,6 +50,7 @@ def load_manual(g, root: str | Path | None = None, force: bool = False) -> list[
         loaded = g.load(ds)
         g.mark_baseline(loaded["run"])
         removed = drop_retracted(g, ds)
+        drop_unverified_twins(g, ds)
         missing = sorted(g.missing_tickers(_referenced(ds) - _own(ds)))
         if missing:
             out.append({"dataset": d.name, "status": "partial", "missing_companies": missing})
@@ -105,6 +108,34 @@ def drop_retracted(g, ds) -> int:
     if stale:
         g.run("MATCH ()-[r]->() WHERE elementId(r) IN $ids DELETE r", ids=stale)
     return len(stale)
+
+
+def drop_unverified_twins(g, ds) -> int:
+    """Remove the bare page URL that an earlier version of a `search:` row left on its edges.
+
+    When a row's source gains the `search:` prefix, its edges still carry the old bare
+    URL, which is the same string the registry import writes. That would make them look
+    registry-confirmed. The bare URL is removed only from companies the import hasn't read
+    yet (no `registry_url`), so no real registry evidence can be lost; once the page is read,
+    the import adds the URL back to the edges it really reports.
+    """
+    twins = sorted({x.source[len(UNVERIFIED_PREFIX):]
+                    for x in ds.shareholdings + ds.positions + ds.beneficial_owners
+                    if (x.source or "").startswith(UNVERIFIED_PREFIX)})
+    if not twins:
+        return 0
+    rows = g.run(
+        """
+        MATCH (:Entity)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company)
+        WHERE c.ticker IN $tickers AND coalesce(c.registry_url, '') = ''
+          AND (r.source IN $twins OR any(x IN coalesce(r.sources, []) WHERE x IN $twins))
+        SET r.source = CASE WHEN r.source IN $twins THEN $prefix + r.source ELSE r.source END
+        SET r.sources = [x IN coalesce(r.sources, []) WHERE NOT x IN $twins]
+        SET r.sources = CASE WHEN r.source IS NULL OR r.source IN r.sources THEN r.sources
+                             ELSE r.sources + r.source END
+        RETURN count(r) AS n
+        """, tickers=sorted(_own(ds) | _referenced(ds)), twins=twins, prefix=UNVERIFIED_PREFIX)
+    return rows[0]["n"] if rows else 0
 
 
 def _own(ds) -> set[str]:
