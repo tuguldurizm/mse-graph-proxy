@@ -342,3 +342,88 @@ def org_type_from_name(name: str | None) -> str:
     if not _CYRILLIC_RE.search(n) and _FOREIGN_RE.search(n):
         return "foreign"
     return "other"
+
+
+# ---- standard sector from registry activity codes (issue #38) -------------------
+#
+# The registry lists a company's activities as "<code> - <description>", e.g.
+# "4610 - Гадаад худалдаа" or "46100 - Төлбөр эсвэл ...". The codes are Mongolia's
+# MNSIC, built on ISIC Rev. 4: the first two digits are the ISIC division, and the
+# division gives the section (A-U). A company's standard sector (`sector_std`) is
+# the section of its main activity (main_activity): the first one the registry lists
+# that is not a catch-all registration (GENERIC_ACTIVITIES).
+
+SECTIONS_STD = {
+    # section: (divisions, Mongolian name, English name)
+    "A": ((1, 3), "Хөдөө аж ахуй, ойн аж ахуй, загас агнуур", "Agriculture, forestry and fishing"),
+    "B": ((5, 9), "Уул уурхай, олборлох үйлдвэр", "Mining and quarrying"),
+    "C": ((10, 33), "Боловсруулах үйлдвэр", "Manufacturing"),
+    "D": ((35, 35), "Цахилгаан, хий, уур, агааржуулалт", "Electricity, gas, steam and air conditioning"),
+    "E": ((36, 39), "Ус хангамж, бохир ус, хог хаягдал", "Water supply, sewerage and waste"),
+    "F": ((41, 43), "Барилга", "Construction"),
+    "G": ((45, 47), "Бөөний болон жижиглэн худалдаа", "Wholesale and retail trade"),
+    "H": ((49, 53), "Тээвэр, агуулах", "Transportation and storage"),
+    "I": ((55, 56), "Зочид буудал, нийтийн хоол", "Accommodation and food service"),
+    "J": ((58, 63), "Мэдээлэл, холбоо", "Information and communication"),
+    "K": ((64, 66), "Санхүү, даатгал", "Financial and insurance activities"),
+    "L": ((68, 68), "Үл хөдлөх хөрөнгө", "Real estate"),
+    "M": ((69, 75), "Мэргэжлийн, шинжлэх ухаан, техникийн үйл ажиллагаа",
+          "Professional, scientific and technical activities"),
+    "N": ((77, 82), "Удирдлага, дэмжлэг үзүүлэх үйлчилгээ", "Administrative and support services"),
+    "O": ((84, 84), "Төрийн удирдлага, батлан хамгаалах", "Public administration and defence"),
+    "P": ((85, 85), "Боловсрол", "Education"),
+    "Q": ((86, 88), "Эрүүл мэнд, нийгмийн халамж", "Human health and social work"),
+    "R": ((90, 93), "Урлаг, үзвэр, амралт", "Arts, entertainment and recreation"),
+    "S": ((94, 96), "Бусад үйлчилгээ", "Other service activities"),
+    "T": ((97, 98), "Өрхийн үйл ажиллагаа", "Activities of households as employers"),
+    "U": ((99, 99), "Олон улсын байгууллага", "Extraterritorial organisations"),
+}
+_ACTIVITY_RE = re.compile(r"^\s*(\d{3,6})\b\s*(?:[-–—:.]\s*)?(.*)$")
+
+
+def parse_activity(text: str | None) -> tuple[str, str]:
+    """("4610", "Гадаад худалдаа") from "4610 - Гадаад худалдаа"; ("", "") when there is
+    no code. A 3-digit code lost its leading zero ("510" is division 05)."""
+    m = _ACTIVITY_RE.match(clean(text))
+    if not m:
+        return "", ""
+    code = m.group(1)
+    if len(code) == 3:
+        code = "0" + code
+    return code, clean(m.group(2))
+
+
+def isic_section(code: str | None) -> str:
+    """The ISIC Rev. 4 section letter of an MNSIC / ISIC activity code, else ""."""
+    digits = re.sub(r"\D", "", code or "")
+    if len(digits) < 2:
+        return ""
+    division = int(digits[:2])
+    for section, ((lo, hi), _mn, _en) in SECTIONS_STD.items():
+        if lo <= division <= hi:
+            return section
+    return ""
+
+
+# Registrations so many companies carry that they say nothing of the business: 4610
+# "Гадаад худалдаа" (foreign trade; 46100 "wholesale for a fee") comes first on hotels,
+# mines and airports alike, and 8299 is "other business support". A company's main
+# activity is one of them only when the registry lists nothing else.
+GENERIC_ACTIVITIES = {"4610", "8299"}
+
+
+def main_activity(codes: list[str]) -> str:
+    """The main activity code of a registry list in its order (see GENERIC_ACTIVITIES)."""
+    codes = [c for c in codes if c]
+    specific = [c for c in codes if c[:4] not in GENERIC_ACTIVITIES]
+    return (specific or codes or [""])[0]
+
+
+def sector_std_name(section: str | None, lang: str = "mn") -> str:
+    entry = SECTIONS_STD.get(section or "")
+    return "" if entry is None else entry[1 if lang == "mn" else 2]
+
+
+def split_activities(text: str | None) -> list[str]:
+    """The "; "-separated activities of CompanyFacts.activities, cleaned, in order."""
+    return [a for a in (clean(x) for x in (text or "").split(";")) if a]
