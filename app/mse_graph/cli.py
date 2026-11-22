@@ -33,6 +33,9 @@
                                                            who controls / influences which companies (#28)
     python -m mse_graph.cli communities [--write] [--json] detected groups and their score against the
                                                            hand-curated groups (#28); --write sets group_id
+    python -m mse_graph.cli centrality [--kind all|person|company|organization] [--by betweenness|pagerank|degree]
+                                       [--limit N] [--write] [--json]
+                                                           brokers and influential owners (#29); --write sets centrality_*
 
 Every analysis command ends with a coverage line (on stderr for the JSON ones, so stdout
 stays JSON): how many of the listed companies its result rests on (issue #27).
@@ -145,6 +148,12 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("communities", help="detected groups (Louvain) and their score against data/manual, data/mcs (#28)")
     p.add_argument("--write", action="store_true", help="write group_id onto the nodes")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("centrality", help="brokers (betweenness), influential owners (PageRank), degree (#29)")
+    p.add_argument("--kind", default="all", choices=["all", "person", "company", "organization"])
+    p.add_argument("--by", default="betweenness", choices=["betweenness", "pagerank", "degree"])
+    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--write", action="store_true", help="write centrality_* onto the nodes")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("flags", help="governance flags for one company")
     p.add_argument("ticker")
@@ -417,6 +426,8 @@ def main(argv=None):
             _quality_cmd(g, args)
         elif args.cmd in ("groups", "communities"):
             _groups_cmd(g, args)
+        elif args.cmd == "centrality":
+            _centrality_cmd(g, args)
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":
@@ -494,6 +505,31 @@ def _groups_cmd(g, args) -> None:
                   f"  look-through {f(c['lookthrough_percent']):>6}%   via {chain}")
     print(f"{len(res)} groups")
     _coverage(g, "groups", sys.stdout)
+
+
+def _centrality_cmd(g, args) -> None:
+    """Network centrality (issue #29, centrality.py), computed now; --write stores it."""
+    from . import centrality
+    rows = centrality.compute(g)
+    written = centrality.write(g, rows) if args.write else None
+    res = centrality.top(rows, args.by, args.limit, args.kind)
+    if args.kind in ("all", "person"):
+        centrality._mark_review(g, res)
+    if args.json:
+        _print({"items": res, "written": written})
+        _coverage(g, "centrality")
+        return
+    print(f"{'#':>4}  {'name':<40} {'type':<12} {'companies':>9} {'betweenness':>11} {'pagerank':>8}")
+    for i, r in enumerate(res, 1):
+        name = r["ticker"] if r["ticker"] and not r["ticker"].startswith("~") else r["name"]
+        mark = "  review (#6)" if r.get("review") else ""
+        print(f"{i:>4}  {(name or r['key'])[:40]:<40} {r['type'] or '':<12} {r['degree']:>9}"
+              f" {r['betweenness']:>11.4f} {r['pagerank']:>8.2f}{mark}")
+    print(f"{len(res)} of {len(rows)} nodes, by {args.by} (betweenness: share of company pairs linked through"
+          f" the node; pagerank: 1 = average)")
+    if written:
+        print(f"centrality written: {written['nodes']} nodes")
+    _coverage(g, "centrality", sys.stdout)
 
 
 def _coverage(g, analysis: str, out=None) -> None:

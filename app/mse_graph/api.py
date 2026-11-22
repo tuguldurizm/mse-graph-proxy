@@ -323,6 +323,20 @@ def community_graph(id: str):
     return groups.community_subgraph(g(), id)
 
 
+# ---- network centrality (issue #29): centrality.py ----------------------------------------
+
+@app.get("/api/analysis/centrality")
+def centrality(kind: str = Query("all", pattern="^(all|person|company|organization)$"),
+               by: str = Query("betweenness", pattern="^(betweenness|pagerank|degree)$"),
+               limit: int = Query(100, ge=1, le=5000), fresh: bool = False):
+    """Brokers and influential owners: degree (companies tied to), betweenness (share of
+    company pairs whose shortest paths run through the node) and PageRank on ownership
+    (1 = the average node), as last written by the pipeline, else computed now. People
+    marked `review` are in the review queue (#6): their score may come from a false merge."""
+    from . import centrality as cen
+    return _covered("centrality", cen.report(g(), kind=kind, by=by, limit=limit, fresh=fresh))
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.
