@@ -4,6 +4,8 @@
     python -m mse_graph.cli parse-html <dir> [--out data/scraped]
     python -m mse_graph.cli load     <csv-dir> [--wipe] [--date YYYY-MM-DD] [--notify]
     python -m mse_graph.cli stats
+    python -m mse_graph.cli review [--summary]           the entity-resolution review queue (issue #6)
+    python -m mse_graph.cli review-pending | review-export   decisions made in the UI -> data/overrides/*.csv
     python -m mse_graph.cli history  <name-or-ticker>      current and past positions / stakes
     python -m mse_graph.cli moves                          people who moved between listed companies
     python -m mse_graph.cli changes  [--since YYYY-MM-DD] [--ticker T] [--all] [--json]
@@ -103,6 +105,11 @@ def main(argv=None):
     p.add_argument("root", nargs="?", default="data/archive")
 
     sub.add_parser("stats")
+    p = sub.add_parser("review", help="the entity-resolution review queue (issue #6), as JSON")
+    p.add_argument("--summary", action="store_true", help="counts only")
+    sub.add_parser("review-pending", help="review decisions in the graph that the overrides files lack")
+    sub.add_parser("review-export",
+                   help="write the review decisions into data/overrides/identity.csv and reviewed.csv")
     sub.add_parser("interlocks")
     sub.add_parser("common-owners")
     sub.add_parser("board-overlap")
@@ -304,7 +311,7 @@ def main(argv=None):
         if args.cmd == "load":
             ds = csv_io.read_dir(args.dir)
             if args.wipe:
-                g.wipe()
+                g.wipe(keep_decisions=True)     # review decisions (issue #6) outlive a wipe
             elif not csv_io.is_demo(ds) and g.drop_demo_data():
                 print("removed the demo data before loading real data", file=sys.stderr)
             res = g.load(ds, observed_at=args.date)
@@ -318,6 +325,16 @@ def main(argv=None):
                 r = notify.send(changes)
                 print(f"alerts: {r['sent']} sent via {', '.join(r['channels']) or 'no channel configured'}"
                       + (f"; errors: {r['errors']}" if r["errors"] else ""), file=sys.stderr)
+        elif args.cmd == "review":
+            from . import review
+            q = review.queue(g)
+            _print(q["counts"] if args.summary else q)
+        elif args.cmd == "review-pending":
+            from . import review
+            _print(review.pending(g))
+        elif args.cmd == "review-export":
+            from . import review
+            _print(review.export(g))
         elif args.cmd == "load-manual":
             from .manual import load_manual
             _print(load_manual(g, args.root, force=args.force))
@@ -333,7 +350,7 @@ def main(argv=None):
             dirs = csv_io.archived_snapshots(args.root)
             if not dirs:
                 sys.exit(f"no archived scrapes under {args.root}")
-            g.wipe()
+            g.wipe(keep_decisions=True)
             for d in dirs:
                 ds = csv_io.read_dir(d)
                 # a sub-directory (e.g. 2026-11-21/opendatalab) belongs to its parent's date
