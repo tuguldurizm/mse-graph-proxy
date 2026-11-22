@@ -255,6 +255,9 @@ def _run(force: bool = False) -> None:
     g = wait_for_neo4j()
     try:
         g.init_schema()
+        done = {k: v for k, v in (getattr(g, "consolidated", None) or {}).items() if v}
+        if done:   # one node per legal entity (#35): the first start re-keys every company
+            log.info("PIPELINE companies consolidated: %s", json.dumps(done, ensure_ascii=False))
         min_hours = float(os.getenv("PIPELINE_MIN_INTERVAL_HOURS", "20"))
         since = g.hours_since_last_scrape()
         if os.getenv("PIPELINE_DEMO") == "1":

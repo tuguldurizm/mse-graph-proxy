@@ -368,6 +368,16 @@ def _get(rec: dict, *names: str) -> str:
     return ""
 
 
+def _org_type(text: str) -> str:
+    """The organisation type a registry "төрөл" cell states, if any (normalize.ORG_TYPES)."""
+    t = text.lower()
+    if "гадаад" in t:
+        return "foreign"
+    if re.search(r"(?<!\w)төр(ийн)?(?!\w)", t) and "төрийн бус" not in t:   # not an NGO
+        return "state"
+    return ""
+
+
 def _holder_type(text: str) -> str:
     t = text.lower()
     if "хуулийн этгээд" in t or "аж ахуй" in t:
@@ -394,11 +404,13 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
         name = _get(r, "нэр")
         if r["_removed"] or not name or _is_group_row(name):
             continue
-        htype = _holder_type(_get(r, "төрөл"))
+        kind = _get(r, "төрөл")
+        htype, otype = _holder_type(kind), _org_type(kind)
         if name.lower() in _STATE_NAMES:
-            name, htype = "Төрийн өмч", "organization"
+            name, htype, otype = "Төрийн өмч", "organization", "state"
         ds.shareholdings.append(Shareholding(ticker, name, None, None, htype,
-                                             as_of=_get(r, "огноо"), source=url))
+                                             as_of=_get(r, "огноо"), source=url,
+                                             org_type=otype if htype == "organization" else ""))
 
     for r in page.get("officers", []):
         name, title = _get(r, "нэр"), _get(r, "албан тушаал")
@@ -423,7 +435,8 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
             otype, owner_reg = "organization", cat
         else:
             otype = _holder_type(cat) or ("organization" if is_organization(name) else "person")
-        ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url, owner_reg_no=owner_reg))
+        ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url, owner_reg_no=owner_reg,
+                                                    org_type=_org_type(cat) if otype == "organization" else ""))
     # The page is the registry's complete record of this company: a holder, officer
     # or owner it no longer lists closes the registry's edge (never mse.mn's).
     ds.supplementary = True

@@ -1,4 +1,4 @@
-ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url,other_names
+ticker,name,name_en,mse_id,sector,register_no,address,website,listed,url,other_names
 ~2737779,Шунхлай Холдинг ХХК,Shunkhlai Holding LLC,,Holding,2737779,,https://www.sg.mn,false,https://www.sg.mn/en/group-introduction/,Шунхлайгрупп|Шунхлай Групп ХХК|Shunkhlai Group
 ~2028468,Шунхлай ХХК,Shunkhlai LLC,,Petroleum,2028468,,,false,https://www.sg.mn/en/business-sector/petroleum/0/,
 ~5512972,Шунхлай Петролиум ХХК,Shunkhlai Petroleum LLC,,Petroleum,5512972,,,false,https://www.opendatalab.mn/search/5512972,

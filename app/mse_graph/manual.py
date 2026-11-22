@@ -73,14 +73,16 @@ def drop_retracted(g, ds) -> int:
     from .graph import company_key
     from .normalize import clean, entity_key, is_aggregate, post_key
 
+    g.canonicalize(ds)
     alias = {r["a"]: r["key"] for r in g.run("MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+    tkeys = g.company_keys()
     owns, posts = set(), set()
     for h in ds.shareholdings:
         name = clean(h.holder_name)
         if not name or is_aggregate(name):
             continue
         if h.holder_ticker:
-            key = company_key(h.holder_ticker)
+            key = tkeys.get(h.holder_ticker.upper()) or company_key(h.holder_ticker)
         else:
             k = entity_key(name, h.holder_type)
             key = alias.get(k) or alias.get(entity_key(name)) or k
@@ -119,6 +121,7 @@ def drop_unverified_twins(g, ds) -> int:
     yet (no `registry_url`), so no real registry evidence can be lost; once the page is read,
     the import adds the URL back to the edges it really reports.
     """
+    g.canonicalize(ds)
     twins = sorted({x.source[len(UNVERIFIED_PREFIX):]
                     for x in ds.shareholdings + ds.positions + ds.beneficial_owners
                     if (x.source or "").startswith(UNVERIFIED_PREFIX)})
@@ -158,10 +161,12 @@ def registry_tickers(root: str | Path | None = None) -> set[str]:
 
 def with_registry_tickers(selected: list[tuple[str, str]], everything: list[tuple[str, str]],
                           root: str | Path | None = None) -> list[tuple[str, str]]:
-    """`selected` (e.g. today's shard of `everything`) plus the manual datasets' companies."""
+    """`selected` (e.g. today's shard of `everything`) plus the manual datasets' companies.
+    A dataset's `~<register no>` also picks the company that number was merged into."""
     extra = registry_tickers(root)
     have = {t for t, _ in selected}
-    return selected + [c for c in everything if c[0] in extra and c[0] not in have]
+    return selected + [c for c in everything
+                       if (c[0] in extra or (c[1] and "~" + c[1] in extra)) and c[0] not in have]
 
 
 # ---- validation ---------------------------------------------------------------
@@ -177,9 +182,9 @@ WITH c, owners, collect(CASE WHEN h IS NULL THEN null ELSE
        {key: p.key, name: p.name, title: h.title,
         sources: coalesce(h.sources, [x IN [h.source] WHERE x IS NOT NULL])} END) AS officers
 OPTIONAL MATCH (d:Company) WHERE d <> c AND (
-       (coalesce(c.reg_no, '') <> '' AND d.reg_no = c.reg_no) OR
+       (coalesce(c.register_no, '') <> '' AND d.register_no = c.register_no) OR
        any(a IN coalesce(c.aliases, []) WHERE a IN coalesce(d.aliases, [])))
-RETURN c.ticker AS ticker, c.name AS name, c.reg_no AS reg_no, c.registry_url AS registry_url,
+RETURN c.ticker AS ticker, c.name AS name, c.register_no AS reg_no, c.registry_url AS registry_url,
        c.registry_name AS registry_name, c.registry_updated AS registry_updated,
        owners, officers, collect(DISTINCT d.ticker) AS duplicates
 """
@@ -215,6 +220,7 @@ def validate_manual(g, root: str | Path | None = None) -> list[dict]:
     report = []
     for d in csv_io.manual_dirs(_root(root)):
         ds = csv_io.read_dir(d)
+        g.canonicalize(ds)       # e.g. a `~<register no>` merged into the listed company it is
         sources: dict[str, dict[str, set[str]]] = {}
         for h in ds.shareholdings:
             sources.setdefault(h.company_ticker.upper(), {}).setdefault("owners", set()).add(h.source)
@@ -278,7 +284,7 @@ WITH p, collect(DISTINCT {ticker: c.ticker, name: c.name, rel: type(r), title: r
 OPTIONAL MATCH (p)-[o:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(x:Company)
 WHERE NOT x.ticker IN $group AND ($past OR o.current)
 WITH p, inside, collect(DISTINCT CASE WHEN x IS NULL THEN null ELSE
-       {ticker: x.ticker, name: x.name, reg_no: x.reg_no, listed: coalesce(x.listed, true),
+       {ticker: x.ticker, name: x.name, reg_no: x.register_no, listed: coalesce(x.listed, true),
         rel: type(o), title: o.title, percent: o.percent, current: o.current,
         sources: coalesce(o.sources, [s IN [o.source] WHERE s IS NOT NULL])} END) AS elsewhere
 RETURN p.key AS key, p.name AS name, inside, elsewhere
@@ -290,7 +296,7 @@ ORDER BY size(elsewhere) DESC, p.name
 _LEADS = """
 MATCH (e:Entity)-[b:BENEFICIAL_OWNER {current: true}]->(c:Company)
 WHERE c.ticker IN $group AND b.owner_reg IS NOT NULL
-  AND NOT EXISTS { MATCH (k:Company) WHERE k.reg_no = b.owner_reg }
+  AND NOT EXISTS { MATCH (k:Company) WHERE k.register_no = b.owner_reg }
 RETURN DISTINCT b.owner_reg AS reg_no, e.name AS owner, c.ticker AS via
 ORDER BY reg_no
 """
@@ -315,6 +321,7 @@ def group_people(g, root: str | Path | None = None, dataset: str | None = None,
         if dataset and d.name != dataset:
             continue
         ds = csv_io.read_dir(d)
+        g.canonicalize(ds)
         seeds = sorted(_own(ds) | _referenced(ds))
         rows = g.run(_GROUP, tickers=seeds)
         group = sorted(set(rows[0]["tickers"] if rows else []) | set(seeds))

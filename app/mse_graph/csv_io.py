@@ -3,8 +3,10 @@
 CSV is the hand-off format between the scraper (or manual research from
 annual reports / FRC filings) and the Neo4j loader. A data directory holds:
 
-    companies.csv      ticker,name,name_en,mse_id,sector,reg_no,address,website,listed,url,other_names
+    companies.csv      ticker,name,name_en,mse_id,sector,register_no,address,website,listed,url,other_names
+                       (+ state_reg_no; a `reg_no` column of either kind of number still works)
     shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source,holder_ticker
+                       (+ org_type: state | foreign | fund | other, optional)
     executives.csv     company_ticker,person_name,title,role,since,until,source
     manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}, "supplementary": true}   (optional)
 
@@ -16,7 +18,7 @@ the raw observations (`cli rebuild-history`).
 
 Open Data Lab enrichment adds two optional files:
 
-    beneficial_owners.csv  company_ticker,owner_name,owner_type,since,source
+    beneficial_owners.csv  company_ticker,owner_name,owner_type,since,source,owner_reg_no,org_type
     company_facts.csv      ticker,reg_no,legal_form,founded,address,registry_name,registry_updated,registry_url,register_no
 """
 from __future__ import annotations
