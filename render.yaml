@@ -12,5 +12,8 @@ services:
         generateValue: true          # copy it from the Render dashboard into MSE_PROXY_TOKEN
       - key: ALLOWED_HOSTS
         value: mse.mn,opendatalab.mn
+      # Also set on the live service, in the dashboard only (2026-11-22):
+      #   UPSTREAM_PROXY_URL    Webshare, http://USER-rotate:PASS@p.webshare.io:80 (must start with http://)
+      #   UPSTREAM_PROXY_HOSTS  hosts that always leave through it (default opendatalab.mn)
       - key: PYTHON_VERSION
         value: 3.12.8
