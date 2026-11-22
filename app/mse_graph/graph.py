@@ -2,8 +2,9 @@
 
 Graph model
 -----------
-(:Entity:Company[:Listed] {key, ticker, name, name_en, sector, register_no, state_reg_no, address, website,
-                           mse_id, url, listed, aliases, former_tickers, former_keys})
+(:Entity:Company[:Listed] {key, ticker, name, name_en, sector, sector_mse, sector_std, sector_std_name,
+                           activities, activity_codes, activity_main, register_no, state_reg_no, address, website,
+                           mse_id, url, listed, aliases, former_names, former_tickers, former_keys})
 (:Entity:Person       {key, name, display_name, name_form, full_name, patronymic, given_name, clan_name,
                        name_variants, former_keys})
 (:Entity:Organization {key, name, org_type, register_no?})  -- shareholders outside the company lists
@@ -22,6 +23,8 @@ source when it says (`org_type_by: 'source'`), else from its name.
 
 (:Record {record_id, kind, source, raw_name, ...})-[:REFERS_TO {method, ...}]->(:Entity)
 (:Record)-[:REPORTED_FOR]->(:Company)           -- the source rows behind the edges (records.py, issue #37)
+(:Company)-[:HAS_FACT]->(:Fact {name, value, norm, source, current, first_seen, last_seen, until, closed_at,
+                                opened_run, closed_run, baseline})  -- dated company facts (issue #38)
 
     <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline, records
 
@@ -48,6 +51,25 @@ spelling seen as "<spelling> | <source>".
 `key` is the unique merge key (see normalize.entity_key). A shareholder whose
 name matches a listed company's name / English name is linked to that
 :Company node, which is how cross-holdings between listed companies appear.
+
+Company facts (issue #38)
+-------------------------
+A company's name, English name, address, legal form, sector (the company list's
+text) and registry activity codes are also kept as dated (:Fact) nodes, one chain
+per (fact name, source: "mse.mn", "opendatalab.mn" for a registry page, "dataset:<host>"
+for other company rows). A load that
+reports the value an open fact has refreshes it (`last_seen`; compared without
+case); another value closes it (`until`, `closed_at`, `closed_run`) and opens a
+new one. An empty value changes nothing. The node properties stay the current
+value, for fast queries. Closed `name` facts are the company's `former_names`;
+their spellings are kept in `former_aliases` and added to `aliases`, so an old
+name in a shareholder table still links to the company. The first fact a source
+gives for a company is its `baseline`, not a change.
+
+`sector_mse` is the sector text of the company list (mse.mn for listed companies);
+`sector_std` is the ISIC Rev. 4 section (A-U) of the registry's main activity code
+`activity_main` (normalize.main_activity, isic_section), `sector_std_name` its name.
+`sector` is what the UI shows: `sector_mse`, else `sector_std_name`.
 
 History
 -------
@@ -78,6 +100,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -88,7 +111,8 @@ from . import records as rec
 from .config import settings
 from .models import Dataset
 from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, clean, entity_key, is_aggregate, \
-    is_organization, org_type_from_name, parse_date, person_name, post_key, role_std, split_reg_numbers
+    is_organization, isic_section, main_activity, org_type_from_name, parse_activity, parse_date, person_name, \
+    post_key, role_std, sector_std_name, split_activities, split_reg_numbers
 from .opendatalab import REGISTER_NO_RE
 
 log = logging.getLogger(__name__)
@@ -112,7 +136,17 @@ SCHEMA = [
     "CREATE INDEX record_name_key IF NOT EXISTS FOR (r:Record) ON (r.name_key)",
     # decisions made on the review queue (issue #6, review.py); wipes keep them
     "CREATE CONSTRAINT decision_id IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE",
+    # dated company facts (issue #38)
+    "CREATE INDEX fact_name IF NOT EXISTS FOR (f:Fact) ON (f.name, f.source)",
 ]
+# company properties kept as dated facts (issue #38): fact name -> company-row field
+COMPANY_FACTS = {"name": "name", "name_en": "name_en", "address": "address", "sector": "sector_mse"}
+
+# Graphs before #38: the company list's sector text was `sector`.
+MIGRATE_SECTORS = """
+MATCH (c:Company) WHERE c.sector_mse IS NULL AND c.sector_std IS NULL AND coalesce(c.sector, '') <> ''
+SET c.sector_mse = c.sector
+"""
 # the relationships source records are behind
 EDGE_TYPES = "OWNS|HOLDS_POSITION|BENEFICIAL_OWNER"
 
@@ -315,6 +349,7 @@ class Graph:
         self.run(MIGRATE, today=_today())
         for stmt in MIGRATE_CHANGES:
             self.run(stmt, today=_today())
+        self.run(MIGRATE_SECTORS)
         self.migrate_positions()
         self.rekeyed_people = self.rekey_entities()
         # what the last start or load merged and re-keyed (the pipeline logs it)
@@ -322,6 +357,7 @@ class Graph:
         self.adopted = self._adopt_initials()
         # decisions from the identity overrides file (issue #37); `overrides` replaces the file
         self.overridden = self.apply_overrides(overrides)
+        self._derive_sectors()
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -1130,6 +1166,19 @@ class Graph:
         if po.get("first_seen") and pn.get("first_seen") and po["first_seen"] < pn["first_seen"]:
             merged["first_seen"] = po["first_seen"]
             merged["first_run"] = po.get("first_run")
+        if company:
+            merged["former_names"] = _add(pn.get("former_names"), po.get("former_names")) or None
+            merged["former_aliases"] = _add(pn.get("former_aliases"), po.get("former_aliases")) or None
+            # dated facts (issue #38) move over; an open one that `new` has from the same source
+            # ends where it was last seen (history of the merged-away node, not a change)
+            self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
+                        MATCH (o)-[x:HAS_FACT]->(f:Fact)
+                        OPTIONAL MATCH (n)-[:HAS_FACT]->(k:Fact {name: f.name, source: f.source, current: true})
+                        WITH n, x, f, count(k) > 0 AS clash
+                        FOREACH (_ IN CASE WHEN clash AND f.current THEN [1] ELSE [] END |
+                            SET f.current = false, f.until = f.last_seen, f.merged = true)
+                        CREATE (n)-[:HAS_FACT]->(f)
+                        DELETE x""", old=old, new=new)
         self._move_refs(old, new)
         # records reported for a company that is merged away are reported for the one kept
         self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
@@ -1344,7 +1393,8 @@ class Graph:
                              # a bare former name ("Шунхлайгрупп") has no legal-form marker
                              {entity_key(n, k) for n in others for k in ("", "organization")})
             register, state = split_reg_numbers(c.register_no, c.state_reg_no, c.reg_no)
-            companies.append({**{k: v for k, v in c.__dict__.items() if k != "reg_no"},
+            companies.append({**{k: v for k, v in c.__dict__.items() if k not in ("reg_no", "sector")},
+                              "sector_mse": c.sector,
                               "ticker": c.ticker.upper(), "register_no": register, "state_reg_no": state,
                               "key": company_key(c.ticker, register), "aliases": aliases,
                               "merge_only": bool(getattr(c, "merge_only", False)),
@@ -1367,8 +1417,9 @@ class Graph:
                                         ELSE coalesce(c.former_tickers, []) + r.merged_from END
             // aliases: the company's own names, plus those of the rows and nodes merged into it
             SET c.aliases = CASE WHEN r.merge_only THEN coalesce(c.aliases, []) ELSE r.aliases END
-            SET c.aliases = c.aliases + [a IN coalesce(c.merged_aliases, []) WHERE NOT a IN c.aliases],
-                {fill("name_en")}, {fill("sector")}, {fill("address")}, {fill("website")},
+            SET c.aliases = c.aliases + [a IN coalesce(c.merged_aliases, []) + coalesce(c.former_aliases, [])
+                                         WHERE NOT a IN c.aliases],
+                {fill("name_en")}, {fill("sector_mse")}, {fill("address")}, {fill("website")},
                 {fill("mse_id")}, {fill("url")}, {fill("state_reg_no")},
                 c.register_no = CASE WHEN coalesce(c.register_no, '') = '' AND r.register_no <> ''
                                      THEN r.register_no ELSE c.register_no END
@@ -1376,6 +1427,8 @@ class Graph:
             rows=companies, when=when, run=run,
         )
         self._write_records([rec.record_row("company", c, c.ticker, "", "exact_key") for c in ds.companies], when)
+        # dated facts (issue #38), before the aliases are read: a former name links too
+        fact_changes = self._record_facts(ds, companies, when, run)
         # Fold any :Organization created earlier (before this company was loaded)
         # into the matching :Company node.
         self._merge_orgs_into_companies()
@@ -1400,6 +1453,9 @@ class Graph:
         merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
         if merged["companies_merged"] or merged["organizations_merged"]:
             changes.update({k: merged[k] for k in ("companies_merged", "organizations_merged")})
+        self._refresh_former_names()
+        self._derive_sectors()
+        changes.update({k: v for k, v in fact_changes.items() if v})
         return {**self.stats(), "observed_at": when, "run": run, "changes": changes}
 
     def _new_sources(self, rel: str, snaps: dict[str, str]) -> set[str]:
@@ -1818,7 +1874,14 @@ class Graph:
         rows = []
         for f in ds.facts:
             register, state = split_reg_numbers(f.register_no, f.reg_no)
-            rows.append({**f.__dict__, "ticker": f.ticker.upper(), "register_no": register, "state_reg_no": state})
+            acts = split_activities(f.activities)
+            codes = [c for c in (parse_activity(a)[0] for a in acts) if c]
+            main = main_activity(codes)
+            std = isic_section(main)
+            rows.append({**f.__dict__, "ticker": f.ticker.upper(), "register_no": register, "state_reg_no": state,
+                         "activities": acts, "activity_codes": codes, "activity_main": main or None,
+                         "sector_std": std or None,
+                         "sector_std_name": sector_std_name(std) or None})
         self.run(
             """
             UNWIND $rows AS r
@@ -1833,9 +1896,118 @@ class Graph:
                                           ELSE c.registry_updated END,
                 c.registry_url = CASE WHEN r.registry_url <> '' THEN r.registry_url ELSE c.registry_url END,
                 c.register_no = CASE WHEN r.register_no <> '' THEN r.register_no ELSE c.register_no END
+            // the registry's activities replace the ones it gave before (issue #38)
+            FOREACH (_ IN CASE WHEN size(r.activity_codes) > 0 THEN [1] ELSE [] END |
+                SET c.activities = r.activities, c.activity_codes = r.activity_codes, c.activity_main = r.activity_main,
+                    c.sector_std = r.sector_std, c.sector_std_name = r.sector_std_name,
+                    c.sector_std_by = CASE WHEN r.sector_std IS NULL THEN null ELSE 'activity' END)
             """,
             rows=rows,
         )
+
+    # ---- dated company facts (issue #38) ----------------------------------------
+
+    def _record_facts(self, ds: Dataset, companies: list[dict], when: str, run: str) -> dict:
+        """Keep the dataset's company facts as dated (:Fact) chains (module docstring).
+        `companies` are load()'s company rows. A registry page's facts come before the
+        company rows of the same source; rows merged into another company (merge_only)
+        give none. Returns the counts of facts changed, and of companies renamed."""
+        items: dict[tuple, dict] = {}
+
+        def add(ticker: str, name: str, value: str, source: str) -> None:
+            value = clean(value)
+            if value and (ticker, name, source) not in items:
+                items[(ticker, name, source)] = {"ticker": ticker, "name": name, "value": value,
+                                                 "norm": _fact_norm(name, value), "source": source}
+
+        for f in ds.facts:
+            src = fact_source(f.registry_url) or REGISTRY_MARK
+            codes = [c for c in (parse_activity(a)[0] for a in split_activities(f.activities)) if c]
+            for name, value in (("name", f.registry_name), ("address", f.address),
+                                ("legal_form", f.legal_form), ("activity_codes", "; ".join(codes))):
+                add(f.ticker.upper(), name, value, src)
+        for r in companies:
+            if r["merge_only"]:
+                continue
+            src = company_row_source(r.get("url"))
+            for name, field in COMPANY_FACTS.items():
+                add(r["ticker"], name, r.get(field) or "", src)
+        if not items:
+            return {}
+        got = self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (c:Company {ticker: r.ticker})
+            OPTIONAL MATCH (c)-[:HAS_FACT]->(f:Fact {name: r.name, source: r.source})
+            WITH c, r, collect(f) AS had
+            WITH c, r, size(had) = 0 AS first, [f IN had WHERE f.current] AS open
+            WITH c, r, first, [f IN open WHERE f.norm = r.norm] AS same, [f IN open WHERE f.norm <> r.norm] AS other
+            FOREACH (f IN same | SET f.last_seen = CASE WHEN $when > f.last_seen THEN $when ELSE f.last_seen END,
+                                     f.value = r.value)
+            FOREACH (f IN other | SET f.current = false, f.until = $when, f.closed_at = $when, f.closed_run = $run)
+            FOREACH (_ IN CASE WHEN size(same) = 0 THEN [1] ELSE [] END |
+                CREATE (c)-[:HAS_FACT]->(:Fact {name: r.name, value: r.value, norm: r.norm, source: r.source,
+                                                current: true, first_seen: $when, last_seen: $when,
+                                                opened_run: $run, baseline: first}))
+            RETURN r.name AS name, size(other) AS closed
+            """, rows=list(items.values()), when=when, run=run)
+        changed = [r for r in got if r["closed"]]
+        return {"company_facts_changed": len(changed),
+                "companies_renamed": sum(1 for r in changed if r["name"] == "name")}
+
+    def _refresh_former_names(self) -> int:
+        """`former_names` (closed `name` / `name_en` facts that are not a current name) and their
+        spellings in `former_aliases` and `aliases`. Returns the companies updated."""
+        rows = self.run(
+            """
+            MATCH (c:Company)-[:HAS_FACT]->(f:Fact) WHERE f.name IN ['name', 'name_en']
+            WITH c, collect(f) AS fs
+            RETURN elementId(c) AS id, [c.name, c.name_en] AS names, coalesce(c.former_names, []) AS had,
+                   coalesce(c.former_aliases, []) AS had_a,
+                   [f IN fs WHERE f.current | f.value] AS now, [f IN fs WHERE NOT f.current | f.value] AS old
+            """)
+        updates = []
+        for r in rows:
+            now = {_fact_norm("name", v) for v in r["now"] + [n for n in r["names"] if n]}
+            former, seen = [], set()
+            for v in sorted(r["old"], key=str.lower):
+                if (k := _fact_norm("name", v)) not in now and k not in seen:
+                    seen.add(k)
+                    former.append(v)
+            keys = sorted({entity_key(v, k) for n in former for v in [n, *_org_variants(n)]
+                           for k in ("", "organization")} - {""})
+            if former != r["had"] or keys != r["had_a"]:
+                updates.append({"id": r["id"], "former": former or None, "keys": keys or None})
+        self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (c) WHERE elementId(c) = r.id
+            SET c.former_names = r.former, c.former_aliases = r.keys,
+                c.aliases = coalesce(c.aliases, []) + [a IN coalesce(r.keys, []) WHERE NOT a IN coalesce(c.aliases, [])]
+            """, rows=updates)
+        return len(updates)
+
+    def _derive_sectors(self) -> int:
+        """The shown `sector`: the company list's `sector_mse`, else the standard sector's name."""
+        return self.run(
+            """
+            MATCH (c:Company)
+            WITH c, CASE WHEN coalesce(c.sector_mse, '') <> '' THEN c.sector_mse ELSE c.sector_std_name END AS want
+            WHERE coalesce(c.sector, '') <> coalesce(want, '')
+            SET c.sector = want
+            RETURN count(c) AS n
+            """)[0]["n"]
+
+    def company_facts(self, key: str) -> list[dict]:
+        """Every dated fact of a company, current first, then the most recently ended."""
+        rows = self.run(
+            """
+            MATCH (c:Company {key: $key})-[:HAS_FACT]->(f:Fact)
+            RETURN f.name AS name, f.value AS value, f.source AS source, f.current AS current,
+                   f.first_seen AS first_seen, f.last_seen AS last_seen, f.until AS until
+            ORDER BY f.current DESC, coalesce(f.until, '') DESC, f.name, f.source
+            """, key=self.resolve_key(key))
+        return rows
 
     def companies_with_reg(self, retry_days: int = 30) -> list[tuple[str, str]]:
         """(ticker, number to look up in the registry) of every company that has one, listed first.
@@ -2112,7 +2284,12 @@ class Graph:
             out["history"][part] = sorted((i for i in items if not i["current"]),
                                           key=lambda i: i["until"] or "", reverse=True)
         out["owners"].sort(key=lambda x: -(x["percent"] or 0))
-        out["related_companies"] = self.related_companies(key) if out["entity"]["type"] == "Company" else []
+        company = out["entity"]["type"] == "Company"
+        out["related_companies"] = self.related_companies(key) if company else []
+        # dated facts (issue #38): current values, and the ones that ended (former names, old addresses)
+        facts = self.company_facts(key) if company else []
+        out["facts"] = [f for f in facts if f["current"]]
+        out["history"]["facts"] = [f for f in facts if not f["current"]]
         return out
 
     def related_companies(self, key: str) -> list[dict]:
@@ -2299,6 +2476,35 @@ class Graph:
         )
 
 
+def company_row_source(url: str | None) -> str:
+    """The fact source of a company row: "mse.mn" for mse.mn's company list, else
+    "dataset:<host>" (a manual dataset, discovery, the MCS data). Only a registry page
+    itself (CompanyFacts) speaks as "opendatalab.mn", so a hand-typed name in a dataset
+    never flip-flops with the registry's."""
+    src = fact_source(url)
+    return src if src == "mse.mn" else "dataset:" + (src or "-")
+
+
+def _fact_norm(name: str, value: str) -> str:
+    """What two values of a fact are compared on: case, quotes, punctuation and spacing
+    never count as a change, nor (for names) a trailing legal form ("Ард даатгал ХК")."""
+    if name in ("name", "name_en"):
+        return entity_key(value, "organization")
+    return " ".join(re.sub(r"[^\w;]+", " ", clean(value).casefold()).split())
+
+
+def fact_source(url: str | None) -> str:
+    """The source family of a company fact: "mse.mn" (mse.mn, open.mse.mn),
+    "opendatalab.mn", another host, or "" for no URL."""
+    from urllib.parse import urlparse
+
+    host = (urlparse(url or "").hostname or "").lower()
+    for family in ("mse.mn", REGISTRY_MARK):
+        if host == family or host.endswith("." + family):
+            return family
+    return host.removeprefix("www.")
+
+
 def _org_type(value: str | None) -> str:
     """A source's organisation type if it is one of ORG_TYPES, else ""."""
     v = clean(value).lower()
@@ -2307,6 +2513,7 @@ def _org_type(value: str | None) -> str:
 
 # Properties of a merged-away node that _merge_node never copies onto the node it keeps.
 _OWN_PROPS = {"key", "ticker", "former_keys", "former_tickers", "aliases", "merged_aliases", "listed",
+              "former_names", "former_aliases",
               "org_type", "org_type_by", "org_type_v",
               "first_seen", "first_run"}
 

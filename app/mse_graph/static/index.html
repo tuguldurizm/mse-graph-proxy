@@ -162,8 +162,11 @@ async function open(key) {
 
 function list(title, items, fmt) {
   if (!items || !items.length) return '';
-  return `<h2>${title}</h2><ul>${items.map(i => `<li data-key="${esc(i.key)}">${fmt(i)}</li>`).join('')}</ul>`;
+  return `<h2>${title}</h2><ul>${items.map(i => `<li${i.key ? ` data-key="${esc(i.key)}"` : ''}>${fmt(i)}</li>`).join('')}</ul>`;
 }
+// company facts (issue #38), as the panel and the change list name them
+const FACT_LABELS = {name: 'Нэр', name_en: 'Англи нэр', address: 'Хаяг', legal_form: 'Хэлбэр',
+                     sector: 'Салбар', activity_codes: 'Үйл ажиллагааны код'};
 
 async function showDetails(d) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
@@ -176,9 +179,16 @@ async function showDetails(d) {
   ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), []]);
 
   let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
-  for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['reg_no','Регистр'],
+  for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['register_no','Регистр'],
                             ['legal_form','Хэлбэр'],['founded','Үүсгэн байгуулагдсан'],['address','Хаяг']])
     if (e[k]) html += `<div>${label}: ${esc(e[k])}</div>`;
+  // standard sector from the registry's main activity code (ISIC section), when it differs from the text
+  if (e.sector_std && e.sector_std_name !== e.sector)
+    html += `<div>Стандарт салбар: ${esc(e.sector_std)} · ${esc(e.sector_std_name)}</div>`;
+  if (e.activities && e.activities.length)
+    html += `<div>Үйл ажиллагаа: <span class="meta">${e.activities.map(esc).join('; ')}</span></div>`;
+  if (e.former_names && e.former_names.length)
+    html += `<div>Хуучин нэр: ${e.former_names.map(esc).join(', ')}</div>`;
   const links = [];
   if (e.url && /^https?:/.test(e.url)) links.push(`<a href="${esc(e.url)}" target="_blank" rel="noopener">mse.mn</a>`);
   if (e.registry_url && /^https?:/.test(e.registry_url))
@@ -210,6 +220,9 @@ async function showDetails(d) {
                x => `<span>${esc(co(x))} ${pct(x.percent)}</span>${period(x)}`);
   html += list('Өмнөх эцсийн өмчлөгч (бүртгэл)', h.beneficial_owners,
                b => `<span>${esc(b.name)}</span>${period(b)}`);
+  html += list('Өмнөх мэдээлэл (нэр, хаяг, ...)', h.facts,
+               f => `<span>${esc(FACT_LABELS[f.name] || f.name)}: ${esc(f.value)} <span class="meta">${esc(f.source)}</span></span>` +
+                    `<span class="meta" style="white-space:nowrap">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</span>`);
   html += list('Өмнөх албан тушаал', h.positions,
                p => `<span>${esc(p.ticker)} <span class="meta">${esc(p.title)}</span></span>${period(p)}`);
   html += list('Холбоотой компаниуд', d.related_companies,
@@ -235,6 +248,9 @@ function describe(c) {
     case 'position_changed': return `${who}: ${esc(c.old)} → ${esc(c.new)}`;
     case 'company_added':    return 'Жагсаалтад шинээр нэмэгдсэн';
     case 'company_removed':  return 'Жагсаалтаас хасагдсан';
+    case 'company_renamed':  return `Нэр өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
+    case 'company_fact_changed':
+      return `${esc(FACT_LABELS[c.field] || c.field)} өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
     default:                 return esc(c.kind);
   }
 }

@@ -106,19 +106,29 @@ def insider_owners(g: Graph) -> list[dict]:
 
 
 def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
-    """People or entities with a post, or a stake >= min_stake, in two+ companies of the same sector."""
+    """People or entities with a post, or a stake >= min_stake, in two+ companies of the same sector.
+
+    The sector is the standard one (`sector_std`, the ISIC section of the registry's main
+    activity code, issue #38). A company without registry activity codes falls back to the
+    company list's sector text (`sector_mse`), so it is compared only with companies that
+    have the same text and no standard sector. `sector_std` says which kind a row is."""
     rows = g.run(
         """
         MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
-        WHERE coalesce(c.sector, '') <> '' AND x <> c
-          AND (type(r) = 'HOLDS_POSITION' OR coalesce(r.percent, 0) >= $min)
-        WITH x, toLower(c.sector) AS sector_key, c, collect({rel: type(r), title: r.title, percent: r.percent}) AS roles
+        WHERE x <> c AND (type(r) = 'HOLDS_POSITION' OR coalesce(r.percent, 0) >= $min)
+        WITH x, r, c, CASE WHEN c.sector_std IS NOT NULL THEN 'std:' + c.sector_std
+                           WHEN coalesce(c.sector_mse, c.sector, '') <> ''
+                           THEN 'text:' + toLower(coalesce(c.sector_mse, c.sector)) END AS sector_key
+        WHERE sector_key IS NOT NULL
+        WITH x, sector_key, c, collect({rel: type(r), title: r.title, percent: r.percent}) AS roles
         WITH x, sector_key, collect({key: c.key, ticker: c.ticker, name: c.name, sector: c.sector,
-                                     roles: roles}) AS companies
+                                     sector_std: c.sector_std, roles: roles}) AS companies,
+             head(collect(coalesce(c.sector_std_name, c.sector_mse, c.sector))) AS sector
         WHERE size(companies) >= 2
         RETURN 'competitor' AS kind, x.key AS key, x.name AS name,
                [l IN labels(x) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
-               companies[0].sector AS sector, companies
+               sector, CASE WHEN sector_key STARTS WITH 'std:' THEN substring(sector_key, 4) END AS sector_std,
+               companies
         ORDER BY size(companies) DESC, name
         """,
         min=min_stake,

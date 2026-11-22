@@ -74,7 +74,8 @@ class BeneficialOwner:
 @dataclass
 class CompanyFacts:
     """Registry facts for an existing company. Loading only fills empty properties,
-    so it never overwrites what mse.mn says."""
+    so it never overwrites what mse.mn says. Every fact is also kept as a dated
+    (:Fact) of the company (graph.py, issue #38)."""
     ticker: str
     reg_no: str = ""                 # either kind of number, as Company.reg_no
     legal_form: str = ""             # e.g. "Хувьцаат компани"
@@ -87,6 +88,11 @@ class CompanyFacts:
     # Unlike a company row's, it replaces the one the graph has: the registry page
     # (or discovery) is the authority on it.
     register_no: str = ""
+    # The registry's activities ("Үйл ажиллагаа"), "; "-separated "<code> - <description>",
+    # main activity first, e.g. "4610 - Гадаад худалдаа; 5920 - Контентийн үйлчилгээ".
+    # They replace the company's `activities` / `activity_codes` and give `sector_std`
+    # (issue #38). Empty leaves them as they are.
+    activities: str = ""
 
 
 @dataclass

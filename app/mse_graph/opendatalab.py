@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 from .config import settings
 from .models import BeneficialOwner, Company, CompanyFacts, Dataset, Position, Shareholding
-from .normalize import clean, entity_key, is_aggregate, is_organization, parse_int, parse_percent
+from .normalize import clean, entity_key, is_aggregate, is_organization, parse_activity, parse_int, parse_percent
 
 log = logging.getLogger(__name__)
 
@@ -391,6 +391,20 @@ def _is_group_row(name: str) -> bool:
     return is_aggregate(name) or bool(re.search(r"(?<!\w)бусад(?!\w)", name.lower()))
 
 
+def registry_activities(page: dict) -> list[str]:
+    """The page's current activities as "<code> - <description>", in the registry's order
+    (its "Дугаар"; the first is the main activity). Rows without a code are left out."""
+    rows = [r for r in page.get("activities", []) if not r.get("_removed")]
+    rows.sort(key=lambda r: int(_get(r, "дугаар")) if _get(r, "дугаар").isdigit() else 10 ** 6)
+    out = []
+    for r in rows:
+        code, label = parse_activity(_get(r, "үйл ажиллагааны код", "код"))
+        label = re.sub(r"\s*/.*", "", label)       # as scripts/mcs/build_mcs.py
+        if code and (item := f"{code} - {label}" if label else code) not in out:
+            out.append(item)
+    return out
+
+
 def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
     """Turn a parsed registry page into graph records for company `ticker`."""
     info = page.get("info", {})
@@ -398,7 +412,8 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
     ds = Dataset(facts=[CompanyFacts(
         ticker=ticker, reg_no=own_reg, legal_form=info.get("legal_form", ""),
         founded=info.get("founded", ""), address=info.get("address", ""),
-        registry_name=info.get("name", ""), registry_updated=info.get("updated", ""), registry_url=url)])
+        registry_name=info.get("name", ""), registry_updated=info.get("updated", ""), registry_url=url,
+        activities="; ".join(registry_activities(page)))])
 
     for r in page.get("shareholders", []):
         name = _get(r, "нэр")

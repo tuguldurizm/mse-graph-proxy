@@ -28,6 +28,11 @@ def _pct(v) -> str:
     return "?" if v is None else f"{v:g}%"
 
 
+# company facts (graph.py, issue #38), as the change list names them
+FACT_LABELS = {"name": "Нэр", "name_en": "Англи нэр", "address": "Хаяг", "legal_form": "Хэлбэр",
+               "sector": "Салбар", "activity_codes": "Үйл ажиллагааны код"}
+
+
 def describe(c: dict) -> str:
     """One line in Mongolian for a change record."""
     k, who = c["kind"], c.get("entity", "")
@@ -50,6 +55,10 @@ def describe(c: dict) -> str:
         return "Жагсаалтад шинээр нэмэгдсэн компани"
     if k == "company_removed":
         return "Жагсаалтаас хасагдсан компани"
+    if k == "company_renamed":
+        return f"Нэр өөрчлөгдсөн: {c.get('old') or '?'} → {c['new']}"
+    if k == "company_fact_changed":
+        return f"{FACT_LABELS.get(c.get('field'), c.get('field'))} өөрчлөгдсөн: {c.get('old') or '?'} → {c['new']}"
     if k == "data_missing":
         return f"Өгөгдөл олдсонгүй ({c.get('section')}, өмнө {c.get('count')} мөр)"
     return k

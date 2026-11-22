@@ -24,6 +24,10 @@ data_missing                          a company had shareholder (or officer) row
                                       now. This is usually a failed scrape, not a real change, so it
                                       is never sent as an alert. The loader keeps the old edges open.
 company_removed                       diff() only: the graph never deletes companies.
+company_renamed                       a source gives the company another name (a dated fact, issue #38;
+                                      the old name stays an alias)
+company_fact_changed                  another value for the English name, address, legal form, sector
+                                      or activity codes (`field`); shown, never sent as an alert
 """
 from __future__ import annotations
 
@@ -45,6 +49,8 @@ NOISE = 0.01
 def source_label(source: str | None) -> str:
     """Short name of the source that recorded an edge."""
     s = (source or "").lower()
+    if s.startswith("dataset:"):        # a company row of a dataset (graph.company_row_source)
+        return "dataset"
     if "opendatalab" in s:
         return "opendatalab"
     if "mse.mn" in s:
@@ -185,7 +191,7 @@ def is_significant(c: dict, min_percent: float | None = None) -> bool:
     if min_percent is None:
         min_percent = float(os.getenv("ALERT_MIN_PERCENT", "1.0"))
     kind = c["kind"]
-    if kind == "data_missing":
+    if kind in ("data_missing", "company_fact_changed"):
         return False
     if kind.startswith("holder_") or kind == "stake_changed":
         if c.get("crossed"):
@@ -235,6 +241,19 @@ RETURN c.ticker AS ticker, c.name AS company, c.first_seen AS date
 """
 
 
+# a fact opened by a load, with the one of the same source it replaced (issue #38)
+_FACTS = """
+MATCH (c:Company)-[:HAS_FACT]->(f:Fact)
+WHERE ($ticker IS NULL OR c.ticker = $ticker) AND $key IS NULL AND NOT coalesce(f.baseline, false)
+  AND coalesce(CASE WHEN $run IS NULL THEN f.first_seen >= $since ELSE f.opened_run = $run END, false)
+OPTIONAL MATCH (c)-[:HAS_FACT]->(o:Fact {name: f.name, source: f.source})
+WHERE o.closed_run = f.opened_run
+WITH c, f, head(collect(o.value)) AS old
+RETURN c.ticker AS ticker, c.name AS company, f.name AS field, old, f.value AS new, f.source AS source,
+       f.first_seen AS date
+"""
+
+
 def _origin(g) -> str:
     rows = g.run("MATCH (c:Company) RETURN min(c.first_seen) AS d")
     return (rows[0]["d"] if rows else None) or ""
@@ -256,6 +275,10 @@ def changes(g, *, run: str | None = None, since: str | None = None, ticker: str 
     for c in added:
         out.append({"kind": "company_added", "ticker": c["ticker"], "company": c["company"],
                     "detected_at": c["date"], "source": ""})
+    for f in g.run(_FACTS, **{k: v for k, v in params.items()}):
+        out.append({"kind": "company_renamed" if f["field"] == "name" else "company_fact_changed",
+                    "ticker": f["ticker"], "company": f["company"], "field": f["field"], "old": f["old"],
+                    "new": f["new"], "detected_at": f["date"], "source": source_label(f["source"])})
 
     # (rel, ticker, key, date) -> opened / closed edges on that date
     groups: dict[tuple, dict[str, list[dict]]] = defaultdict(lambda: {"opened": [], "closed": []})
