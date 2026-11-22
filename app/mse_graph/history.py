@@ -32,7 +32,7 @@ import os
 from collections import defaultdict
 
 from .models import Dataset
-from .normalize import clean, entity_key, is_aggregate, parse_date
+from .normalize import clean, entity_key, is_aggregate, parse_date, post_key, role_std
 
 log = logging.getLogger(__name__)
 
@@ -77,14 +77,17 @@ def _holders(ds: Dataset) -> dict[str, dict[str, dict]]:
 
 
 def _positions(ds: Dataset) -> dict[str, dict[tuple[str, str], dict]]:
-    """ticker -> (person key, title) -> {name, title, role}."""
+    """ticker -> (person key, post) -> {name, title, role, role_std}.
+
+    Keyed by the seat (normalize.post_key), like the loader, so a respelt title
+    is not a change."""
     out: dict[str, dict[tuple[str, str], dict]] = {}
     for p in ds.positions:
-        name, title = clean(p.person_name), clean(p.title)
+        name, title, role = clean(p.person_name), clean(p.title), p.role or "executive"
         if not name:
             continue
-        out.setdefault(p.company_ticker.upper(), {})[(entity_key(name), title.casefold())] = {
-            "name": name, "title": title, "role": p.role or "executive"}
+        out.setdefault(p.company_ticker.upper(), {})[(entity_key(name), post_key(title, role))] = {
+            "name": name, "title": title, "role": role, "role_std": role_std(title, role)}
     return out
 
 
@@ -166,11 +169,13 @@ def diff(old: Dataset, new: Dataset, *, old_partial: bool = False, new_partial: 
             if len(g) == 1 and len(c) == 1:
                 x, y = gone.pop(g[0]), came.pop(c[0])
                 add("position_changed", t, entity=y["name"], entity_key=pk,
-                    old=x["title"], new=y["title"], role=y["role"])
+                    old=x["title"], new=y["title"], role=y["role"], role_std=y["role_std"])
         for (pk, _), y in sorted(came.items()):
-            add("position_added", t, entity=y["name"], entity_key=pk, new=y["title"], role=y["role"])
+            add("position_added", t, entity=y["name"], entity_key=pk, new=y["title"], role=y["role"],
+                role_std=y["role_std"])
         for (pk, _), x in sorted(gone.items()):
-            add("position_removed", t, entity=x["name"], entity_key=pk, old=x["title"], role=x["role"])
+            add("position_removed", t, entity=x["name"], entity_key=pk, old=x["title"], role=x["role"],
+                role_std=x["role_std"])
     return changes
 
 
@@ -207,7 +212,7 @@ WITH x, r, c,
 WITH x, r, c, opened AND NOT initial AS opened, closed
 WHERE opened OR closed
 RETURN type(r) AS rel, x.key AS key, x.name AS name, c.ticker AS ticker, c.name AS company,
-       r.title AS title, r.role AS role, r.percent AS percent, r.shares AS shares, r.as_of AS as_of,
+       r.title AS title, r.role AS role, r.role_std AS role_std, r.post AS post, r.percent AS percent, r.shares AS shares, r.as_of AS as_of,
        r.source AS source, r.first_seen AS first_seen, r.last_seen AS last_seen, r.closed_at AS closed_at,
        opened, closed
 """
@@ -292,19 +297,22 @@ def changes(g, *, run: str | None = None, since: str | None = None, ticker: str 
                     crossed=crossed(x["percent"], None), as_of_old=x["as_of"] or "", last_seen=x["last_seen"])
             continue
 
-        # positions: compare titles, case-insensitively, like diff()
-        gone = {clean(e["title"]).casefold(): e for e in closed}
-        came = {clean(e["title"]).casefold(): e for e in opened}
-        for t in set(gone) & set(came):      # closed and reopened under the same title
+        # positions: compare seats (post), like diff()
+        def seat(e):
+            return e.get("post") or post_key(e["title"], e["role"])
+        gone = {seat(e): e for e in closed}
+        came = {seat(e): e for e in opened}
+        for t in set(gone) & set(came):      # closed and reopened in the same seat
             gone.pop(t), came.pop(t)
         if len(gone) == 1 and len(came) == 1:
             (x,), (y,) = gone.values(), came.values()
-            add("position_changed", y, old=x["title"], new=y["title"], role=y["role"])
+            add("position_changed", y, old=x["title"], new=y["title"], role=y["role"], role_std=y.get("role_std"))
             continue
         for y in came.values():
-            add("position_added", y, new=y["title"], role=y["role"])
+            add("position_added", y, new=y["title"], role=y["role"], role_std=y.get("role_std"))
         for x in gone.values():
-            add("position_removed", x, old=x["title"], role=x["role"], last_seen=x["last_seen"])
+            add("position_removed", x, old=x["title"], role=x["role"], role_std=x.get("role_std"),
+                last_seen=x["last_seen"])
 
     # newest first; within a day by company, the company itself first, then the biggest moves
     out.sort(key=lambda c: (c["ticker"], c["kind"] != "company_added", -abs(c.get("delta") or 0)))

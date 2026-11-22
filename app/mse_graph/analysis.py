@@ -15,6 +15,7 @@ accordingly.
                                       shareholder or subsidiary
     state_ownership   direct and look-through stakes held by state / municipal bodies
     company_flags     all of the above for one company, plus a look-through controller
+    position_roles    current positions per standard role, and the titles no rule recognises
 """
 from __future__ import annotations
 
@@ -228,6 +229,27 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
         keys=keys,
     )
     return [r for r in rows if r["lookthrough_percent"] > 0 or r["direct_percent"] > 0]
+
+
+# ---- positions by standard role (issue #34) --------------------------------------
+
+def position_roles(g: Graph, limit: int = 200) -> dict:
+    """Current positions counted per `role_std`, plus the titles mapped to "unknown".
+
+    The unknown titles are the ones normalize.role_std needs a pattern for; the
+    data-quality report (#8) lists them.
+    """
+    counts = {r["role_std"]: r["n"] for r in g.run(
+        """MATCH ()-[h:HOLDS_POSITION {current: true}]->()
+           RETURN coalesce(h.role_std, 'unknown') AS role_std, count(h) AS n""")}
+    unknown = g.run(
+        """
+        MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)
+        WHERE coalesce(h.role_std, 'unknown') = 'unknown'
+        WITH coalesce(h.title, '') AS title, count(h) AS n, collect(DISTINCT c.ticker)[..10] AS companies
+        RETURN title, n, companies ORDER BY n DESC, title LIMIT $limit
+        """, limit=limit)
+    return {"counts": counts, "unknown_titles": unknown}
 
 
 # ---- per-company summary ----------------------------------------------------------
