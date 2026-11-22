@@ -8,6 +8,11 @@ networks that can't. It is NOT an open proxy:
   re-checked on every redirect hop;
 * GET only, http/https only, response size capped.
 
+Hosts in UPSTREAM_PROXY_HOSTS (default opendatalab.mn, which refuses Render's own
+address, issue #4) always leave through the forward proxy in UPSTREAM_PROXY_URL
+(e.g. a Webshare rotating endpoint) when it is set: never directly, not even on
+error. /healthz shows the route without credentials.
+
     GET /fetch?url=https://mse.mn/mn/companies     (header X-Proxy-Token: ...)
     GET /healthz
 """
@@ -15,7 +20,7 @@ from __future__ import annotations
 
 import hmac
 import os
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Response
@@ -26,29 +31,74 @@ ALLOWED_HOSTS = [
     for h in os.environ.get("ALLOWED_HOSTS", "mse.mn,opendatalab.mn").split(",")
     if h.strip()
 ]
+UPSTREAM_PROXY_URL = os.environ.get("UPSTREAM_PROXY_URL", "").strip()
+UPSTREAM_PROXY_HOSTS = [
+    h.strip().lower()
+    for h in os.environ.get("UPSTREAM_PROXY_HOSTS", "opendatalab.mn").split(",")
+    if h.strip()
+]
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(25 * 1024 * 1024)))
 MAX_REDIRECTS = 5
 PASS_HEADERS = ("content-type", "last-modified", "etag", "content-disposition")
 
 app = FastAPI(title="mse-graph fetch proxy", docs_url=None, redoc_url=None)
-client = httpx.AsyncClient(
+_CLIENT_OPTS = dict(
     timeout=httpx.Timeout(60, connect=15),
     follow_redirects=False,
     headers={"User-Agent": "mse-graph/0.1 (research crawler)"},
 )
+client = httpx.AsyncClient(**_CLIENT_OPTS)
+upstream_client = httpx.AsyncClient(proxy=UPSTREAM_PROXY_URL, **_CLIENT_OPTS) if UPSTREAM_PROXY_URL else None
+
+
+def _redact(url: str) -> str:
+    """scheme://host:port of a proxy URL: no user name, no password."""
+    p = urlsplit(url)
+    netloc = p.hostname or ""
+    try:
+        if p.port:
+            netloc += f":{p.port}"
+    except ValueError:
+        pass
+    return urlunsplit((p.scheme, netloc, "", "", ""))
+
+
+def _scrub(text: str) -> str:
+    """Remove the upstream proxy's credentials from an error message."""
+    if UPSTREAM_PROXY_URL:
+        p = urlsplit(UPSTREAM_PROXY_URL)
+        text = text.replace(UPSTREAM_PROXY_URL, _redact(UPSTREAM_PROXY_URL))
+        for secret in (p.password, p.username):
+            if secret:
+                text = text.replace(secret, "***")
+    return text
+
+
+def _matches(url: str, hosts: list[str]) -> bool:
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
 
 def host_allowed(url: str) -> bool:
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    if urlsplit(url).scheme not in ("http", "https"):
         return False
-    host = parts.hostname.lower().rstrip(".")
-    return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
+    return _matches(url, ALLOWED_HOSTS)
+
+
+def client_for(url: str) -> httpx.AsyncClient:
+    """The upstream proxy for UPSTREAM_PROXY_HOSTS when one is configured, else direct."""
+    if upstream_client is not None and _matches(url, UPSTREAM_PROXY_HOSTS):
+        return upstream_client
+    return client
 
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "allowed_hosts": ALLOWED_HOSTS, "token_configured": bool(PROXY_TOKEN)}
+    return {
+        "ok": True, "allowed_hosts": ALLOWED_HOSTS, "token_configured": bool(PROXY_TOKEN),
+        "upstream_proxy": ({"hosts": UPSTREAM_PROXY_HOSTS, "route": _redact(UPSTREAM_PROXY_URL)}
+                           if UPSTREAM_PROXY_URL else None),
+    }
 
 
 @app.get("/fetch")
@@ -61,11 +111,12 @@ async def fetch(url: str = Query(...), x_proxy_token: str = Header(default="")):
     for _ in range(MAX_REDIRECTS + 1):
         if not host_allowed(url):
             raise HTTPException(403, f"host not allowed: {urlsplit(url).hostname}")
+        c = client_for(url)
         try:
-            req = client.build_request("GET", url)
-            upstream = await client.send(req, stream=True)
+            req = c.build_request("GET", url)
+            upstream = await c.send(req, stream=True)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"upstream error: {exc.__class__.__name__}: {exc}")
+            raise HTTPException(502, _scrub(f"upstream error: {exc.__class__.__name__}: {exc}"))
         if upstream.is_redirect and "location" in upstream.headers:
             await upstream.aclose()
             url = urljoin(url, upstream.headers["location"])
