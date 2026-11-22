@@ -22,8 +22,10 @@ Only `README.md`, `render.yaml`, `tests/test_app.py`, `pytest.ini` and this file
 2. Pull `main` here first. The owner sometimes edits files on GitHub, as with `6da1d03` "Update app.py".
 3. From the sentry checkout: `python3 scripts/deploy_repo.py check`, then `… sync` (the target defaults
    to `../mse-graph-proxy`). Review `git diff` and run `pytest -q` here.
-4. Commit to `main` as `Deploy: <what> (sentry #<PR>)`, with `App code from tuguldurizm/sentry <sha>`
-   in the body. Push only with the owner's go-ahead.
+4. Commit on your session branch as `Deploy: <what> (sentry #<PR>)`, with
+   `App code from tuguldurizm/sentry <sha>` in the body. Push it, open a PR into `main` and **merge it
+   yourself**. That has been the owner's standing instruction since 2026-11-22 (sentry's `CLAUDE.md`,
+   "Pull requests"). Don't merge if the tests fail or it conflicts.
 5. **Auto-deploy never fires:** start the deploy with the Render MCP tool `trigger_deploy` (workspace
    `tea-dbgti56gekts738renl0`). Then check `list_deploys` / `list_logs`.
 6. Record the deploy in sentry's `docs/CHANGELOG.md` and its "Live now" table in `docs/SYSTEM.md`.
