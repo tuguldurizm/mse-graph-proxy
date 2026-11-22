@@ -110,6 +110,9 @@
 </main>
 <script>
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+// holding types other than direct (issue #39): nominee = held for clients, treasury = own shares
+const HOLD_TAG = { nominee: 'номини', treasury: 'өөрийн хувьцаа', unknown: 'төрөл тодорхойгүй' };
+const holdTag = x => HOLD_TAG[x.holding_type] ? ` <span class="meta">${HOLD_TAG[x.holding_type]}</span>` : '';
 const COLORS = () => ({ Company: css('--company'), Person: css('--person'), Organization: css('--org') });
 const api = (p) => fetch(p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -137,11 +140,13 @@ function draw(data, { replace = true, focus = null } = {}) {
   })));
   edges.update(data.edges.filter(Boolean).map(e => ({
     id: `${e.source}|${e.type}|${e.target}|${e.title || ''}`, from: e.source, to: e.target,
-    label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : 'эзэмшил')
+    label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : 'эзэмшил') + (HOLD_TAG[e.holding_type] ? ` (${HOLD_TAG[e.holding_type]})` : '')
          : e.type === 'BENEFICIAL_OWNER' ? 'эцсийн өмчлөгч' : (e.title || ''),
-    dashes: e.type === 'HOLDS_POSITION' ? true : e.type === 'BENEFICIAL_OWNER' ? [2, 4] : false,
+    dashes: e.type === 'HOLDS_POSITION' ? true : e.type === 'BENEFICIAL_OWNER' ? [2, 4]
+          : HOLD_TAG[e.holding_type] ? [6, 3] : false,   // held for clients / own shares: not ownership
     width: e.type === 'OWNS' ? 1 + Math.min(6, (e.percent || 0) / 10) : 1,
-    color: { color: e.type === 'HOLDS_POSITION' ? css('--person') : css('--company'), opacity: .7 },
+    color: { color: e.type === 'HOLDS_POSITION' ? css('--person') : HOLD_TAG[e.holding_type] ? css('--muted') : css('--company'),
+             opacity: .7 },
   })));
   if (focus) setTimeout(() => network.focus(focus, { scale: 1, animation: true }), 300);
 }
@@ -201,13 +206,17 @@ async function showDetails(d) {
   // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
   const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
   const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
-  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}</span><span>${pct(o.percent)}${reg(o)}</span>`);
+  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}</span>`);
+  const own = d.ownership;
+  if (own && (own.nominee.holders || own.treasury.holders))
+    html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
+            (own.treasury.holders ? ` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
                b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
-  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}</span><span>${pct(h.percent)}</span>`);
+  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}</span>`);
   html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
@@ -439,6 +448,13 @@ document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () =>
   } else {
     ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
       <span class="meta">${r.companies} компани</span></li>`).join('');
+    if (kind === 'common-owners') {   // custodians hold for clients: listed apart (issue #39)
+      const n = await api('/api/analysis/nominees');
+      if (n.nominees.length) ul.innerHTML += group('Номини / кастодиан (харилцагчдын нэрийн өмнөөс)') +
+        n.nominees.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+          <span class="meta">${r.companies} компани</span></li>`).join('');
+      if (!rs.length && n.nominees.length) return;
+    }
   }
   if (!rs.length) ul.innerHTML = '<li class="meta">Үр дүн алга</li>';
 });

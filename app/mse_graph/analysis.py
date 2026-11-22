@@ -16,11 +16,21 @@ accordingly.
     state_ownership   direct and look-through stakes held by state / municipal bodies
     company_flags     all of the above for one company, plus a look-through controller
     position_roles    current positions per standard role, and the titles no rule recognises
+    nominees          holders that keep shares for others, stakes by holding type, and
+                      holders that may be nominees but aren't marked (issue #39)
+
+Only stakes that are ownership count (holdings.REAL: `direct` or `unknown`): a custodian
+holding shares for its clients is not an owner, a controller or a related party, and a
+company's treasury shares are not a holding (issue #39).
 """
 from __future__ import annotations
 
 from .graph import Graph
+from .holdings import real
 from .normalize import is_state
+
+# a stake that is ownership (not nominee or treasury), for the relationship variable r
+_REAL_R = real("r")
 
 # Holdings at or above this are treated as influence (besides board/executive posts).
 DEFAULT_MIN_STAKE = 5.0
@@ -58,7 +68,7 @@ def cycles(g: Graph, max_len: int = 6) -> list[dict]:
         f"""
         MATCH p = (c:Company)-[:OWNS*2..{max_len}]->(c)
         WITH c, p, nodes(p)[..-1] AS ns
-        WHERE all(r IN relationships(p) WHERE r.current)
+        WHERE all(r IN relationships(p) WHERE r.current AND {_REAL_R})
           AND all(n IN ns WHERE n.key >= c.key)                       // one rotation per loop
           AND all(i IN range(0, size(ns) - 2) WHERE NOT ns[i] IN ns[i + 1..])   // simple loops only
         RETURN [n IN ns | {_NODE}] AS companies,
@@ -78,10 +88,10 @@ def cycles(g: Graph, max_len: int = 6) -> list[dict]:
 def cross_holdings(g: Graph) -> list[dict]:
     """Listed companies holding shares in other listed companies, with the reverse stake if any."""
     return g.run(
-        """
-        MATCH (a:Company)-[o:OWNS {current: true}]->(b:Company)
-        WHERE coalesce(a.listed, true) AND coalesce(b.listed, true)
-        OPTIONAL MATCH (b)-[back:OWNS {current: true}]->(a)
+        f"""
+        MATCH (a:Company)-[o:OWNS {{current: true}}]->(b:Company)
+        WHERE coalesce(a.listed, true) AND coalesce(b.listed, true) AND a <> b AND {real("o")}
+        OPTIONAL MATCH (b)-[back:OWNS {{current: true}}]->(a) WHERE {real("back")}
         RETURN a.key AS holder_key, a.ticker AS holder, a.name AS holder_name,
                b.key AS company_key, b.ticker AS company, b.name AS company_name,
                o.percent AS percent, back.percent AS reverse_percent
@@ -95,11 +105,12 @@ def cross_holdings(g: Graph) -> list[dict]:
 def insider_owners(g: Graph) -> list[dict]:
     """Board members / executives who also hold shares in the same company."""
     return g.run(
-        """
-        MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)<-[o:OWNS {current: true}]-(p)
+        f"""
+        MATCH (p:Person)-[h:HOLDS_POSITION {{current: true}}]->(c:Company)<-[o:OWNS {{current: true}}]-(p)
+        WHERE {real("o")}
         WITH p, c, o, collect(h.title) AS titles
         RETURN 'insider_owner' AS kind, p.key AS key, p.name AS name,
-               [{key: c.key, ticker: c.ticker, name: c.name, titles: titles, percent: o.percent}] AS companies
+               [{{key: c.key, ticker: c.ticker, name: c.name, titles: titles, percent: o.percent}}] AS companies
         ORDER BY coalesce(o.percent, 0) DESC, name
         """
     )
@@ -115,7 +126,7 @@ def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dic
     rows = g.run(
         """
         MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
-        WHERE x <> c AND (type(r) = 'HOLDS_POSITION' OR coalesce(r.percent, 0) >= $min)
+        WHERE x <> c AND (type(r) = 'HOLDS_POSITION' OR (coalesce(r.percent, 0) >= $min AND REAL_R))
         WITH x, r, c, CASE WHEN c.sector_std IS NOT NULL THEN 'std:' + c.sector_std
                            WHEN coalesce(c.sector_mse, c.sector, '') <> ''
                            THEN 'text:' + toLower(coalesce(c.sector_mse, c.sector)) END AS sector_key
@@ -130,7 +141,7 @@ def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dic
                sector, CASE WHEN sector_key STARTS WITH 'std:' THEN substring(sector_key, 4) END AS sector_std,
                companies
         ORDER BY size(companies) DESC, name
-        """,
+        """.replace("REAL_R", _REAL_R),
         min=min_stake,
     )
     for row in rows:
@@ -145,9 +156,9 @@ def related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict
     rows = g.run(
         """
         MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)
-        MATCH (c)-[link:OWNS {current: true}]-(s:Company)
+        MATCH (c)-[link:OWNS {current: true}]-(s:Company) WHERE REAL_LINK
         MATCH (p)-[r:OWNS|HOLDS_POSITION {current: true}]->(s)
-        WHERE s <> c AND (type(r) = 'HOLDS_POSITION' OR coalesce(r.percent, 0) >= $min)
+        WHERE s <> c AND (type(r) = 'HOLDS_POSITION' OR (coalesce(r.percent, 0) >= $min AND REAL_R))
         WITH p, c, s, link, collect(DISTINCT h.title) AS titles_c,
              collect(DISTINCT {rel: type(r), title: r.title, percent: r.percent}) AS roles_s
         RETURN 'related_party' AS kind, p.key AS key, p.name AS name,
@@ -156,7 +167,7 @@ def related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict
                CASE WHEN startNode(link) = s THEN 'shareholder' ELSE 'subsidiary' END AS relation,
                link.percent AS percent
         ORDER BY name, company.ticker, counterparty.ticker
-        """,
+        """.replace("REAL_R", _REAL_R).replace("REAL_LINK", real("link")),
         min=min_stake,
     )
     # A person on both boards appears twice (once from each side): keep the side
@@ -212,13 +223,13 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
     rows = g.run(
         f"""
         MATCH (s:Entity) WHERE s.key IN $keys
-          AND NOT EXISTS {{ MATCH (t:Entity)-[:OWNS {{current: true}}]->(s) WHERE t.key IN $keys }}
+          AND NOT EXISTS {{ MATCH (t:Entity)-[x:OWNS {{current: true}}]->(s) WHERE t.key IN $keys AND {real("x")} }}
         MATCH p = (s)-[:OWNS*1..{max_depth}]->(c:Company)
-        WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL) AND NOT c.key IN $keys
+        WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL AND {_REAL_R}) AND NOT c.key IN $keys
           AND {_SIMPLE}
         WITH c, s, sum(reduce(x = 100.0, r IN relationships(p) | x * r.percent / 100.0)) AS eff
         WITH c, sum(eff) AS lookthrough, collect({{key: s.key, name: s.name, percent: round(eff, 3)}}) AS via
-        OPTIONAL MATCH (d:Entity)-[o:OWNS {{current: true}}]->(c) WHERE d.key IN $keys
+        OPTIONAL MATCH (d:Entity)-[o:OWNS {{current: true}}]->(c) WHERE d.key IN $keys AND {real("o")}
         WITH c, lookthrough, via, sum(coalesce(o.percent, 0)) AS direct,
              collect(CASE WHEN d IS NULL THEN NULL ELSE {{key: d.key, name: d.name, percent: o.percent}} END) AS holders
         RETURN c.key AS key, c.ticker AS ticker, c.name AS name, coalesce(c.listed, true) AS listed,
@@ -229,6 +240,50 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
         keys=keys,
     )
     return [r for r in rows if r["lookthrough_percent"] > 0 or r["direct_percent"] > 0]
+
+
+# ---- nominee and treasury holdings (issue #39) --------------------------------------
+
+# Names of holders that often keep shares for clients, but not always: brokerages, banks,
+# investment firms. They are candidates for data/reference/nominees.csv, never marked by rule.
+_CANDIDATE_RE = (r"(?i).*(ҮЦК|үнэт цаас|securities|секьюр|секюр|брокер|broker|банк|bank|капитал|capital|"
+                 r"хөрөнгө оруулалт|invest|asset management).*")
+
+
+def nominee_candidates(g: Graph, min_companies: int = 2, limit: int = 100) -> list[dict]:
+    """Holders not marked as nominees whose name suggests a broker, bank or investment firm
+    and that hold stakes in `min_companies`+ companies: the rows to check before adding them
+    to data/reference/nominees.csv (a firm's own investments are direct stakes)."""
+    return g.run(
+        f"""
+        MATCH (h:Entity)-[o:OWNS {{current: true}}]->(c:Company)
+        WHERE NOT h:Person AND NOT coalesce(h.nominee, false) AND h <> c AND {real("o")}
+          AND h.name =~ $rx
+        WITH h, collect({{ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}}) AS stakes
+        WHERE size(stakes) >= $min
+        RETURN h.key AS key, h.name AS name, h.register_no AS register_no,
+               [l IN labels(h) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
+               size(stakes) AS companies, stakes
+        ORDER BY companies DESC, name LIMIT $limit
+        """, rx=_CANDIDATE_RE, min=min_companies, limit=limit)
+
+
+def nominees(g: Graph) -> dict:
+    """Holders that keep shares for others, current stakes counted by holding type, the
+    companies with the largest nominee share, and candidates to check (issue #39)."""
+    counts = {r["t"]: r["n"] for r in g.run(
+        """MATCH ()-[o:OWNS {current: true}]->() RETURN coalesce(o.holding_type, 'direct') AS t, count(o) AS n""")}
+    largest = g.run(
+        """
+        MATCH (h:Entity)-[o:OWNS {current: true}]->(c:Company) WHERE o.holding_type IN ['nominee', 'treasury']
+        WITH c, o.holding_type AS t, sum(o.percent) AS pct, count(o) AS n
+        WITH c, collect({holding_type: t, percent: round(pct, 3), holders: n}) AS parts,
+             sum(CASE WHEN t = 'nominee' THEN coalesce(pct, 0) ELSE 0 END) AS nominee_pct
+        RETURN c.key AS key, c.ticker AS ticker, c.name AS name, parts, round(nominee_pct, 3) AS nominee_percent
+        ORDER BY nominee_pct DESC, ticker LIMIT 50
+        """)
+    return {"counts": {t: counts.get(t, 0) for t in ("direct", "nominee", "treasury", "unknown")},
+            "nominees": g.nominee_holders(), "companies": largest, "candidates": nominee_candidates(g)}
 
 
 # ---- positions by standard role (issue #34) --------------------------------------
@@ -286,6 +341,15 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
     if uo and uo[0]["effective_percent"] >= 50:
         add("controller", "info", f"Хяналтын эзэмшигч: {uo[0]['name']} ({uo[0]['effective_percent']:g}% look-through)",
             [uo[0]["key"]])
+
+    held = g.ownership_summary(me)
+    if held["nominee"]["holders"]:
+        pct = held["nominee"]["percent"]
+        add("nominee_holding", "info",
+            f"Номини / кастодиан эзэмшил: {held['nominee']['holders']} эзэмшигч"
+            + (f", нийт {pct:g}%" if pct is not None else "") + " (харилцагчдын нэрийн өмнөөс; эзэн нь тодорхойгүй)")
+    if held["treasury"]["holders"] and held["treasury"]["percent"] is not None:
+        add("treasury", "info", f"Өөрийн (буцаан авсан) хувьцаа: {held['treasury']['percent']:g}%")
 
     for s in state_ownership(g):
         if s["key"] == me:

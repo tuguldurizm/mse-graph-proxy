@@ -7,6 +7,8 @@ annual reports / FRC filings) and the Neo4j loader. A data directory holds:
                        (+ state_reg_no; a `reg_no` column of either kind of number still works)
     shareholders.csv   company_ticker,holder_name,percent,shares,holder_type,as_of,source,holder_ticker
                        (+ org_type: state | foreign | fund | other, optional)
+                       (+ holding_type: direct | nominee | treasury | unknown, share_class, basis;
+                        optional, issue #39)
     executives.csv     company_ticker,person_name,title,role,since,until,source
     manifest.json      {"observed_at": "YYYY-MM-DD", "snapshots": {...}, "supplementary": true}   (optional)
 

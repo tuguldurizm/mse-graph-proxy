@@ -427,3 +427,78 @@ def sector_std_name(section: str | None, lang: str = "mn") -> str:
 def split_activities(text: str | None) -> list[str]:
     """The "; "-separated activities of CompanyFacts.activities, cleaned, in order."""
     return [a for a in (clean(x) for x in (text or "").split(";")) if a]
+
+
+# ---- holding type and share class (issue #39) ------------------------------------
+#
+# A stake (`OWNS`) is `direct` unless something says otherwise: `nominee` when the
+# holder keeps the shares for clients (a custodian bank, a brokerage's client account,
+# a depository, a trust), `treasury` for a company's own shares, `unknown` when a
+# source says it can't tell. Nominee holders come from data/reference/nominees.csv
+# (holdings.py) and from the name rules below; a source's own `holding_type` wins.
+
+HOLDING_TYPES = ("direct", "nominee", "treasury", "unknown")
+
+# Names of holders that keep shares for others. Stems, matched from a word start.
+_NOMINEE_RULES = (
+    ("custodian", r"кастоди|custod|depositor|depositar|хадгаламжийн төв"),
+    ("nominee", r"nominee|номини|omnibus|client\w*\s+account|for the account of|a/c(?![\w])|"
+                r"харилцагч\w*\s+(?:\w+\s+)?данс"),
+    ("trust", r"итгэмжл(?:эл|эн|ийн)"),     # held under a trust deed; not "итгэмжлэгдсэн" (accredited)
+)
+_NOMINEE_RES = [(kind, re.compile(r"(?<![\w])(?:" + pat + ")", re.IGNORECASE)) for kind, pat in _NOMINEE_RULES]
+# A company's own (treasury, bought-back) shares as a shareholder-table row.
+_TREASURY_RE = re.compile(
+    r"(?<![\w])(?:өөрийн хувьцаа|буцаан (?:худалдан|худалдаж) ав|эргүүлэн (?:худалдан|худалдаж) ав|"
+    r"treasury|own shares|bought[- ]back)", re.IGNORECASE)
+
+_HOLDING_WORDS = {      # checked in this order
+    "unknown": ("unknown", "тодорхойгүй", "?"),
+    "direct": ("direct", "шууд", "beneficial", "own account"),
+    "nominee": ("nominee", "custodian", "custody", "broker", "trust", "omnibus", "client",
+                "номини", "кастодиан", "брокер", "итгэмжлэл", "харилцагч"),
+    "treasury": ("treasury", "own shares", "өөрийн", "буцаан"),
+}
+_SHARE_CLASSES = {
+    "common": ("common", "ordinary", "энгийн", "жирийн"),
+    "preferred": ("preferred", "preference", "давуу"),
+}
+_BASES = {
+    "outstanding": ("outstanding", "issued", "total", "нийт", "гаргасан"),
+    "voting": ("voting", "санал"),
+}
+
+
+def _vocab(raw: str | None, table: dict) -> str:
+    v = clean(raw).lower()
+    if not v:
+        return ""
+    if v in table:
+        return v
+    return next((k for k, words in table.items() if any(w in v for w in words)), "")
+
+
+def holding_type_value(raw: str | None) -> str:
+    """A source's holding type in the standard vocabulary (HOLDING_TYPES), "" if it gives none."""
+    return _vocab(raw, _HOLDING_WORDS)
+
+
+def share_class_value(raw: str | None) -> str:
+    """"common" / "preferred", another class as the source spells it (lower case), or ""."""
+    return _vocab(raw, _SHARE_CLASSES) or clean(raw).lower()
+
+
+def basis_value(raw: str | None) -> str:
+    """What a percentage is of: "outstanding" or "voting" shares, or "" when not said."""
+    return _vocab(raw, _BASES)
+
+
+def nominee_kind(name: str | None) -> str:
+    """"custodian" / "nominee" / "trust" when a holder's name says it keeps shares for others."""
+    n = clean(name)
+    return next((kind for kind, rx in _NOMINEE_RES if rx.search(n)), "")
+
+
+def is_treasury_name(name: str | None) -> bool:
+    """A shareholder-table row for the company's own shares ("Өөрийн хувьцаа", "Treasury shares")."""
+    return bool(_TREASURY_RE.search(clean(name)))
