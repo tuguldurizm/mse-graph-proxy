@@ -81,6 +81,7 @@
   <div class="row">
     <button id="btnOverview">Зах зээлийн тойм</button>
     <select id="depth"><option value="1">1 алхам</option><option value="2" selected>2 алхам</option><option value="3">3 алхам</option></select>
+    <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option></select>
   </div>
 
   <h2>Холбоос олох / Path</h2>
@@ -112,6 +113,7 @@
   <div class="row">
     <button id="btnGroups">Хяналтын бүлэг</button>
     <button id="btnCommunities">Илрүүлсэн бүлгүүд</button>
+    <button id="btnCentrality">Гол зангилаа / Brokers</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -141,17 +143,29 @@ const network = new vis.Network(document.getElementById('net'), { nodes, edges }
            font: { size: 10, color: css('--muted'), strokeWidth: 0 } },
   nodes: { font: { color: css('--ink'), size: 13 } },
 });
-let selected = null, pathA = null, pathB = null;
+let selected = null, pathA = null, pathB = null, lastDraw = null;
+// node size by a centrality score (issue #29): 12 px, up to 12 + 36 px for the largest score in view
+const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree' };
+function nodeSizes(list) {
+  const f = CEN_FIELD[document.getElementById('sizeBy').value];
+  if (!f) return null;
+  const v = n => Math.max(0, f === 'centrality_pagerank' ? (n[f] || 1) - 1 : (n[f] || 0));
+  const max = Math.max(...list.map(v), 0);
+  return n => 12 + (max > 0 ? 36 * Math.sqrt(v(n) / max) : 0);
+}
 
 function draw(data, { replace = true, focus = null } = {}) {
   const col = COLORS();
-  if (replace) { nodes.clear(); edges.clear(); }
+  if (replace) { nodes.clear(); edges.clear(); lastDraw = { nodes: [], edges: [] }; }
+  lastDraw.nodes.push(...data.nodes); lastDraw.edges.push(...data.edges);
+  const sz = nodeSizes(lastDraw.nodes), cen = n => n.centrality_degree == null ? '' :
+    `\nкомпани ${n.centrality_degree} · зуучлал ${(100 * n.centrality_betweenness).toFixed(1)}% · PageRank ${(+n.centrality_pagerank).toFixed(2)}`;
   nodes.update(data.nodes.map(n => ({
     id: n.key, label: n.ticker && !n.ticker.startsWith('~') ? `${n.ticker}\n${n.name}` : n.name, type: n.type,
-    shape: n.type === 'Company' ? 'box' : 'dot', size: 12,
+    shape: n.type === 'Company' ? 'box' : 'dot', size: sz ? sz(n) : 12,
+    font: n.type === 'Company' ? { color: '#fff', size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
     color: { background: col[n.type], border: col[n.type], highlight: { background: col[n.type], border: css('--ink') } },
-    font: n.type === 'Company' ? { color: '#fff' } : undefined,
-    title: `${n.type}: ${n.name}`,
+    title: `${n.type}: ${n.name}${cen(n)}`,
   })));
   edges.update(data.edges.filter(Boolean).map(e => ({
     id: `${e.source}|${e.type}|${e.target}|${e.title || ''}`, from: e.source, to: e.target,
@@ -427,6 +441,8 @@ document.getElementById('details').addEventListener('click', ev => {
 document.getElementById('analysis').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
   const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
+  const cb = ev.target.closest('button[data-cen-by]'); if (cb) return showCentrality({ by: cb.dataset.cenBy });
+  const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const gr = ev.target.closest('li[data-group]'); if (gr) return showGroup(gr.dataset.group);
   const cm = ev.target.closest('li[data-community]'); if (cm) return showCommunity(cm.dataset.community);
@@ -581,6 +597,27 @@ async function showCommunity(id) {
   draw(await api(`/api/graph/community?id=${encodeURIComponent(id)}`));
 }
 document.getElementById('btnGroups').onclick = showGroups;
+
+// ---- network centrality (issue #29) --------------------------------------------------
+const CEN_BY = { betweenness: 'Зуучлал', pagerank: 'PageRank', degree: 'Компанийн тоо' };
+const CEN_KIND = { all: 'Бүгд', person: 'Хүн', organization: 'Байгууллага', company: 'Компани' };
+let cenState = { by: 'betweenness', kind: 'all' };
+async function showCentrality(change = {}) {
+  cenState = { ...cenState, ...change };
+  const { by, kind } = cenState, ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api(`/api/analysis/centrality?by=${by}&kind=${kind}&limit=150`);
+  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Зуучлал: компани хоорондын хамгийн богино замуудын хэдэн хувь энэ зангилаагаар дамждаг. PageRank: шууд ба шууд бус эзэмшлээр (1 = дундаж). Тэмдэглэгдсэн хүн хоёр өөр хүний буруу нэгтгэл байж магадгүй (Нэгтгэлийн хяналт).${r.computed_at ? ' · ' + esc(r.computed_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}</li>`;
+  html += `<li class="sorts">${Object.entries(CEN_BY).map(([k, l]) => `<button data-cen-by="${k}" class="${k === by ? 'on' : ''}">${l}</button>`).join('')}</li>`;
+  html += `<li class="sorts">${Object.entries(CEN_KIND).map(([k, l]) => `<button data-cen-kind="${k}" class="${k === kind ? 'on' : ''}">${l}</button>`).join('')}</li>`;
+  html += r.items.map((x, i) => `<li class="rv" data-key="${esc(x.key)}">
+      <span class="name">${i + 1}. ${esc(coName(x))} <span class="tag ${x.type}">${x.type}</span>${x.review ? ' <span class="flag">хяналт #6</span>' : ''}</span>
+      <div class="meta">компани ${x.degree} · зуучлал ${(100 * x.betweenness).toFixed(2)}% · PageRank ${x.pagerank.toFixed(2)}</div></li>`).join('')
+    || '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = html;
+}
+document.getElementById('btnCentrality').onclick = () => showCentrality();
+document.getElementById('sizeBy').onchange = () => { if (lastDraw) draw(lastDraw); };
 document.getElementById('btnCommunities').onclick = showCommunities;
 
 // Deep link: /?focus=company:XAG (used by the change feed).

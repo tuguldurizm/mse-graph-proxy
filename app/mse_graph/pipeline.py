@@ -338,14 +338,22 @@ def _run(force: bool = False) -> None:
             log.info("PIPELINE quality: %s", json.dumps(checked, ensure_ascii=False))
         except Exception as exc:  # a report must never fail the run
             checked = {"error": str(exc)}
+        net = None
         try:   # detected groups (#28): group_id on the nodes, `PIPELINE groups` with the curated score
             from . import groups
-            found = groups.detect(g)
+            net = groups.Network.read(g)       # read once, for the groups and the centrality (#29)
+            found = groups.detect(net=net)
             written = groups.write_communities(g, found)
             written["curated"] = {s["dataset"]: s["score"] for s in groups.curated_score(g, found)}
             log.info("PIPELINE groups: %s", json.dumps(written, ensure_ascii=False))
         except Exception as exc:  # nor may group detection
             log.warning("PIPELINE groups failed: %s", exc)
+        try:   # network centrality (#29): centrality_* on the nodes, `PIPELINE centrality` with the top
+            from . import centrality
+            written = centrality.write(g, centrality.compute(g, net=net))
+            log.info("PIPELINE centrality: %s", json.dumps(written, ensure_ascii=False))
+        except Exception as exc:  # nor may the centrality
+            log.warning("PIPELINE centrality failed: %s", exc)
         set_status("done", "finished", stats=stats, top_interlocks=top, quality=checked)
     except Exception as exc:
         set_status("failed", "pipeline crashed", error=str(exc))

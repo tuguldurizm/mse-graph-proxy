@@ -2430,7 +2430,7 @@ class Graph:
             UNWIND nodes AS n WITH collect(DISTINCT n) AS nodes, rels
             UNWIND (CASE WHEN rels = [] THEN [null] ELSE rels END) AS r
             WITH nodes, collect(DISTINCT r) AS rels
-            RETURN [n IN nodes | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
+            RETURN [n IN nodes | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                   percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,
@@ -2449,7 +2449,7 @@ class Graph:
             UNWIND rs AS r
             WITH collect(DISTINCT x) + collect(DISTINCT endNode(r)) AS ns, collect(DISTINCT r) AS rels
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
-            RETURN [n IN nodes | n {.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
+            RETURN [n IN nodes | n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
                    [r IN rels | {source: startNode(r).key, target: endNode(r).key, type: type(r),
                                  percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}] AS edges
             """,
@@ -2465,7 +2465,7 @@ class Graph:
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
             MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
-            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
+            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                               percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,
