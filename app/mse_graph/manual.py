@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from . import csv_io
+from .normalize import IDENTITY_VERSION
 
 REGISTRY_HOST = "opendatalab.mn"
 # A dataset row whose source starts with this was taken from a search-engine result that
@@ -39,7 +40,9 @@ def load_manual(g, root: str | Path | None = None, force: bool = False) -> list[
     """
     out = []
     for d in csv_io.manual_dirs(_root(root)):
-        digest = csv_io.dir_digest(d)
+        # the identity rules are part of it: when they change (normalize.IDENTITY_VERSION),
+        # every dataset loads once more, so its rows land on the people the new rules give
+        digest = csv_io.dir_digest(d) + "|id:" + IDENTITY_VERSION
         if not force and g.manual_digest(d.name) == digest:
             # idempotent, so it also runs for unchanged datasets: cleans edges an earlier load left
             drop_unverified_twins(g, csv_io.read_dir(d))
@@ -76,6 +79,7 @@ def drop_retracted(g, ds) -> int:
     g.canonicalize(ds)
     alias = {r["a"]: r["key"] for r in g.run("MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
     tkeys = g.company_keys()
+    people = g.people_resolver()      # who a person row is, as the loader decided (issue #36)
     owns, posts = set(), set()
     for h in ds.shareholdings:
         name = clean(h.holder_name)
@@ -85,11 +89,13 @@ def drop_retracted(g, ds) -> int:
             key = tkeys.get(h.holder_ticker.upper()) or company_key(h.holder_ticker)
         else:
             k = entity_key(name, h.holder_type)
-            key = alias.get(k) or alias.get(entity_key(name)) or k
+            key = alias.get(k) or alias.get(entity_key(name)) or (
+                people.key(name, h.company_ticker) if k.startswith("person:") else k)
         owns.add((h.company_ticker.upper(), key))
     for p in ds.positions:
         if not p.until:
-            posts.add((p.company_ticker.upper(), entity_key(p.person_name, "person"), post_key(p.title, p.role)))
+            posts.add((p.company_ticker.upper(), people.key(clean(p.person_name), p.company_ticker),
+                       post_key(p.title, p.role)))
     sources = {x.source for x in ds.shareholdings + ds.positions if x.source}
     rows = g.run(
         """
@@ -309,8 +315,9 @@ def group_people(g, root: str | Path | None = None, dataset: str | None = None,
 
     The group is the dataset's companies plus what they own (current stakes, up to three
     steps), so the subsidiaries discovery added from the registry count as the group's.
-    People are matched by their merge key (`normalize.entity_key`: "Т.Гантөмөр" ==
-    "Тардай Гантөмөр"), so a namesake can show up as the same person: check the sources.
+    People are the graph's person nodes: "Т.Гантөмөр" is "Тардай Гантөмөр" only where the
+    loader linked them, i.e. at a company where he is the only full name that fits (issue
+    #36). Elsewhere the initial form is its own person, listed in `/api/analysis/resolution`.
 
     Reads only the graph. Open Data Lab can't be searched by name (robots.txt), so a
     person's other companies appear here once their registry pages are in the graph:

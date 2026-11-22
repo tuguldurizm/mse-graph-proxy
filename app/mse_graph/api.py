@@ -234,6 +234,16 @@ def position_roles():
     return analysis.position_roles(g())
 
 
+@app.get("/api/analysis/resolution")
+def resolution():
+    """The entity-resolution review queue (issue #6). So far: initial-form people
+    ("Б.Батболд") that a full registry name may stand for but the rule didn't link
+    (issue #36): two fitting full names at one company, or one at other companies only."""
+    people = g().ambiguous_people()
+    return {"ambiguous_people": people, "counts": {
+        r: sum(1 for p in people if p["reason"] == r) for r in ("several_at_company", "no_shared_company")}}
+
+
 @app.get("/api/companies/{ticker}/flags")
 def company_flags(ticker: str, min_stake: float = 5.0):
     from . import analysis

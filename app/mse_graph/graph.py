@@ -4,7 +4,8 @@ Graph model
 -----------
 (:Entity:Company[:Listed] {key, ticker, name, name_en, sector, register_no, state_reg_no, address, website,
                            mse_id, url, listed, aliases, former_tickers, former_keys})
-(:Entity:Person       {key, name})
+(:Entity:Person       {key, name, display_name, name_form, full_name, patronymic, given_name, clan_name,
+                       name_variants, former_keys})
 (:Entity:Organization {key, name, org_type, register_no?})  -- shareholders outside the company lists
 
 A company is one legal entity (issue #35): its key is `company:<register_no>`
@@ -31,6 +32,11 @@ A position's `post` (normalize.post_key) is the seat it fills, e.g. "ceo" or
 positions merge on (person, company, post), so a respelt title refreshes the
 stint: `title` is the owning source's latest spelling, `titles` every spelling
 seen. `role` is the source's coarse "board" / "executive".
+
+A person's key is `person:<patronymic stem> <given>` for a full registry name, else its initial form
+(`person:б батболд`). An initial-form row is the full-name person at a company where exactly one
+fitting full name appears (PeopleResolver, _adopt_initials; issue #36). `name_variants` lists every
+spelling seen as "<spelling> | <source>".
 
 `key` is the unique merge key (see normalize.entity_key). A shareholder whose
 name matches a listed company's name / English name is linked to that
@@ -71,8 +77,8 @@ from neo4j import GraphDatabase
 
 from .config import settings
 from .models import Dataset
-from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, clean, entity_key, is_aggregate, \
-    is_organization, org_type_from_name, parse_date, post_key, role_std, split_reg_numbers
+from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, clean, entity_key, is_aggregate, \
+    is_organization, org_type_from_name, parse_date, person_name, post_key, role_std, split_reg_numbers
 from .opendatalab import REGISTER_NO_RE
 
 SCHEMA = [
@@ -120,6 +126,8 @@ MIGRATE_CHANGES = [
 ]
 
 DEMO_SOURCE = "DEMO-fictional"
+# a source on this host (the state registry mirror) gives people's full names
+REGISTRY_MARK = "opendatalab.mn"
 # as_of values that compare correctly as strings (see normalize.parse_date)
 ISO_DATE = r"\d{4}(-\d{2}){0,2}"
 # Two stakes differing by less than this many percentage points count as equal.
@@ -156,6 +164,64 @@ def company_key(ticker: str, register_no: str = "") -> str:
     """A company's node key: its register number when known, else its ticker (issue #35)."""
     reg, _ = split_reg_numbers(register_no)
     return "company:" + (reg or ticker.upper())
+
+
+class PeopleResolver:
+    """Which person node a person row names (issue #36).
+
+    A full name or any other form is its own key (normalize.person_name). An initial
+    form ("Б.Батболд") at company C is the full-name person whose name it can stand
+    for, when exactly one such person is linked to C (by any edge, past or current,
+    or by a row the dataset is loading: `pending`). Otherwise it keeps its own
+    initial key, and Graph.ambiguous_people lists it for review.
+
+    `key()` also records the spellings it saw (`noted`), for Graph._note_names.
+    """
+
+    def __init__(self, people: list[dict], pending: dict[str, set] | None = None):
+        self.names: dict[str, str] = {}                 # full key -> its name
+        self.parsed: dict[str, PersonName] = {}
+        self.at: dict[str, set[str]] = {}               # ticker -> full keys linked to it
+        self.by_given: dict[str, set[str]] = {}         # given name -> full keys
+        for p in people:
+            if p["pn"].form == "full":
+                self._add(p["key"], p["pn"].full_name or p["name"], p["pn"], p["companies"])
+        for ticker, rows in (pending or {}).items():
+            for key, name in rows:
+                self._add(key, self.names.get(key, name), person_name(name), [ticker])
+        self.noted: dict[str, dict] = {}
+
+    def _add(self, key: str, name: str, pn: PersonName, tickers) -> None:
+        self.names.setdefault(key, name)
+        self.parsed.setdefault(key, pn)
+        self.by_given.setdefault(pn.given.casefold(), set()).add(key)
+        for t in tickers:
+            self.at.setdefault(t, set()).add(key)
+
+    def candidates(self, pn: PersonName, ticker: str | None = None) -> list[str]:
+        """The full-name people `pn` (an initial form) can stand for: at `ticker`, or anywhere."""
+        if pn.form != "initial":
+            return []
+        keys = self.by_given.get(pn.given.casefold(), set())
+        if ticker is not None:
+            keys = keys & self.at.get(ticker, set())
+        return sorted(k for k in keys if pn.could_be(self.parsed[k]))
+
+    def key(self, name: str, ticker: str, source: str = "") -> str:
+        """The key of the person row `name` at company `ticker` (cleaned name)."""
+        pn = person_name(name)
+        key = pn.key
+        if pn.form == "initial":
+            cands = self.candidates(pn, ticker.upper())
+            if len(cands) == 1:
+                key = cands[0]
+        seen = self.noted.setdefault(key, {"parts": {}, "variants": []})
+        if key == pn.key:
+            seen["parts"] = {**seen["parts"], **pn.parts()}
+        variant = f"{name} | {source}" if source else name
+        if variant not in seen["variants"]:
+            seen["variants"].append(variant)
+        return key
 
 
 class Graph:
@@ -201,9 +267,10 @@ class Graph:
         for stmt in MIGRATE_CHANGES:
             self.run(stmt, today=_today())
         self.migrate_positions()
-        self.rekey_entities()
+        self.rekeyed_people = self.rekey_entities()
         # what the last start or load merged and re-keyed (the pipeline logs it)
         self.consolidated = self.consolidate_companies()
+        self.adopted = self._adopt_initials()
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -319,38 +386,213 @@ class Graph:
     def rekey_entities(self) -> int:
         """Give people and organisations the key the current entity_key() makes.
 
-        When the key rules change (e.g. "Батын Болд" now matches "Б.Болд"), the
-        next load would otherwise create new nodes and report everyone as having
-        left and rejoined. Nodes that end up with the same key are merged; their
-        edges move over unless the target already has the same open edge.
-        Returns the number of nodes re-keyed or merged.
+        When the key rules change, the next load would otherwise create new nodes and
+        report everyone as having left and rejoined. Nodes that end up with the same
+        key are merged (_merge_node). Returns the number of nodes re-keyed or merged.
+
+        Issue #36: a full registry name ("Батын Батболд") used to share the initial
+        key of "Б.Батболд", so one node may hold the registry's person at one company
+        and MSE's namesakes at others. Such a node is split: the companies where a
+        registry source reported it go to the full-name person, the others stay on the
+        initial key (the node is renamed to the initial form). Only the registry's
+        edges show that the full name was given there; every other company is an
+        initial form, which _adopt_initials links again where the rule allows. People
+        also get their name parts (normalize.PersonName.parts) here.
         """
         rows = self.run("""MATCH (e:Entity) WHERE (e:Person OR e:Organization) AND NOT e:Company
-                           RETURN e.key AS key, e.name AS name, e:Organization AS org""")
-        moves = []
+                           RETURN elementId(e) AS id, e.key AS key, e.name AS name, e:Organization AS org,
+                                  e.name_form IS NULL AS untagged""")
+        moves, splits = [], []
         for r in rows:
-            new = entity_key(r["name"] or "", "organization" if r["org"] else "person")
+            name = r["name"] or ""
+            if r["org"]:
+                new = entity_key(name, "organization")
+            else:
+                pn = person_name(name)
+                new = pn.key
+                if pn.form == "full" and r["key"] == pn.match_key != new:
+                    splits.append((r, pn))
+                    continue
             if new and new != r["key"] and not r["key"].startswith("company:"):
-                moves.append((r["key"], new))
-        for old, new in moves:
-            if not self.run("MATCH (n:Entity {key: $new}) RETURN count(n) > 0 AS x", new=new)[0]["x"]:
-                self.run("MATCH (o:Entity {key: $old}) SET o.key = $new", old=old, new=new)
+                moves.append((r["id"], new))
+        split = set()
+        for r, pn in splits:
+            if self._split_full_name(r["id"], pn):
+                split.add(r["id"])      # it is the initial form now, with that form's parts
                 continue
-            for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
-                # copy every period over, except an open one the target already has
+            moves.append((r["id"], pn.key))
+        for old, new in moves:
+            target = self.run("MATCH (n:Entity {key: $new}) RETURN elementId(n) AS id", new=new)
+            if target:
+                self._merge_node(old, target[0]["id"])
+            else:
+                self.run("MATCH (o) WHERE elementId(o) = $id SET o.key = $new", id=old, new=new)
+        untagged = [{"id": r["id"], "parts": person_name(r["name"] or "").parts()}
+                    for r in rows if not r["org"] and r["untagged"] and r["id"] not in split]
+        self.run("""UNWIND $rows AS r MATCH (p) WHERE elementId(p) = r.id
+                    SET p += r.parts, p.display_name = coalesce(p.full_name, p.name)""", rows=untagged)
+        return len(moves) + len(split)
+
+    def _split_full_name(self, node: str, pn: PersonName) -> bool:
+        """Split a node keyed by the initial form of its full name (see rekey_entities).
+
+        Returns False when there is nothing to split (all its companies, or none, have
+        registry evidence): the caller then re-keys the whole node."""
+        rows = self.run(
+            """
+            MATCH (p)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company) WHERE elementId(p) = $id
+            WITH c, collect(coalesce(r.sources, []) + [r.source]) AS srcs
+            RETURN elementId(c) AS id,
+                   any(s IN reduce(a = [], x IN srcs | a + x) WHERE s CONTAINS $reg) AS registry
+            """, id=node, reg=REGISTRY_MARK)
+        full = [r["id"] for r in rows if r["registry"]]
+        if not full or len(full) == len(rows):
+            return False
+        target = self._person_node(pn.key, pn.full_name, pn)
+        for c in full:
+            self._move_edges(node, target, only=c)
+        self.run("""MATCH (p) WHERE elementId(p) = $id
+                    SET p.name = $name, p.display_name = $name, p.name_form = 'initial'
+                    REMOVE p.full_name, p.patronymic, p.clan_name""",
+                 id=node, name=f"{pn.initial}.{pn.given}")
+        return True
+
+    def _person_node(self, key: str, name: str, pn: PersonName) -> str:
+        """The element id of the person `key`, created if missing."""
+        return self.run("""MERGE (p:Entity {key: $key}) ON CREATE SET p.name = $name
+                           SET p:Person, p += $parts, p.display_name = coalesce(p.full_name, p.name)
+                           RETURN elementId(p) AS id""", key=key, name=name, parts=pn.parts())[0]["id"]
+
+    # ---- person identity (issue #36) --------------------------------------------
+
+    def _people(self) -> list[dict]:
+        """Every person with the companies it is linked to (any edge, past or current)."""
+        rows = self.run(
+            """
+            MATCH (p:Person) WHERE NOT p:Company
+            OPTIONAL MATCH (p)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company)
+            RETURN elementId(p) AS id, p.key AS key, p.name AS name, p.full_name AS full_name,
+                   collect(DISTINCT [c.ticker, elementId(c)]) AS cs
+            """)
+        out = []
+        for r in rows:
+            name = r["full_name"] or r["name"] or ""
+            if is_organization(name):
+                continue
+            out.append({"id": r["id"], "key": r["key"], "name": r["name"], "pn": person_name(name),
+                        "companies": {t: c for t, c in r["cs"] if t}})
+        return out
+
+    def people_resolver(self, pending: dict[str, set] | None = None) -> "PeopleResolver":
+        """The resolver the loader uses for the graph as it is now (see PeopleResolver)."""
+        return PeopleResolver(self._people(), pending)
+
+    def _adopt_initials(self, pending: dict[str, set] | None = None) -> int:
+        """Move an initial-form person's edges at a company to the full-name person there.
+
+        "Б.Батболд" at company C is "Батын Батболд" when he is the only full-name
+        person at C that the initial can stand for (normalize.PersonName.could_be).
+        `pending` ({ticker: {(key, name)}}) adds the full-name rows a dataset is about to
+        load, so their edges are moved before the load refreshes them and nothing
+        looks like a change. A node left without edges is merged into the person
+        that took the last of them. Returns the number of companies moved.
+        """
+        people = self._people()
+        res = PeopleResolver(people, pending)
+        moved = 0
+        for n in people:
+            if n["pn"].form != "initial":
+                continue
+            left = dict(n["companies"])
+            last = None
+            for ticker, company in n["companies"].items():
+                cands = res.candidates(n["pn"], ticker)
+                if len(cands) != 1:
+                    continue
+                key = cands[0]
+                target = self._person_node(key, res.names[key], person_name(res.names[key]))
+                got = self.run(
+                    """MATCH (p)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c)
+                       WHERE elementId(p) = $p AND elementId(c) = $c
+                       RETURN r.source AS s, r.sources AS ss""", p=n["id"], c=company)
+                srcs = {s for g in got for s in [g["s"], *(g["ss"] or [])]}
+                self._move_edges(n["id"], target, only=company)
+                # the spellings those edges' sources used go with them
                 self.run(
-                    f"""
-                    MATCH (o:Entity {{key: $old}})-[r:{rel}]->(t), (n:Entity {{key: $new}})
-                    WHERE t <> n AND NOT (coalesce(r.current, false) AND EXISTS {{
-                        MATCH (n)-[x:{rel} {{current: true}}]->(t)
-                        WHERE coalesce(x.post, x.title, '') = coalesce(r.post, r.title, '') }})
-                    CREATE (n)-[x:{rel}]->(t)
-                    SET x = properties(r)
-                    """,
-                    old=old, new=new,
-                )
-            self.run("MATCH (o:Entity {key: $old}) DETACH DELETE o", old=old)
-        return len(moves)
+                    """MATCH (o) WHERE elementId(o) = $o MATCH (t) WHERE elementId(t) = $t
+                       WITH o, t, [v IN coalesce(o.name_variants, [])
+                                   WHERE any(s IN $srcs WHERE v ENDS WITH ' | ' + s)] AS go
+                       SET o.name_variants = [v IN coalesce(o.name_variants, []) WHERE NOT v IN go],
+                           t.name_variants = coalesce(t.name_variants, []) +
+                                             [v IN go WHERE NOT v IN coalesce(t.name_variants, [])]""",
+                    o=n["id"], t=target, srcs=[s for s in srcs if s])
+                left.pop(ticker)
+                last = target
+                moved += 1
+            if last and not left:
+                self._absorb_node(n["id"], last)
+        return moved
+
+    def ambiguous_people(self) -> list[dict]:
+        """Initial-form people a full-name person may be, which the rule didn't link (#6 queue).
+
+        `reason` is "several_at_company" when two or more full names at one of its
+        companies fit the initial, else "no_shared_company": a full-name person that
+        fits exists, but at other companies only, so it may be a namesake."""
+        people = self._people()
+        res = PeopleResolver(people)
+        by_key = {p["key"]: p for p in people}
+        out = []
+        for n in people:
+            if n["pn"].form != "initial" or not n["companies"]:
+                continue
+            cands = res.candidates(n["pn"])
+            if not cands:
+                continue
+            several = any(len(res.candidates(n["pn"], t)) > 1 for t in n["companies"])
+            out.append({
+                "key": n["key"], "name": n["name"], "companies": sorted(n["companies"]),
+                "reason": "several_at_company" if several else "no_shared_company",
+                "candidates": [{"key": k, "name": by_key[k]["name"],
+                                "companies": sorted(by_key[k]["companies"]),
+                                "shared": sorted(set(by_key[k]["companies"]) & set(n["companies"]))}
+                               for k in cands],
+            })
+        return sorted(out, key=lambda x: (x["reason"] != "several_at_company", x["name"] or ""))
+
+    def _dataset_people(self, ds: Dataset, alias_map: dict[str, str]) -> dict[str, set]:
+        """{ticker: {(key, name)}} for the full-name person rows of `ds` (for _adopt_initials)."""
+        reg_map = {r["reg"] for r in self.run(
+            "MATCH (c:Company) WHERE c.register_no =~ $re RETURN c.register_no AS reg", re=REGISTER_NO_RE)}
+        names = [(p.company_ticker, p.person_name) for p in ds.positions]
+        names += [(h.company_ticker, h.holder_name) for h in ds.shareholdings
+                  if not h.holder_ticker and not (h.holder_type or "").startswith("org")]
+        names += [(b.company_ticker, b.owner_name) for b in ds.beneficial_owners
+                  if not (b.owner_type or "").startswith("org")
+                  and "".join(ch for ch in (b.owner_reg_no or "") if ch.isdigit()) not in reg_map]
+        out: dict[str, set] = {}
+        for ticker, name in names:
+            name = clean(name)
+            if not name or is_aggregate(name) or is_organization(name):
+                continue
+            pn = person_name(name)
+            if pn.form == "full" and pn.key not in alias_map and entity_key(name) not in alias_map:
+                out.setdefault(ticker.upper(), set()).add((pn.key, name))
+        return out
+
+    def _note_names(self, noted: dict[str, dict]) -> None:
+        """Record the spellings the load saw (`name_variants`, "<spelling> | <source>") and the
+        name parts of rows whose own key is the person's (an initial form resolved to a full
+        name adds its spelling, not its parts)."""
+        self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (p:Person {key: r.key}) WHERE NOT p:Company
+            SET p += r.parts,
+                p.name_variants = coalesce(p.name_variants, []) +
+                                  [v IN r.variants WHERE NOT v IN coalesce(p.name_variants, [])]
+            SET p.display_name = coalesce(p.full_name, p.name)
+            """, rows=[{"key": k, **v} for k, v in noted.items()])
 
     # ---- one node per legal entity (issue #35) ----------------------------------
 
@@ -451,6 +693,12 @@ class Graph:
         the two nodes are dropped. `new` keeps its own properties and takes the ones it
         lacks; the old ticker, key and names are remembered (`former_tickers`,
         `former_keys`, `merged_aliases`)."""
+        self._move_edges(old, new)
+        self._absorb_node(old, new)
+
+    def _move_edges(self, old: str, new: str, only: str | None = None) -> None:
+        """Move node `old`'s edges to node `new` (element ids), as _merge_node describes.
+        With `only` (a node's element id), just the edges between `old` and that node."""
         for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
             for pattern, twin in (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
                                   ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)")):
@@ -459,7 +707,7 @@ class Graph:
                     f"""
                     MATCH (o) WHERE elementId(o) = $old
                     MATCH (n) WHERE elementId(n) = $new
-                    MATCH {pattern.format(rel=rel)} WHERE t <> n AND t <> o
+                    MATCH {pattern.format(rel=rel)} WHERE t <> n AND t <> o AND ($only IS NULL OR elementId(t) = $only)
                     OPTIONAL MATCH {twin.format(rel=rel)}
                     WHERE coalesce(r.current, false) AND coalesce(x.post, x.title, '') = coalesce(r.post, r.title, '')
                     WITH n, r, t, head(collect(x)) AS x
@@ -478,13 +726,20 @@ class Graph:
                             x.first_seen = CASE WHEN r.first_seen < x.first_seen THEN r.first_seen
                                                 ELSE x.first_seen END
                     }}
-                    """, old=old, new=new)
-        po, pn = (self.run("MATCH (x) WHERE elementId(x) = $id RETURN properties(x) AS p", id=i)[0]["p"]
+                    WITH r
+                    DELETE r
+                    """, old=old, new=new, only=only)
+
+    def _absorb_node(self, old: str, new: str) -> None:
+        """The node part of _merge_node: `new` takes `old`'s names and properties, `old` goes."""
+        po, pn =(self.run("MATCH (x) WHERE elementId(x) = $id RETURN properties(x) AS p", id=i)[0]["p"]
                   for i in (old, new))
         fill = {k: v for k, v in po.items() if k not in pn and k not in _OWN_PROPS}
         company = "ticker" in pn
         merged = {"former_keys": _add(pn.get("former_keys"), po.get("former_keys"), [po.get("key")],
                                       skip=pn.get("key"))}
+        if po.get("name_variants"):
+            merged["name_variants"] = _add(pn.get("name_variants"), po.get("name_variants"))
         if company:
             names = [a for a in (po.get("aliases") or []) + (po.get("merged_aliases") or []) + [po.get("key")]
                      if a and a.startswith("org:")]
@@ -581,7 +836,10 @@ class Graph:
         `company:` all lead to the company. Unknown keys come back unchanged."""
         key = (key or "").strip()
         if not key.startswith("company:"):
-            return key
+            # a person merged into another (issue #36) leaves its key in `former_keys`
+            rows = self.run("""MATCH (e:Entity) WHERE e.key = $key OR $key IN coalesce(e.former_keys, [])
+                               RETURN e.key AS key ORDER BY (e.key = $key) DESC, e.key LIMIT 1""", key=key)
+            return rows[0]["key"] if rows else key
         t = key[len("company:"):].strip()
         rows = self.run(
             """
@@ -731,10 +989,21 @@ class Graph:
         # into the matching :Company node.
         self._merge_orgs_into_companies()
 
+        # who the person rows are (issue #36): first hand the full names this dataset
+        # brings the edges their initial forms have at the same company
+        alias_map = {row["a"]: row["key"] for row in self.run(
+            "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+        pending = self._dataset_people(ds, alias_map)
+        adopted = self._adopt_initials(pending) if pending else 0
+        people = self.people_resolver(pending)
+
         changes = {}
-        changes.update(self._load_shareholdings(ds, when, run))
-        changes.update(self._load_positions(ds, when, run))
-        changes.update(self._load_beneficial_owners(ds, when, run))
+        changes.update(self._load_shareholdings(ds, when, run, people))
+        changes.update(self._load_positions(ds, when, run, people))
+        changes.update(self._load_beneficial_owners(ds, when, run, people))
+        self._note_names(people.noted)
+        if adopted:
+            changes["people_linked"] = adopted
         self._load_facts(ds)
         merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
         if merged["companies_merged"] or merged["organizations_merged"]:
@@ -755,7 +1024,7 @@ class Graph:
         )
         return {r["t"] for r in rows}
 
-    def _load_shareholdings(self, ds: Dataset, when: str, run: str) -> dict:
+    def _load_shareholdings(self, ds: Dataset, when: str, run: str, people: PeopleResolver) -> dict:
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
         tkeys = self.company_keys()
@@ -781,6 +1050,8 @@ class Graph:
             else:
                 htype = h.holder_type or ("organization" if is_organization(name) else "person")
                 label = "Organization" if htype.startswith("org") else "Person"
+                if label == "Person":
+                    key = people.key(name, h.company_ticker, h.source)
             ticker = h.company_ticker.upper()
             prefix = snaps.get(ticker)
             in_holdings = holder in hsnaps and _under(h.source, hsnaps[holder])
@@ -922,15 +1193,16 @@ class Graph:
                         "RETURN c.ticker AS t", t=list(hsnaps))
         return {r["t"] for r in rows}
 
-    def _load_positions(self, ds: Dataset, when: str, run: str) -> dict:
+    def _load_positions(self, ds: Dataset, when: str, run: str, people: PeopleResolver) -> dict:
         snaps = {t.upper(): p for t, p in ds.snapshots.get("positions", {}).items()}
         fresh = self._new_sources("HOLDS_POSITION", snaps)
         rows: dict[tuple, dict] = {}
         for p in ds.positions:
             ticker = p.company_ticker.upper()
             title, role = clean(p.title), p.role or "executive"
+            name = clean(p.person_name)
             r = {
-                "ticker": ticker, "key": entity_key(p.person_name, "person"),
+                "ticker": ticker, "key": people.key(name, ticker, p.source) if name else "",
                 "name": clean(p.person_name), "title": title, "role": role,
                 "role_std": role_std(title, role), "post": post_key(title, role),
                 "since": _opt(parse_date(p.since)), "until": _opt(parse_date(p.until)),
@@ -1023,7 +1295,7 @@ class Graph:
         )[0]["n"]
         return {"positions_opened": opened, "positions_closed": closed + len(ended)}
 
-    def _load_beneficial_owners(self, ds: Dataset, when: str, run: str) -> dict:
+    def _load_beneficial_owners(self, ds: Dataset, when: str, run: str, people: PeopleResolver) -> dict:
         """Registry beneficial owners: one open edge per owner and company, closed
         when the company's registry page (a snapshot) no longer lists the owner."""
         if not ds.beneficial_owners and not ds.snapshots.get("beneficial_owners"):
@@ -1050,7 +1322,7 @@ class Graph:
                 label = "Company" if key in alias_map else (
                     "Organization" if (b.owner_type or ("organization" if is_organization(name) else "person"))
                     .startswith("org") else "Person")
-                key = alias_map.get(key, key)
+                key = people.key(name, b.company_ticker, b.source) if label == "Person" else alias_map.get(key, key)
             ticker = b.company_ticker.upper()
             rows[(ticker, key)] = {"ticker": ticker, "key": key, "name": name, "reg": reg or None,
                                    "label": label, "org_type": _org_type(b.org_type), "since": _opt(parse_date(b.since)), "source": b.source,
