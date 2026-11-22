@@ -258,6 +258,10 @@ def _run(force: bool = False) -> None:
         done = {k: v for k, v in (getattr(g, "consolidated", None) or {}).items() if v}
         if done:   # one node per legal entity (#35): the first start re-keys every company
             log.info("PIPELINE companies consolidated: %s", json.dumps(done, ensure_ascii=False))
+        people = {"rekeyed_or_split": getattr(g, "rekeyed_people", 0), "linked": getattr(g, "adopted", 0)}
+        if any(people.values()):   # person identity (#36): the first start splits merged namesakes
+            log.info("PIPELINE people resolved: %s, under review: %d", json.dumps(people),
+                     len(g.ambiguous_people()))
         min_hours = float(os.getenv("PIPELINE_MIN_INTERVAL_HOURS", "20"))
         since = g.hours_since_last_scrape()
         if os.getenv("PIPELINE_DEMO") == "1":

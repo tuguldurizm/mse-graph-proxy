@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from dataclasses import dataclass
 
 # Legal-form suffixes / words that mark an organisation rather than a person.
 _ORG_MARKERS = [
@@ -55,17 +56,82 @@ def is_aggregate(name: str) -> bool:
 
 
 _LEGAL_FORM_RE = re.compile(r"(?:\s+(?:ххк|хк|төхк|төк|өхк|ххн|llc|jsc))+$")
-_CYR_WORD_RE = re.compile(r"^[а-яёөү][а-яёөү-]+$")
+_CYR_WORD_RE = re.compile(r"^[а-яёөү][а-яёөү-]*$")
+# genitive endings of a patronymic: "Батын" / "Доржийн" / "Батаагийн" are the fathers Бат, Дорж, Батаа
+_GENITIVE_RE = re.compile(r"(?:гийн|ийн|ын)$")
+
+
+@dataclass(frozen=True)
+class PersonName:
+    """A person's name taken apart (issue #36).
+
+    `form` is "full" for the registry's "Patronymic Given" (optionally with the clan
+    name, ургийн овог, first: "Боржигон Батын Батболд"), "initial" for MSE's
+    "Б.Батболд" / "Батболд Б.", and "other" for anything else (one word, Latin script,
+    more words). `key` is the person's merge key; `match_key` is the initial form
+    every spelling of the same name shares ("person:б батболд"), which is how an
+    initial is matched to a full name.
+    """
+    form: str
+    key: str
+    match_key: str
+    given: str = ""            # as written
+    initial: str = ""          # the patronymic's initial, as written ("Б", "Бя")
+    patronymic: str = ""
+    clan: str = ""
+    full_name: str = ""        # "Батын Батболд", clan included when given
+
+    def parts(self) -> dict:
+        """The non-empty name properties a Person node stores."""
+        props = {"name_form": self.form, "given_name": self.given, "patronymic": self.patronymic,
+                 "clan_name": self.clan, "full_name": self.full_name}
+        return {k: v for k, v in props.items() if v}
+
+    def could_be(self, other: "PersonName") -> bool:
+        """An initial form that a full form may stand for: same given name, initial fits."""
+        return (self.form == "initial" and other.form == "full"
+                and self.given.casefold() == other.given.casefold()
+                and other.patronymic.casefold().startswith(self.initial.casefold()))
+
+
+def _tokens(name: str) -> list[str]:
+    return [t.strip("-") for t in re.split(r"[\s.,]+", _QUOTES_RE.sub("", clean(name))) if t.strip("-")]
+
+
+def person_name(name: str) -> PersonName:
+    """Take a person's name apart (see PersonName)."""
+    tokens = _tokens(name)
+    low = [t.casefold() for t in tokens]
+    other = "person:" + " ".join(sorted(low))
+    if not low or not all(_CYR_WORD_RE.match(t) for t in low):
+        return PersonName("other", other, other)
+    short = [len(t) <= 2 for t in low]
+    if len(low) == 2 and sum(short) == 1:
+        i = short.index(True)
+        initial, given = tokens[i], tokens[1 - i]
+        key = "person:" + " ".join(sorted([low[i], low[1 - i]]))
+        return PersonName("initial", key, "person:" + " ".join(sorted([low[i][0], low[1 - i]])),
+                          given=given, initial=initial)
+    if len(low) in (2, 3) and not any(short):
+        clan, patronymic, given = ([""] + tokens if len(tokens) == 2 else tokens)
+        stem = _GENITIVE_RE.sub("", patronymic.casefold())
+        stem = stem if len(stem) >= 2 else patronymic.casefold()
+        return PersonName("full", f"person:{stem} {given.casefold()}",
+                          "person:" + " ".join(sorted([patronymic[0].casefold(), given.casefold()])),
+                          given=given, initial=patronymic[0], patronymic=patronymic, clan=clan,
+                          full_name=" ".join(tokens))
+    return PersonName("other", other, other)
 
 
 def entity_key(name: str, kind: str = "") -> str:
     """Stable merge key for a person or organisation name.
 
     * case-folded, quotes and punctuation removed
-    * for people, tokens are sorted so "Б.Батболд" == "Батболд Б."
-    * a Mongolian "Patronymic Given" name is reduced to the initial form MSE
-      uses, so "Батын Болд" / "Батын.Болд" == "Б.Болд" (the registry and
-      Open Data Lab write the patronymic in full)
+    * people (person_name): an initial form's tokens are sorted, so "Б.Батболд" ==
+      "Батболд Б."; a full registry name keeps its patronymic, so "Батын Батболд"
+      (== "Бат Батболд") and "Баярын Батболд" stay two people (issue #36). Whether
+      "Б.Батболд" is one of them is decided by the loader, which knows the company
+      (Graph._people_resolver)
     * `kind="organization"` forces an organisation key for names without a
       legal-form marker (e.g. a registry row typed "Хуулийн этгээд")
     """
@@ -75,10 +141,16 @@ def entity_key(name: str, kind: str = "") -> str:
         # "Багануур ХК" (MSE) == "Багануур" (registry): ignore a trailing legal form
         n = _LEGAL_FORM_RE.sub("", n).strip() or n
         return "org:" + n
-    tokens = [t.strip("-") for t in re.split(r"[\s.,]+", n) if t.strip("-")]
-    if len(tokens) == 2 and all(_CYR_WORD_RE.match(t) for t in tokens):
-        tokens = [tokens[0][0], tokens[1]]
-    return "person:" + " ".join(sorted(tokens))
+    return person_name(n).key
+
+
+# Changes when the person-identity rules change (issue #36): manual datasets reload once.
+IDENTITY_VERSION = "persons-v1"
+
+
+def match_key(name: str) -> str:
+    """The initial-form key any spelling of a person's name shares (the key before #36)."""
+    return person_name(name).match_key
 
 
 def parse_percent(value: str | float | int | None) -> float | None:
