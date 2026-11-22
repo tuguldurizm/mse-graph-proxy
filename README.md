@@ -1,5 +1,10 @@
 # mse-graph-proxy
 
+> **Deploy mirror.** Render builds both live services from `main` of this repository, but the code is
+> developed in `tuguldurizm/sentry`: `app.py` is its `proxy/app.py`, and `app/` holds its `mse_graph/`,
+> `deploy/` and `data/`. Change the code there, then sync it here (see `CLAUDE.md`). sentry's
+> `docs/SYSTEM.md` describes the whole setup, and `docs/CHANGELOG.md` lists every change.
+
 A small, allow-listed fetch proxy for the MSE connections graph scraper. It lets the scraper reach
 `mse.mn` and `opendatalab.mn` from networks that can't reach them directly.
 
