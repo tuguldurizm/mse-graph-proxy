@@ -20,7 +20,14 @@ source when it says (`org_type_by: 'source'`), else from its name.
 (:Person)-[:HOLDS_POSITION {post, role_std, title, titles, role, since, source, sources, <history>}]->(:Company)
 (owner:Entity)-[:BENEFICIAL_OWNER {since, source, <history>}]->(:Company)  -- declared to the registry (Open Data Lab)
 
-    <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline
+(:Record {record_id, kind, source, raw_name, ...})-[:REFERS_TO {method, ...}]->(:Entity)
+(:Record)-[:REPORTED_FOR]->(:Company)           -- the source rows behind the edges (records.py, issue #37)
+
+    <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline, records
+
+`records` lists the record_ids of the source rows behind an edge. Merges and
+splits re-point a record's REFERS_TO and move the edges with it; the identity
+overrides file (records.py) pins decisions made by hand (apply_overrides).
 
 `source` is the source that owns an edge: only that source, or a complete
 snapshot of the company, can change or close it. `sources` lists every source
@@ -69,17 +76,22 @@ the first Open Data Lab import) get `baseline: true` and are not changes.
 """
 from __future__ import annotations
 
+import dataclasses
+import logging
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from neo4j import GraphDatabase
 
+from . import records as rec
 from .config import settings
 from .models import Dataset
 from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, clean, entity_key, is_aggregate, \
     is_organization, org_type_from_name, parse_date, person_name, post_key, role_std, split_reg_numbers
 from .opendatalab import REGISTER_NO_RE
+
+log = logging.getLogger(__name__)
 
 SCHEMA = [
     "CREATE CONSTRAINT entity_key IF NOT EXISTS FOR (e:Entity) REQUIRE e.key IS UNIQUE",
@@ -95,7 +107,12 @@ SCHEMA = [
     "CREATE INDEX company_state_reg_no IF NOT EXISTS FOR (c:Company) ON (c.state_reg_no)",
     # registry numbers discovery tried and should leave alone for a while (discovery.py)
     "CREATE CONSTRAINT registry_lead_reg IF NOT EXISTS FOR (l:RegistryLead) REQUIRE l.reg IS UNIQUE",
+    # source records (issue #37, records.py)
+    "CREATE CONSTRAINT record_id IF NOT EXISTS FOR (r:Record) REQUIRE r.record_id IS UNIQUE",
+    "CREATE INDEX record_name_key IF NOT EXISTS FOR (r:Record) ON (r.name_key)",
 ]
+# the relationships source records are behind
+EDGE_TYPES = "OWNS|HOLDS_POSITION|BENEFICIAL_OWNER"
 
 # Graphs loaded before history tracking: every edge was the current state.
 MIGRATE = """
@@ -176,9 +193,13 @@ class PeopleResolver:
     initial key, and Graph.ambiguous_people lists it for review.
 
     `key()` also records the spellings it saw (`noted`), for Graph._note_names.
+
+    `overrides` (records.Override, tickers resolved: Graph.identity_overrides) come
+    first: a row they match is their target (`manual_override`, issue #37).
     """
 
-    def __init__(self, people: list[dict], pending: dict[str, set] | None = None):
+    def __init__(self, people: list[dict], pending: dict[str, set] | None = None,
+                 overrides: list | None = None):
         self.names: dict[str, str] = {}                 # full key -> its name
         self.parsed: dict[str, PersonName] = {}
         self.at: dict[str, set[str]] = {}               # ticker -> full keys linked to it
@@ -190,6 +211,7 @@ class PeopleResolver:
             for key, name in rows:
                 self._add(key, self.names.get(key, name), person_name(name), [ticker])
         self.noted: dict[str, dict] = {}
+        self.overrides = list(overrides or [])
 
     def _add(self, key: str, name: str, pn: PersonName, tickers) -> None:
         self.names.setdefault(key, name)
@@ -207,21 +229,43 @@ class PeopleResolver:
             keys = keys & self.at.get(ticker, set())
         return sorted(k for k in keys if pn.could_be(self.parsed[k]))
 
-    def key(self, name: str, ticker: str, source: str = "") -> str:
-        """The key of the person row `name` at company `ticker` (cleaned name)."""
+    def match_override(self, name: str, ticker: str, source: str | None, kind: str, hint: str = ""):
+        """The first override row for the row `name` at `ticker` (a records.Override), or None."""
+        if not self.overrides:
+            return None
+        nk = rec.name_key(name, hint)
+        for o in self.overrides:
+            if o.matches(kind, ticker, nk, source):
+                if o.label == "Person":
+                    self._note(o.target, name, source, None)
+                return o
+        return None
+
+    def resolve(self, name: str, ticker: str, source: str = "", kind: str = "officer") -> tuple[str, str]:
+        """(key, method) of the person row `name` at company `ticker` (cleaned name)."""
+        o = self.match_override(name, ticker, source, kind)
+        if o is not None and o.label == "Person":
+            return o.target, "manual_override"
         pn = person_name(name)
-        key = pn.key
+        key, method = pn.key, "exact_key"
         if pn.form == "initial":
             cands = self.candidates(pn, ticker.upper())
             if len(cands) == 1:
-                key = cands[0]
+                key, method = cands[0], "initial_match"
+        self._note(key, name, source, pn)
+        return key, method
+
+    def key(self, name: str, ticker: str, source: str = "", kind: str = "officer") -> str:
+        """The key of the person row `name` at company `ticker` (cleaned name)."""
+        return self.resolve(name, ticker, source, kind)[0]
+
+    def _note(self, key: str, name: str, source: str | None, pn: PersonName | None) -> None:
         seen = self.noted.setdefault(key, {"parts": {}, "variants": []})
-        if key == pn.key:
+        if pn is not None and key == pn.key:
             seen["parts"] = {**seen["parts"], **pn.parts()}
         variant = f"{name} | {source}" if source else name
         if variant not in seen["variants"]:
             seen["variants"].append(variant)
-        return key
 
 
 class Graph:
@@ -260,7 +304,7 @@ class Graph:
 
     # ---- schema / admin -----------------------------------------------------
 
-    def init_schema(self):
+    def init_schema(self, overrides: list | None = None):
         for stmt in SCHEMA:
             self.run(stmt)
         self.run(MIGRATE, today=_today())
@@ -271,6 +315,8 @@ class Graph:
         # what the last start or load merged and re-keyed (the pipeline logs it)
         self.consolidated = self.consolidate_companies()
         self.adopted = self._adopt_initials()
+        # decisions from the identity overrides file (issue #37); `overrides` replaces the file
+        self.overridden = self.apply_overrides(overrides)
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -343,6 +389,7 @@ class Graph:
                 "source": latest.get("source"),
                 "titles": self._union(*[e.get("titles") or [e.get("title")] for e in es]),
                 "sources": self._union(*[e.get("sources") or [e.get("source")] for e in es]),
+                "records": self._union(*[e.get("records") for e in es]) or None,
                 "last_seen": max(e.get("last_seen") or "" for e in es) or None,
                 "since": min(sinces) if sinces else None,
             })
@@ -375,6 +422,7 @@ class Graph:
                     "titles": self._union(o.get("titles") or [o.get("title")], n.get("titles") or [n.get("title")]),
                     "sources": self._union(o.get("sources") or [o.get("source")],
                                            n.get("sources") or [n.get("source")]),
+                    "records": self._union(o.get("records"), n.get("records")) or None,
                 })
                 self._drop_edges([r["oid"]])
                 joined += 1
@@ -405,6 +453,8 @@ class Graph:
         moves, splits = [], []
         for r in rows:
             name = r["name"] or ""
+            if "#" in (r["key"] or ""):
+                continue        # an identity from the overrides file (records.py): never re-keyed
             if r["org"]:
                 new = entity_key(name, "organization")
             else:
@@ -483,9 +533,20 @@ class Graph:
                         "companies": {t: c for t, c in r["cs"] if t}})
         return out
 
-    def people_resolver(self, pending: dict[str, set] | None = None) -> "PeopleResolver":
-        """The resolver the loader uses for the graph as it is now (see PeopleResolver)."""
-        return PeopleResolver(self._people(), pending)
+    def people_resolver(self, pending: dict[str, set] | None = None,
+                        overrides: list | None = None) -> "PeopleResolver":
+        """The resolver the loader uses for the graph as it is now (see PeopleResolver).
+        `overrides`: resolved override rows (identity_overrides); default: the file's."""
+        if overrides is None:
+            overrides = self.identity_overrides()
+        return PeopleResolver(self._people(), pending, overrides)
+
+    def _pinned(self) -> set[tuple[str, str]]:
+        """(entity key, ticker) pairs that an override decided (records.py): the rules leave them alone."""
+        return {(r["key"], r["t"]) for r in self.run(
+            """MATCH (r:Record)-[:REFERS_TO {method: 'manual_override'}]->(e:Entity),
+                     (r)-[:REPORTED_FOR]->(c:Company)
+               RETURN DISTINCT e.key AS key, c.ticker AS t""")}
 
     def _adopt_initials(self, pending: dict[str, set] | None = None) -> int:
         """Move an initial-form person's edges at a company to the full-name person there.
@@ -499,6 +560,7 @@ class Graph:
         """
         people = self._people()
         res = PeopleResolver(people, pending)
+        pinned = self._pinned()
         moved = 0
         for n in people:
             if n["pn"].form != "initial":
@@ -506,6 +568,8 @@ class Graph:
             left = dict(n["companies"])
             last = None
             for ticker, company in n["companies"].items():
+                if (n["key"], ticker) in pinned:
+                    continue        # an override put this person's rows here (issue #37)
                 cands = res.candidates(n["pn"], ticker)
                 if len(cands) != 1:
                     continue
@@ -516,7 +580,7 @@ class Graph:
                        WHERE elementId(p) = $p AND elementId(c) = $c
                        RETURN r.source AS s, r.sources AS ss""", p=n["id"], c=company)
                 srcs = {s for g in got for s in [g["s"], *(g["ss"] or [])]}
-                self._move_edges(n["id"], target, only=company)
+                self._move_edges(n["id"], target, only=company, method="initial_match")
                 # the spellings those edges' sources used go with them
                 self.run(
                     """MATCH (o) WHERE elementId(o) = $o MATCH (t) WHERE elementId(t) = $t
@@ -541,17 +605,20 @@ class Graph:
         fits exists, but at other companies only, so it may be a namesake."""
         people = self._people()
         res = PeopleResolver(people)
+        pinned = self._pinned()
         by_key = {p["key"]: p for p in people}
         out = []
         for n in people:
-            if n["pn"].form != "initial" or not n["companies"]:
+            # companies where an override already decided who the rows are: no question left
+            open_ = sorted(t for t in n["companies"] if (n["key"], t) not in pinned)
+            if n["pn"].form != "initial" or not open_:
                 continue
             cands = res.candidates(n["pn"])
             if not cands:
                 continue
-            several = any(len(res.candidates(n["pn"], t)) > 1 for t in n["companies"])
+            several = any(len(res.candidates(n["pn"], t)) > 1 for t in open_)
             out.append({
-                "key": n["key"], "name": n["name"], "companies": sorted(n["companies"]),
+                "key": n["key"], "name": n["name"], "companies": open_,
                 "reason": "several_at_company" if several else "no_shared_company",
                 "candidates": [{"key": k, "name": by_key[k]["name"],
                                 "companies": sorted(by_key[k]["companies"]),
@@ -560,20 +627,25 @@ class Graph:
             })
         return sorted(out, key=lambda x: (x["reason"] != "several_at_company", x["name"] or ""))
 
-    def _dataset_people(self, ds: Dataset, alias_map: dict[str, str]) -> dict[str, set]:
-        """{ticker: {(key, name)}} for the full-name person rows of `ds` (for _adopt_initials)."""
+    def _dataset_people(self, ds: Dataset, alias_map: dict[str, str],
+                        overrides: list | None = None) -> dict[str, set]:
+        """{ticker: {(key, name)}} for the full-name person rows of `ds` (for _adopt_initials).
+        Rows an override decides are left out: they are who the override says."""
         reg_map = {r["reg"] for r in self.run(
             "MATCH (c:Company) WHERE c.register_no =~ $re RETURN c.register_no AS reg", re=REGISTER_NO_RE)}
-        names = [(p.company_ticker, p.person_name) for p in ds.positions]
-        names += [(h.company_ticker, h.holder_name) for h in ds.shareholdings
+        names = [(p.company_ticker, p.person_name, p.source, "officer") for p in ds.positions]
+        names += [(h.company_ticker, h.holder_name, h.source, "shareholder") for h in ds.shareholdings
                   if not h.holder_ticker and not (h.holder_type or "").startswith("org")]
-        names += [(b.company_ticker, b.owner_name) for b in ds.beneficial_owners
+        names += [(b.company_ticker, b.owner_name, b.source, "beneficial_owner") for b in ds.beneficial_owners
                   if not (b.owner_type or "").startswith("org")
                   and "".join(ch for ch in (b.owner_reg_no or "") if ch.isdigit()) not in reg_map]
+        res = PeopleResolver([], None, overrides)
         out: dict[str, set] = {}
-        for ticker, name in names:
+        for ticker, name, source, kind in names:
             name = clean(name)
             if not name or is_aggregate(name) or is_organization(name):
+                continue
+            if res.match_override(name, ticker, source, kind) is not None:
                 continue
             pn = person_name(name)
             if pn.form == "full" and pn.key not in alias_map and entity_key(name) not in alias_map:
@@ -593,6 +665,240 @@ class Graph:
                                   [v IN r.variants WHERE NOT v IN coalesce(p.name_variants, [])]
             SET p.display_name = coalesce(p.full_name, p.name)
             """, rows=[{"key": k, **v} for k, v in noted.items()])
+
+    # ---- source records (issue #37, records.py) ---------------------------------
+
+    def _write_records(self, rows: list[dict], when: str) -> None:
+        """Store source records (records.record_row) and who each one names.
+
+        A record seen before only gets a later `last_seen`. Its REFERS_TO is the load's
+        decision; a changed decision (another entity or method) replaces the old one.
+        `key` "" means the company the record was reported for (company rows)."""
+        if not rows:
+            return
+        self.run(
+            """
+            UNWIND $rows AS x
+            MATCH (c:Company {ticker: x.ticker})
+            OPTIONAL MATCH (k:Entity {key: x.key})
+            WITH x, c, CASE WHEN x.key = '' THEN c ELSE k END AS e
+            WHERE e IS NOT NULL
+            MERGE (r:Record {record_id: x.id})
+            ON CREATE SET r += x.props, r.observed_at = $when, r.first_seen = $when
+            SET r.last_seen = CASE WHEN coalesce(r.last_seen, '') < $when THEN $when ELSE r.last_seen END,
+                r.first_seen = CASE WHEN r.first_seen > $when THEN $when ELSE r.first_seen END
+            MERGE (r)-[:REPORTED_FOR]->(c)
+            WITH r, x, e
+            CALL (r, x, e) {
+                MATCH (r)-[old:REFERS_TO]->(o) WHERE o <> e OR old.method <> x.method
+                DELETE old
+            }
+            MERGE (r)-[t:REFERS_TO]->(e)
+            ON CREATE SET t.method = x.method, t.confidence = x.confidence, t.decided_by = x.by,
+                          t.decided_at = coalesce(x.at, $when)
+            """, rows=rows, when=when)
+
+    def identity_overrides(self, overrides: list | None = None) -> list:
+        """The identity overrides (records.read_overrides, or `overrides`) with their
+        companies and company targets resolved to the graph's tickers and keys. A row
+        whose company target isn't in the graph is left out (and logged)."""
+        rows = rec.read_overrides() if overrides is None else list(overrides)
+        if not rows:
+            return []
+        aliases = None
+        out = []
+        for o in rows:
+            o = dataclasses.replace(o)
+            if o.company != "*":
+                o.company = self.resolve_ticker(o.company)
+            if o.label == "Organization":
+                # an organisation that is a company's alias is that company (_merge_orgs_into_companies)
+                if aliases is None:
+                    aliases = {r["a"]: r["key"] for r in self.run(
+                        "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+                o.target = aliases.get(o.target, o.target)
+            if o.label == "Company":
+                o.target = self.resolve_key(o.target)
+                if not self.run("MATCH (c:Company {key: $k}) RETURN c.key AS k", k=o.target):
+                    log.warning("identity override %s / %s: no company %s in the graph", o.company, o.name, o.target)
+                    continue
+            out.append(o)
+        return out
+
+    def apply_overrides(self, overrides: list | None = None) -> dict:
+        """Apply the identity overrides to the records already in the graph.
+
+        A record an override matches is re-pointed to the override's target
+        (REFERS_TO method manual_override); then the relationships those records are
+        behind are rebuilt from their records (_rebuild_edges): a relationship whose
+        records all moved moves with its history, one that also has other records is
+        split. A node left with no relationships and no records is merged into the
+        target. Runs on every start (init_schema). Returns what it changed."""
+        ovs = self.identity_overrides(overrides)
+        out = {"records": 0, "edges_moved": 0, "edges_split": 0, "merged": 0}
+        if not ovs:
+            return {}
+        done: set[str] = set()
+        moved: dict[str, dict[str, set]] = {}     # old node -> target node -> record ids
+        for o in ovs:
+            rows = self.run(
+                """
+                MATCH (r:Record)-[:REPORTED_FOR]->(c:Company)
+                WHERE r.kind IN $kinds AND r.name_key IN $keys AND ($t = '*' OR c.ticker = $t)
+                  AND ($src = '' OR r.source STARTS WITH $src)
+                MATCH (r)-[x:REFERS_TO]->(e)
+                RETURN r.record_id AS rid, r.raw_name AS name, elementId(e) AS old,
+                       e.key = $target AND x.method = 'manual_override' AS settled
+                """, kinds=list(o.kinds()), keys=sorted(o.keys), t=o.company, src=o.source, target=o.target)
+            todo = [r for r in rows if r["rid"] not in done and not r["settled"]]
+            done.update(r["rid"] for r in rows)
+            if not todo:
+                continue
+            target = self._override_target(o, todo[0]["name"])
+            self.run(
+                """
+                UNWIND $rids AS rid
+                MATCH (r:Record {record_id: rid})-[x:REFERS_TO]->()
+                DELETE x
+                WITH DISTINCT r
+                MATCH (t) WHERE elementId(t) = $t
+                CREATE (r)-[:REFERS_TO {method: 'manual_override', confidence: 1.0,
+                                        decided_by: $by, decided_at: $at}]->(t)
+                """, rids=[r["rid"] for r in todo], t=target, by=o.decided_by or "overrides file",
+                at=o.decided_at or _today())
+            out["records"] += len(todo)
+            for r in todo:
+                if r["old"] != target:
+                    moved.setdefault(r["old"], {}).setdefault(target, set()).add(r["rid"])
+        for old, targets in moved.items():
+            got = self._rebuild_edges(old, {rid for ids in targets.values() for rid in ids})
+            out["edges_moved"] += got["moved"]
+            out["edges_split"] += got["split"]
+            left = self.run(
+                f"""MATCH (o) WHERE elementId(o) = $o
+                    RETURN COUNT {{ (o)-[:{EDGE_TYPES}]-() }} + COUNT {{ (o)<-[:REFERS_TO]-() }} AS n""",
+                o=old)
+            if left and not left[0]["n"] and not self.run(
+                    "MATCH (o:Company) WHERE elementId(o) = $o RETURN 1 AS x", o=old):
+                self._absorb_node(old, next(iter(targets)))     # a merge: the old key now resolves to the target
+                out["merged"] += 1
+        return {k: v for k, v in out.items() if v}
+
+    def _override_target(self, o, name: str) -> str:
+        """The element id of an override's target node, created if missing (people and organisations)."""
+        if o.label == "Person":
+            return self._person_node(o.target, name, person_name(name))
+        if o.label == "Organization":
+            return self.run("""MERGE (e:Entity {key: $k}) ON CREATE SET e.name = $name
+                               SET e:Organization RETURN elementId(e) AS id""", k=o.target, name=name)[0]["id"]
+        return self.run("MATCH (c:Company {key: $k}) RETURN elementId(c) AS id", k=o.target)[0]["id"]
+
+    def _rebuild_edges(self, old: str, rids: set[str]) -> dict:
+        """Rebuild node `old`'s relationships after the records `rids` were re-pointed.
+
+        For each relationship (past or current) that lists some of them: the part backed
+        by records that now name another node goes to that node (merged into its open
+        twin, if it has one), with the history those records span; what is left stays.
+        A relationship with nothing left (no records, no source of its own) goes."""
+        edges = self.run(
+            f"""
+            MATCH (o)-[r:{EDGE_TYPES}]->(c) WHERE elementId(o) = $old
+              AND any(x IN coalesce(r.records, []) WHERE x IN $rids)
+            RETURN elementId(r) AS id, type(r) AS rel, elementId(c) AS c, properties(r) AS p
+            """, old=old, rids=sorted(rids))
+        out = {"moved": 0, "split": 0}
+        for e in edges:
+            p = e["p"]
+            info = {r["rid"]: r for r in self.run(
+                """UNWIND $ids AS rid MATCH (r:Record {record_id: rid})
+                   OPTIONAL MATCH (r)-[:REFERS_TO]->(t)
+                   RETURN rid, elementId(t) AS t, r.source AS source, r.first_seen AS f, r.last_seen AS l""",
+                ids=p.get("records") or [])}
+            groups: dict[str, list[str]] = {}
+            for rid in p["records"]:
+                if rid in rids and rid in info and info[rid]["t"] not in (None, old):
+                    groups.setdefault(info[rid]["t"], []).append(rid)
+            if not groups:
+                continue
+            rest = [rid for rid in p["records"] if not any(rid in g for g in groups.values())]
+            sources = p.get("sources") or [x for x in [p.get("source")] if x]
+            gone = {info[rid]["source"] for g in groups.values() for rid in g}
+            for target, ids in groups.items():
+                if target == e["c"]:
+                    continue        # a holder overridden to the company itself: no self-stake
+                self._put_edge(target, e["c"], e["rel"], self._edge_part(p, ids, info, sources))
+            keep_sources = [s for s in sources if s not in gone or
+                            any(info[rid]["source"] == s for rid in rest if rid in info)]
+            if not rest and not keep_sources:
+                self._drop_edges([e["id"]])
+                out["moved"] += 1
+            else:
+                left = self._edge_part(p, rest, info, keep_sources) if rest else {
+                    "records": [], "sources": keep_sources,
+                    "source": p.get("source") if p.get("source") in keep_sources else keep_sources[0]}
+                self._set_edge(e["id"], left)
+                out["split"] += 1
+        return out
+
+    @staticmethod
+    def _edge_part(p: dict, ids: list[str], info: dict, sources: list) -> dict:
+        """The properties of the part of edge `p` backed by the records `ids`: the edge's
+        own history, narrowed to what those records were seen in."""
+        q = dict(p)
+        q["records"] = list(ids)
+        mine = [s for s in sources if any(info[i]["source"] == s for i in ids if i in info)]
+        mine += [info[i]["source"] for i in ids if i in info and info[i]["source"] and info[i]["source"] not in mine]
+        q["sources"] = mine or sources
+        if q.get("source") not in q["sources"]:
+            q["source"] = q["sources"][0] if q["sources"] else None
+        firsts = [info[i]["f"] for i in ids if i in info and info[i]["f"]]
+        lasts = [info[i]["l"] for i in ids if i in info and info[i]["l"]]
+        if firsts and p.get("first_seen"):
+            q["first_seen"] = max(p["first_seen"], min(firsts))
+        if lasts and p.get("last_seen"):
+            q["last_seen"] = min(p["last_seen"], max(lasts))
+        return q
+
+    def _put_edge(self, holder: str, company: str, rel: str, props: dict) -> None:
+        """Add a relationship part to `holder` (element ids): merged into its open edge to
+        `company` for the same seat when this part is open too, else a new edge."""
+        if props.get("current"):
+            twin = self.run(
+                f"""MATCH (h)-[x:{rel} {{current: true}}]->(c) WHERE elementId(h) = $h AND elementId(c) = $c
+                      AND coalesce(x.post, x.title, '') = coalesce($post, $title, '')
+                    RETURN elementId(x) AS id, properties(x) AS p LIMIT 1""",
+                h=holder, c=company, post=props.get("post"), title=props.get("title"))
+            if twin:
+                x = twin[0]["p"]
+                self._set_edge(twin[0]["id"], {
+                    "records": self._union(x.get("records"), props.get("records")),
+                    "sources": self._union(x.get("sources") or [x.get("source")], props.get("sources")),
+                    "titles": self._union(x.get("titles"), props.get("titles")) or None,
+                    "first_seen": min(v for v in (x.get("first_seen"), props.get("first_seen")) if v)
+                    if x.get("first_seen") or props.get("first_seen") else None,
+                    "last_seen": max(v for v in (x.get("last_seen"), props.get("last_seen")) if v)
+                    if x.get("last_seen") or props.get("last_seen") else None,
+                })
+                return
+        self.run(f"""MATCH (h) WHERE elementId(h) = $h MATCH (c) WHERE elementId(c) = $c
+                     CREATE (h)-[y:{rel}]->(c) SET y = $p""",
+                 h=holder, c=company, p={k: v for k, v in props.items() if v is not None})
+
+    def records(self, key: str) -> list[dict]:
+        """The source records that name the entity `key`: what each row said, where, who
+        decided it is this entity and how (REFERS_TO), and the relationships it is behind."""
+        key = self.resolve_key(key)
+        return self.run(
+            f"""
+            MATCH (e:Entity {{key: $key}})<-[x:REFERS_TO]-(r:Record)
+            OPTIONAL MATCH (r)-[:REPORTED_FOR]->(c:Company)
+            RETURN r {{.*}} AS record, c.ticker AS ticker, c.key AS company_key,
+                   x {{.method, .confidence, .decided_by, .decided_at}} AS decision,
+                   [(e)-[rel:{EDGE_TYPES}]->(t) WHERE r.record_id IN coalesce(rel.records, []) |
+                    {{type: type(rel), company: t.ticker, current: rel.current, title: rel.title,
+                      percent: rel.percent, first_seen: rel.first_seen, until: rel.until}}] AS edges
+            ORDER BY ticker, record.kind, record.last_seen DESC
+            """, key=key)
 
     # ---- one node per legal entity (issue #35) ----------------------------------
 
@@ -696,9 +1002,11 @@ class Graph:
         self._move_edges(old, new)
         self._absorb_node(old, new)
 
-    def _move_edges(self, old: str, new: str, only: str | None = None) -> None:
+    def _move_edges(self, old: str, new: str, only: str | None = None, method: str | None = None) -> None:
         """Move node `old`'s edges to node `new` (element ids), as _merge_node describes.
-        With `only` (a node's element id), just the edges between `old` and that node."""
+        With `only` (a node's element id), just the edges between `old` and that node.
+        The source records behind them follow (REFERS_TO, issue #37); `method` is then
+        how they are decided, e.g. "initial_match" (default: unchanged)."""
         for rel in ("OWNS", "HOLDS_POSITION", "BENEFICIAL_OWNER"):
             for pattern, twin in (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
                                   ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)")):
@@ -723,12 +1031,36 @@ class Graph:
                                                 AND NOT v IN have],
                             x.titles = CASE WHEN r.titles IS NULL THEN x.titles ELSE
                                 coalesce(x.titles, []) + [v IN r.titles WHERE NOT v IN coalesce(x.titles, [])] END,
+                            x.records = CASE WHEN r.records IS NULL THEN x.records ELSE
+                                coalesce(x.records, []) + [v IN r.records WHERE NOT v IN coalesce(x.records, [])] END,
                             x.first_seen = CASE WHEN r.first_seen < x.first_seen THEN r.first_seen
                                                 ELSE x.first_seen END
                     }}
                     WITH r
                     DELETE r
                     """, old=old, new=new, only=only)
+        self._move_refs(old, new, only, method)
+
+    def _move_refs(self, old: str, new: str, only: str | None = None, method: str | None = None) -> None:
+        """Re-point the records that refer to node `old` to node `new` (element ids); with
+        `only`, just the records reported for that company. Pinned decisions (manual_override)
+        move only in a whole-node merge (`only` None), when the node itself goes."""
+        self.run(
+            """
+            MATCH (o) WHERE elementId(o) = $old
+            MATCH (n) WHERE elementId(n) = $new
+            MATCH (r:Record)-[x:REFERS_TO]->(o)
+            WHERE $only IS NULL OR (x.method <> 'manual_override'
+                                    AND EXISTS { MATCH (r)-[:REPORTED_FOR]->(t) WHERE elementId(t) = $only })
+            CREATE (r)-[y:REFERS_TO]->(n)
+            SET y = properties(x)
+            SET y.method = coalesce($method, x.method),
+                y.confidence = CASE WHEN $method IS NULL THEN x.confidence ELSE $conf END,
+                y.decided_by = CASE WHEN $method IS NULL THEN x.decided_by ELSE 'rule' END,
+                y.decided_at = CASE WHEN $method IS NULL THEN x.decided_at ELSE $today END
+            DELETE x
+            """, old=old, new=new, only=only, method=method,
+            conf=rec.CONFIDENCE.get(method or "", 1.0), today=_today())
 
     def _absorb_node(self, old: str, new: str) -> None:
         """The node part of _merge_node: `new` takes `old`'s names and properties, `old` goes."""
@@ -753,6 +1085,12 @@ class Graph:
         if po.get("first_seen") and pn.get("first_seen") and po["first_seen"] < pn["first_seen"]:
             merged["first_seen"] = po["first_seen"]
             merged["first_run"] = po.get("first_run")
+        self._move_refs(old, new)
+        # records reported for a company that is merged away are reported for the one kept
+        self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
+                    MATCH (r:Record)-[x:REPORTED_FOR]->(o)
+                    MERGE (r)-[:REPORTED_FOR]->(n)
+                    DELETE x""", old=old, new=new)
         self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
                     SET n += $props DETACH DELETE o""", old=old, new=new, props={**fill, **merged})
 
@@ -766,6 +1104,7 @@ class Graph:
         rows are marked `merge_only` (see load()): they add names and fill gaps, but
         never rename the company or change whether it is listed.
         Returns {old ticker: new ticker} for the tickers it rewrote."""
+        rec.stamp(ds)        # record ids come from the rows as the source gave them (issue #37)
         rows = self.run("MATCH (c:Company) RETURN c.ticker AS t, c.register_no AS reg, "
                         "coalesce(c.former_tickers, []) AS former, coalesce(c.listed, true) AS listed")
         have = {r["t"] for r in rows}
@@ -934,15 +1273,18 @@ class Graph:
 
     # ---- loading ------------------------------------------------------------
 
-    def load(self, ds: Dataset, observed_at: str | None = None, run: str | None = None) -> dict:
+    def load(self, ds: Dataset, observed_at: str | None = None, run: str | None = None,
+             overrides: list | None = None) -> dict:
         """Merge a dataset into the graph, keeping history (see module docstring).
 
         Load datasets in chronological order: `observed_at` (default: the
         dataset's own, else today) is the date stamped on new, refreshed and
         closed edges. `run` (default: a fresh UTC timestamp) is stamped on the
         edges this load opens or closes; history.run_changes() reads them back.
+        Every row becomes a source record (records.py). `overrides` (records.Override
+        rows) replace the identity overrides file.
         """
-        self.init_schema()
+        self.init_schema(overrides)
         when = observed_at or ds.observed_at or _today()
         run = run or new_run_id()
         self.canonicalize(ds)
@@ -985,6 +1327,7 @@ class Graph:
             """,
             rows=companies, when=when, run=run,
         )
+        self._write_records([rec.record_row("company", c, c.ticker, "", "exact_key") for c in ds.companies], when)
         # Fold any :Organization created earlier (before this company was loaded)
         # into the matching :Company node.
         self._merge_orgs_into_companies()
@@ -993,9 +1336,10 @@ class Graph:
         # brings the edges their initial forms have at the same company
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
-        pending = self._dataset_people(ds, alias_map)
+        overrides = self.identity_overrides(overrides)
+        pending = self._dataset_people(ds, alias_map, overrides)
         adopted = self._adopt_initials(pending) if pending else 0
-        people = self.people_resolver(pending)
+        people = self.people_resolver(pending, overrides)
 
         changes = {}
         changes.update(self._load_shareholdings(ds, when, run, people))
@@ -1037,22 +1381,28 @@ class Graph:
 
         by_pair: dict[tuple, dict] = {}
         held: dict[str, list[str]] = {t: [] for t in hsnaps}   # holder -> targets it reported
+        recs = []
         for h in ds.shareholdings:
             name = clean(h.holder_name)
             if not name or is_aggregate(name):
                 continue  # "Бусад" / "Others" / totals are not real holders
             holder = h.holder_ticker.upper()
             key = entity_key(name, h.holder_type)
-            if holder:
-                key, label = tkeys.get(holder) or company_key(holder), "Company"
+            ticker = h.company_ticker.upper()
+            ov = None if holder else people.match_override(name, ticker, h.source, "shareholder", h.holder_type)
+            if ov is not None:
+                key, label, method = ov.target, ov.label, "manual_override"
+            elif holder:
+                key, label, method = tkeys.get(holder) or company_key(holder), "Company", "holder_ticker"
             elif key in alias_map or entity_key(name) in alias_map:
-                key, label = alias_map.get(key) or alias_map[entity_key(name)], "Company"
+                key, label, method = alias_map.get(key) or alias_map[entity_key(name)], "Company", "alias"
             else:
                 htype = h.holder_type or ("organization" if is_organization(name) else "person")
                 label = "Organization" if htype.startswith("org") else "Person"
+                method = "exact_key"
                 if label == "Person":
-                    key = people.key(name, h.company_ticker, h.source)
-            ticker = h.company_ticker.upper()
+                    key, method = people.resolve(name, h.company_ticker, h.source, "shareholder")
+            recs.append(rec.record_row("shareholder", h, ticker, key, method, ov))
             prefix = snaps.get(ticker)
             in_holdings = holder in hsnaps and _under(h.source, hsnaps[holder])
             if in_holdings:
@@ -1074,8 +1424,11 @@ class Graph:
             row["rank"] = 2 if row["in_snapshot"] else 1 if in_holdings else 0
             row["authoritative"] = row["rank"] > 0 and not ds.supplementary
             prev = by_pair.get((ticker, key))
+            row["records"] = self._union(prev["records"] if prev else [], [h._rid])
             if prev is None or row["rank"] >= prev["rank"]:
                 by_pair[(ticker, key)] = row   # one row per holder and company
+            else:
+                prev["records"] = row["records"]
         holdings = list(by_pair.values())
 
         for label in ("Person", "Organization"):
@@ -1114,7 +1467,7 @@ class Graph:
                 CREATE (e)-[n:OWNS {current: true}]->(c)
                 SET n.percent = r.percent, n.shares = r.shares, n.as_of = r.as_of, n.source = r.source,
                     n.sources = [r.source], n.first_seen = $when, n.last_seen = $when, n.opened_run = $run,
-                    n.baseline = CASE WHEN r.baseline THEN true END
+                    n.baseline = CASE WHEN r.baseline THEN true END, n.records = r.records
                 WITH o WHERE o IS NOT NULL
                 SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
             }
@@ -1122,7 +1475,8 @@ class Graph:
                 WITH r, o WHERE o IS NOT NULL AND NOT changed
                 SET o.last_seen = CASE WHEN coalesce(o.last_seen, '') < $when THEN $when ELSE o.last_seen END,
                     o.percent = coalesce(o.percent, r.percent),
-                    o.shares = coalesce(o.shares, r.shares)
+                    o.shares = coalesce(o.shares, r.shares),
+                    o.records = coalesce(o.records, []) + [x IN r.records WHERE NOT x IN coalesce(o.records, [])]
                 WITH r, o, coalesce(o.sources, [x IN [o.source] WHERE x IS NOT NULL]) AS have
                 SET o.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END
                 WITH r, o WHERE NOT coalesce(r.as_of =~ $iso AND o.as_of =~ $iso AND r.as_of < o.as_of, false)
@@ -1132,6 +1486,11 @@ class Graph:
                 SET o.source = CASE WHEN owner THEN r.source ELSE o.source END,
                     o.as_of = CASE WHEN owner OR (o.as_of IS NULL AND r.percent IS NOT NULL)
                                    THEN coalesce(r.as_of, o.as_of) ELSE o.as_of END
+            }
+            CALL (r, o, changed, supersede) {
+                // a value that conflicts but doesn't win is still evidence for the open stake
+                WITH r, o WHERE changed AND NOT supersede
+                SET o.records = coalesce(o.records, []) + [x IN r.records WHERE NOT x IN coalesce(o.records, [])]
             }
             RETURN count(CASE WHEN o IS NULL THEN 1 END) AS opened,
                    count(CASE WHEN supersede THEN 1 END) AS changed,
@@ -1176,6 +1535,7 @@ class Graph:
         # from now on, new stakes of these companies are changes, not their baseline
         self.run("UNWIND $t AS t MATCH (c:Company {ticker: t}) SET c.holdings_first_seen = $when",
                  t=sorted(fresh_holders), when=when)
+        self._write_records(recs, when)
         return {"ownerships_opened": res["opened"], "ownerships_changed": res["changed"],
                 "ownerships_closed": closed, "ownerships_conflicting": res["conflicting"]}
 
@@ -1197,12 +1557,15 @@ class Graph:
         snaps = {t.upper(): p for t, p in ds.snapshots.get("positions", {}).items()}
         fresh = self._new_sources("HOLDS_POSITION", snaps)
         rows: dict[tuple, dict] = {}
+        recs = []
         for p in ds.positions:
             ticker = p.company_ticker.upper()
             title, role = clean(p.title), p.role or "executive"
             name = clean(p.person_name)
+            ov = people.match_override(name, ticker, p.source, "officer") if name else None
+            key, method = people.resolve(name, ticker, p.source, "officer") if name else ("", "")
             r = {
-                "ticker": ticker, "key": people.key(name, ticker, p.source) if name else "",
+                "ticker": ticker, "key": key,
                 "name": clean(p.person_name), "title": title, "role": role,
                 "role_std": role_std(title, role), "post": post_key(title, role),
                 "since": _opt(parse_date(p.since)), "until": _opt(parse_date(p.until)),
@@ -1215,7 +1578,10 @@ class Graph:
                 k = (r["ticker"], r["key"], r["post"], r["until"], r["source"])
                 titles = rows[k]["titles"] if k in rows else []
                 r["titles"] = titles + [title] if title not in titles else titles
+                r["records"] = self._union(rows[k]["records"] if k in rows else [], [p._rid])
                 rows[k] = r
+                recs.append(rec.record_row("officer", p, ticker, key, method,
+                                           ov if method == "manual_override" else None))
         active = [r for r in rows.values() if r["until"] is None]
         ended = [r for r in rows.values() if r["until"] is not None]
 
@@ -1233,7 +1599,8 @@ class Graph:
             WITH r, h, coalesce(h.sources, [x IN [h.source] WHERE x IS NOT NULL]) AS have,
                  coalesce(h.titles, [x IN [h.title] WHERE x IS NOT NULL]) AS spelt
             SET h.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END,
-                h.titles = spelt + [t IN r.titles WHERE NOT t IN spelt]
+                h.titles = spelt + [t IN r.titles WHERE NOT t IN spelt],
+                h.records = coalesce(h.records, []) + [x IN r.records WHERE NOT x IN coalesce(h.records, [])]
             // as for stakes: another source can't take the edge over (see _load_shareholdings)
             WITH r, h, r.authoritative OR h.source = r.source OR h.source IS NULL AS owner
             SET h.role = CASE WHEN owner THEN r.role ELSE h.role END,
@@ -1262,6 +1629,7 @@ class Graph:
                 SET o.current = false, o.until = r.until, o.since = coalesce(o.since, r.since),
                     o.role = r.role, o.role_std = r.role_std, o.title = r.title,
                     o.titles = spelt + [t IN r.titles WHERE NOT t IN spelt],
+                    o.records = coalesce(o.records, []) + [x IN r.records WHERE NOT x IN coalesce(o.records, [])],
                     o.source = r.source, o.closed_at = $when, o.closed_run = $run
             }
             CALL (r, p, c, o) {
@@ -1270,6 +1638,7 @@ class Graph:
                 ON CREATE SET h.first_seen = $when, h.last_seen = $when, h.titles = []
                 SET h.role = r.role, h.role_std = r.role_std, h.title = r.title, h.source = r.source,
                     h.titles = h.titles + [t IN r.titles WHERE NOT t IN h.titles],
+                    h.records = coalesce(h.records, []) + [x IN r.records WHERE NOT x IN coalesce(h.records, [])],
                     h.since = coalesce(h.since, r.since)
             }
             """,
@@ -1293,6 +1662,7 @@ class Graph:
             """,
             scopes=scopes, when=when, run=run,
         )[0]["n"]
+        self._write_records(recs, when)
         return {"positions_opened": opened, "positions_closed": closed + len(ended)}
 
     def _load_beneficial_owners(self, ds: Dataset, when: str, run: str, people: PeopleResolver) -> dict:
@@ -1310,23 +1680,34 @@ class Graph:
         snaps = {t.upper(): p for t, p in ds.snapshots.get("beneficial_owners", {}).items()}
         fresh = self._new_sources("BENEFICIAL_OWNER", snaps)
         rows = {}
+        recs = []
         for b in ds.beneficial_owners:
             name = clean(b.owner_name)
             if not name:
                 continue
             reg = "".join(ch for ch in (b.owner_reg_no or "") if ch.isdigit())
             key = entity_key(name, b.owner_type)
-            if reg in reg_map:
-                key, label = reg_map[reg], "Company"
+            ticker = b.company_ticker.upper()
+            ov = people.match_override(name, ticker, b.source, "beneficial_owner", b.owner_type)
+            if ov is not None:
+                key, label, method = ov.target, ov.label, "manual_override"
+            elif reg in reg_map:
+                key, label, method = reg_map[reg], "Company", "register_no"
             else:
                 label = "Company" if key in alias_map else (
                     "Organization" if (b.owner_type or ("organization" if is_organization(name) else "person"))
                     .startswith("org") else "Person")
-                key = people.key(name, b.company_ticker, b.source) if label == "Person" else alias_map.get(key, key)
-            ticker = b.company_ticker.upper()
+                method = "alias" if label == "Company" else "exact_key"
+                if label == "Person":
+                    key, method = people.resolve(name, b.company_ticker, b.source, "beneficial_owner")
+                else:
+                    key = alias_map.get(key, key)
+            recs.append(rec.record_row("beneficial_owner", b, ticker, key, method, ov))
+            prev = rows.get((ticker, key))
             rows[(ticker, key)] = {"ticker": ticker, "key": key, "name": name, "reg": reg or None,
                                    "label": label, "org_type": _org_type(b.org_type), "since": _opt(parse_date(b.since)), "source": b.source,
-                                   "baseline": ticker in fresh}
+                                   "baseline": ticker in fresh,
+                                   "records": self._union(prev["records"] if prev else [], [b._rid])}
         rows = list(rows.values())
         for label in ("Person", "Organization"):
             self.run(
@@ -1355,6 +1736,7 @@ class Graph:
                           b.baseline = CASE WHEN r.baseline THEN true END
             SET b.since = coalesce(r.since, b.since), b.source = r.source,
                 b.owner_reg = coalesce(r.reg, b.owner_reg),
+                b.records = coalesce(b.records, []) + [x IN r.records WHERE NOT x IN coalesce(b.records, [])],
                 b.last_seen = CASE WHEN coalesce(b.last_seen, '') < $when THEN $when ELSE b.last_seen END
             WITH b, b.new AS new
             REMOVE b.new
@@ -1380,6 +1762,7 @@ class Graph:
             """,
             scopes=scopes, when=when, run=run,
         )[0]["n"]
+        self._write_records(recs, when)
         return {"beneficial_owners_opened": opened, "beneficial_owners_closed": closed}
 
     def _load_facts(self, ds: Dataset):
@@ -1555,6 +1938,14 @@ class Graph:
                     CREATE (c)-[n:BENEFICIAL_OWNER]->(t)
                     SET n = properties(old)
                 }
+                CALL (o, c) {
+                    // ... and the source records that named it (issue #37)
+                    MATCH (r:Record)-[x:REFERS_TO]->(o)
+                    CREATE (r)-[y:REFERS_TO]->(c)
+                    SET y = properties(x)
+                    SET y.method = CASE WHEN x.method = 'manual_override' THEN x.method ELSE 'alias' END
+                    DELETE x
+                }
                 DETACH DELETE o
                 """,
                 okey=r["okey"], ticker=r["ticker"],
@@ -1587,8 +1978,9 @@ class Graph:
                                                              min(r.first_seen) AS first_observed,
                                                              max(r.last_seen) AS last_observed }
             CALL () { MATCH ()-[r:BENEFICIAL_OWNER {current: true}]->() RETURN count(r) AS beneficial_owners }
+            CALL () { MATCH (r:Record) RETURN count(r) AS records }
             RETURN companies, unlisted_companies, people, organizations, ownerships, positions,
-                   beneficial_owners, past_ownerships, past_positions, first_observed, last_observed
+                   beneficial_owners, past_ownerships, past_positions, first_observed, last_observed, records
             """
         )
         return r[0]
@@ -1602,7 +1994,7 @@ class Graph:
                OR toLower(coalesce(e.ticker,'')) = $q
             RETURN e.key AS key, e.name AS name, e.ticker AS ticker,
                    [l IN labels(e) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
-                   COUNT { (e)--() } AS degree
+                   COUNT { (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]-() } AS degree
             ORDER BY (toLower(coalesce(e.ticker,'')) = $q) DESC, degree DESC, name
             LIMIT $limit
             """,

@@ -244,6 +244,17 @@ def resolution():
         r: sum(1 for p in people if p["reason"] == r) for r in ("several_at_company", "no_shared_company")}}
 
 
+@app.get("/api/records")
+def records(key: str):
+    """The source records (issue #37) that name an entity: each row as its source gave it,
+    how the loader decided who it names (REFERS_TO: method, confidence, decided_by) and
+    the relationships it is behind."""
+    rows = g().records(key)
+    if not rows and g().entity(key) is None:
+        raise HTTPException(404, f"no entity {key}")
+    return {"key": g().resolve_key(key), "records": rows}
+
+
 @app.get("/api/companies/{ticker}/flags")
 def company_flags(ticker: str, min_stake: float = 5.0):
     from . import analysis
