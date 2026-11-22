@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY mse_graph ./mse_graph
 COPY data/sample ./data/sample
 COPY data/manual ./data/manual
+COPY data/discovery ./data/discovery
 COPY deploy/start.sh /start.sh
 
 CMD ["/bin/bash", "/start.sh"]

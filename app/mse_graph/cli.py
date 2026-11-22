@@ -17,6 +17,8 @@
     python -m mse_graph.cli odl-company <REG_NO>
     python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--shard K/N|auto] [--load]
     python -m mse_graph.cli odl-import <file-or-url> [--kind auto|shareholders|executives|companies] [--load]
+    python -m mse_graph.cli odl-discover [--budget N] [--max-depth D] [--dry-run]
+                                                           grow the graph: registry pages of companies it lacks
     python -m mse_graph.cli egress-check [--reg REG_NO]   fetch one registry page through each opendatalab.mn route
     python -m mse_graph.cli cycles | cross-holdings | state
     python -m mse_graph.cli conflicts [--kind insider_owner|competitor|related_party]
@@ -130,6 +132,15 @@ def main(argv=None):
                    help="override column mapping, e.g. --map holder_name='Эзэмшигч'")
     p.add_argument("--out", default="data/opendatalab")
     p.add_argument("--load", action="store_true", help="also load into Neo4j")
+    p = sub.add_parser("odl-discover",
+                       help="grow the graph from the registry: read the pages of companies it doesn't have yet "
+                            "(owners named in ownership chains, data/discovery/seeds.csv, companies never read)")
+    p.add_argument("--budget", type=int, help="registry pages to read, 11 s each (default DISCOVERY_BUDGET or 25)")
+    p.add_argument("--max-depth", type=int,
+                   help="steps along ownership chains from the starting companies (default DISCOVERY_MAX_DEPTH or 3)")
+    p.add_argument("--seeds", help="seeds file (default DISCOVERY_SEEDS or data/discovery/seeds.csv)")
+    p.add_argument("--dry-run", action="store_true", help="only list what would be read; fetch nothing")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("egress-check",
                        help="show how requests leave this server; fetch one Open Data Lab registry page "
                             "through each opendatalab.mn route (one request per route, 11 s apart)")
@@ -201,6 +212,11 @@ def main(argv=None):
     if args.cmd == "odl-enrich":
         from . import opendatalab
         g = _graph() if (args.load or not args.src) else None
+        lease = opendatalab.RegistryLease(g, "odl-enrich") if g else None
+        # opendatalab.mn is never crawled in parallel (the hosted pipeline may be reading it)
+        if lease and not lease.acquire():
+            g.close()
+            sys.exit(f"{lease.busy_message()}; try again later")
         try:
             if args.src:
                 companies = [(c.ticker, c.reg_no) for c in csv_io.read_dir(args.src).companies]
@@ -215,12 +231,18 @@ def main(argv=None):
                 print(f"shard {part[0]}/{part[1]}: {len(companies)} companies")
                 # the companies of data/manual/ are re-checked on every run
                 companies = with_registry_tickers(companies, everything)
-            print(f"{sum(1 for _, r in companies if r)} companies have a registration number")
-            ds, report = opendatalab.enrich_companies(companies, limit=args.limit)
+            print(f"{sum(1 for _, r in companies if opendatalab.is_register_no(r))} companies have a register "
+                  "number the registry uses")
+            ds, report = opendatalab.enrich_companies(companies, limit=args.limit,
+                                                      progress=lease.keep if lease else None)
             for e in report:
                 print(f"{e['ticker']:<8} {e['reg_no']:<9} {e['status']:<10} "
                       f"{e.get('shareholders', '')!s:>3} sh {e.get('officers', '')!s:>3} off "
                       f"{e.get('beneficial_owners', '')!s:>3} ubo  {e['url']}")
+            if g:
+                # numbers the registry doesn't know are left alone for a while (see odl-discover)
+                g.note_registry_checks([{"reg": e["reg_no"], "status": e["status"], "ticker": e["ticker"]}
+                                        for e in report])
             ds.observed_at = ds.observed_at or date.today().isoformat()
             csv_io.write_dir(ds, args.out)
             print(f"wrote {args.out}: {ds.summary()}")
@@ -229,7 +251,12 @@ def main(argv=None):
                 _print(g.load(ds))
         finally:
             if g:
+                lease.release()
                 g.close()
+        return
+
+    if args.cmd == "odl-discover":
+        _discover_cmd(args)
         return
 
     if args.cmd == "egress-check":
@@ -364,6 +391,72 @@ def _print_changes(changes, as_json=False):
     for c in changes:
         when = c.get("detected_at", "")[:10]
         print(f"{when:<10} {c['ticker']:<6} {describe(c)}")
+
+
+def _discover_cmd(args):
+    from . import discovery
+
+    opts = discovery.settings_from_env()
+    budget = opts["budget"] if args.budget is None else args.budget
+    max_depth = opts["max_depth"] if args.max_depth is None else args.max_depth
+    seeds_path = args.seeds or opts["seeds_path"]
+    with _graph() as g:
+        if args.dry_run:
+            leads = discovery.frontier(g, max_depth, discovery.read_seeds(seeds_path), opts["retry_days"])
+            missing = g.listed_without_register_no()
+            if args.json:
+                _print({"frontier": [lead.__dict__ for lead in leads], "listed_without_register_no": missing})
+                return
+            print(f"{len(leads)} registry numbers to read; the next run reads up to {budget}:")
+            for lead in leads[:max(budget, 50)]:
+                via = f" via {','.join(lead.via[:5])}" if lead.via else ""
+                to = f" -> {lead.ticker}" if lead.ticker else ""
+                print(f"  {lead.reg:<9} {lead.kind:<6} depth {lead.depth}  {lead.name}{to}{via}")
+            print(f"{len(missing)} listed companies have no register number, so the registry can't be read "
+                  f"for them yet: {' '.join(m['ticker'] for m in missing)}")
+            print(f"A number found elsewhere goes in {seeds_path} (reg_no,ticker,note).")
+            return
+        if budget <= 0:
+            print("discovery is off (budget 0)")
+            return
+        from .opendatalab import RegistryLease
+        lease = RegistryLease(g, "odl-discover")
+        if not lease.acquire():
+            # opendatalab.mn is never crawled in parallel; the next run picks up where this one would have
+            print(f"discovery skipped: {lease.busy_message()}")
+            return
+        try:
+            report, ds = discovery.discover(g, budget=budget, max_depth=max_depth, seeds_path=seeds_path,
+                                            retry_days=opts["retry_days"], progress=lease.keep)
+        finally:
+            lease.release()
+        path = discovery.save(ds)
+    if args.json:
+        _print(report)
+    else:
+        for a in report["added"]:
+            print(f"added     {a['ticker']:<10} {a['name']}  depth {a['depth']}"
+                  f"{'  via ' + ','.join(a['via'][:5]) if a['via'] else ''}  "
+                  f"({a['shareholders']} owners, {a['officers']} officers, {a['beneficial_owners']} in owner chain)")
+        for a in report["attached"]:
+            print(f"attached  {a['ticker']:<10} {a['name']}  register no. {a['reg']}"
+                  f"{'  found via ' + ','.join(a['via'][:5]) if a['via'] else ''}  "
+                  f"({a['shareholders']} owners, {a['officers']} officers, {a['beneficial_owners']} in owner chain)")
+        for c in report["clashes"]:
+            print(f"clash     {c['reg']:<10} {c['registry_name']}: {c['with']} already has that name")
+        for n in report["not_found"]:
+            print(f"not found {n['reg']:<10} {n['name']}")
+        for f in report["failed"]:
+            print(f"failed    {f['reg']:<10} {f['error']}")
+        print(f"read {report['fetched']} registry pages: {report['new_companies']} new companies, "
+              f"{len(report['attached'])} companies completed, {report['new_people']} new people; "
+              f"{report['frontier_left']} leads left for later runs")
+        if path:
+            print(f"archived to {path}")
+        if report["stopped"]:
+            print(f"stopped: {report['stopped']}", file=sys.stderr)
+    nothing = not (report["added"] or report["attached"] or report["not_found"] or report["clashes"])
+    sys.exit(1 if report["stopped"] or (report["failed"] and nothing) else 0)
 
 
 def _history_cmd(g, args):

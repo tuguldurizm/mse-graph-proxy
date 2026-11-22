@@ -148,9 +148,23 @@ class Fetcher:
     def _throttle(self, host: str) -> None:
         delay = max(self.delay, self.HOST_DELAY.get(host, 0.0))
         wait = delay - (time.monotonic() - self._last_by_host.get(host, float("-inf")))
+        # For hosts with a crawl delay, the last request's time is also kept next to the
+        # cache, so commands run one after another (odl-enrich, then odl-discover) keep
+        # the delay between them too.
+        stamp = self.cache_dir / f".last-request-{host}" if host in self.HOST_DELAY else None
+        if stamp is not None:
+            try:
+                wait = max(wait, delay - (time.time() - stamp.stat().st_mtime))
+            except OSError:
+                pass
         if wait > 0:
-            time.sleep(wait)
+            time.sleep(min(wait, delay))
         self._last_by_host[host] = time.monotonic()
+        if stamp is not None:
+            try:
+                stamp.touch()
+            except OSError:
+                pass
 
     def try_route(self, route: egress.Route, url: str) -> Attempt:
         """One GET of `url` through `route`, after the host's crawl delay."""

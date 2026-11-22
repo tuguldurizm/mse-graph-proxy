@@ -282,6 +282,13 @@ INFO_FIELDS = {
 }
 REMOVED = "хасагдсан"
 _REG_RE = re.compile(r"^\d{6,8}$")
+REGISTER_NO_RE = r"\d{6,8}"     # the same rule, for Cypher's =~ (always a full match)
+
+
+def is_register_no(number: str | None) -> bool:
+    """Whether `number` can be a register number, the 7-digit kind Open Data Lab pages
+    use. mse.mn's 10-digit state registration numbers (APU: 9010001005) never are."""
+    return bool(_REG_RE.match(re.sub(r"\s", "", number or "")))
 _EMPTY_DATE = {"0001-01-01", "0000-00-00"}
 # Registry spellings of the state as a shareholder ("Өмч Төр" is typed Иргэн in the source).
 _STATE_NAMES = {"өмч төр", "төр өмч", "төр", "төрийн өмч"}
@@ -407,15 +414,16 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
         since = "" if since in _EMPTY_DATE else since
         if not name or r["_removed"]:
             continue
+        owner_reg = ""
         if _REG_RE.match(cat):          # a legal entity, listed by its own reg. no.
             trail = re.search(r"\s+(\d{6,8})$", name)
             if cat == own_reg or (trail and trail.group(1) == own_reg):
                 continue                # the company itself, or an entity tagged with its number
             name = re.sub(r"\s+\d{6,8}$", "", name)
-            otype = "organization"
+            otype, owner_reg = "organization", cat
         else:
             otype = _holder_type(cat) or ("organization" if is_organization(name) else "person")
-        ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url))
+        ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url, owner_reg_no=owner_reg))
     # The page is the registry's complete record of this company: a holder, officer
     # or owner it no longer lists closes the registry's edge (never mse.mn's).
     ds.supplementary = True
@@ -439,6 +447,59 @@ def fetch_registry_page(reg_no: str, fetcher=None) -> tuple[dict | None, str]:
     return (_entity_page(html, reg_no) if html else None), url
 
 
+def fetch_entity(reg_no: str, fetcher) -> tuple[str, dict | None, str]:
+    """(status, parsed page or None, url) for one registry page. The status is "ok",
+    "not found" (no such entity: a 404, or an answer that isn't this number's page)
+    or "fetch failed" (no answer through any route; `fetcher.last_error` says why)."""
+    url = registry_url(reg_no)
+    html = fetcher.get(url)
+    if html is None and getattr(fetcher, "last_status", None) not in (404, 410):
+        return "fetch failed", None, url
+    page = _entity_page(html, reg_no) if html else None
+    return ("ok" if page else "not found"), page, url
+
+
+REGISTRY_LEASE = "registry"
+REGISTRY_LEASE_MINUTES = 30       # renewed while pages are read, so it lapses only if a run dies
+
+
+def lease_owner(what: str) -> str:
+    """Who holds the registry lease: the job, the machine and the process."""
+    import os
+    import socket
+    return f"{what} on {os.getenv('RENDER_SERVICE_NAME') or socket.gethostname()} (pid {os.getpid()})"
+
+
+class RegistryLease:
+    """opendatalab.mn is never crawled by two runs at once (the hosted pipeline and the daily
+    job both read it). A run `acquire()`s the lease in Neo4j first, calls `keep()` after each
+    page (it renews the lease every `renew_every` seconds) and `release()`s it at the end."""
+
+    def __init__(self, g, what: str, minutes: float = REGISTRY_LEASE_MINUTES, renew_every: float = 300):
+        self.g, self.owner, self.minutes, self.renew_every = g, lease_owner(what), minutes, renew_every
+        self.holder: dict = {}
+        self._renewed = float("-inf")
+
+    def acquire(self) -> bool:
+        import time
+        self.holder = self.g.claim(REGISTRY_LEASE, self.owner, self.minutes)
+        self._renewed = time.monotonic()
+        return bool(self.holder.get("ok"))
+
+    def keep(self) -> None:
+        import time
+        if time.monotonic() - self._renewed >= self.renew_every:
+            self.g.claim(REGISTRY_LEASE, self.owner, self.minutes)
+            self._renewed = time.monotonic()
+
+    def release(self) -> None:
+        self.g.release(REGISTRY_LEASE, self.owner)
+
+    def busy_message(self) -> str:
+        return (f"another run is reading the registry now ({self.holder.get('owner')}, "
+                f"until {self.holder.get('until')})")
+
+
 # Registry pages in a row that could not be downloaded before a run gives up on the
 # remaining companies: the way out is down, and ~200 companies x 11 s x retries of
 # nothing would only hold up the pipeline.
@@ -446,31 +507,39 @@ MAX_CONSECUTIVE_FAILURES = 5
 
 
 def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int | None = None,
-                     max_failures: int = MAX_CONSECUTIVE_FAILURES) -> tuple[Dataset, list[dict]]:
+                     max_failures: int = MAX_CONSECUTIVE_FAILURES, progress=None) -> tuple[Dataset, list[dict]]:
     """Fetch the registry page of each (ticker, reg_no) and collect its records.
 
     Returns the combined Dataset and a per-company report whose status is "ok",
     "not found" (no such entity), "fetch failed" (no answer through any route) or
     "skipped" (not tried: the `max_failures` downloads before it all failed).
     A company without a page gets no records, so nothing of its history is closed.
+    Numbers that can't be register numbers (mse.mn's 10-digit state registration
+    numbers) are left out: the registry has no page for them. `progress()`, if
+    given, is called after each page (e.g. RegistryLease.keep).
     """
     fetcher = fetcher or _fetcher()
     out, report = Dataset(), []
     todo = [(t, re.sub(r"\D", "", r or "")) for t, r in companies]
-    todo = [(t, r) for t, r in todo if r]
+    unusable = [t for t, r in todo if r and not is_register_no(r)]
+    if unusable:
+        log.info("ODL: %d companies have no register number, only a state registration number the registry "
+                 "doesn't use (discovery can find theirs): %s", len(unusable), " ".join(unusable[:20]))
+    todo = [(t, r) for t, r in todo if is_register_no(r)]
     todo = todo[:limit] if limit else todo
     failures = 0
     for i, (ticker, reg) in enumerate(todo):
-        url = registry_url(reg)
-        entry = {"ticker": ticker, "reg_no": reg, "url": url}
+        entry = {"ticker": ticker, "reg_no": reg, "url": registry_url(reg)}
         report.append(entry)
         if failures >= max_failures:
             entry["status"] = "skipped"
             continue
-        html = fetcher.get(url)
-        if html is None and getattr(fetcher, "last_status", None) not in (404, 410):
+        status, page, url = fetch_entity(reg, fetcher)
+        if progress:
+            progress()
+        entry["status"] = status
+        if status == "fetch failed":
             failures += 1
-            entry["status"] = "fetch failed"
             if getattr(fetcher, "last_error", ""):
                 entry["error"] = fetcher.last_error
             if failures == max_failures and i + 1 < len(todo):
@@ -479,13 +548,10 @@ def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int 
                           failures, len(todo) - i - 1)
         else:
             failures = 0
-            page = _entity_page(html, reg) if html else None
-            if page is None:
-                entry["status"] = "not found"
-            else:
+            if page is not None:
                 ds = registry_dataset(page, ticker, url)
                 out.extend(ds)
-                entry.update(status="ok", shareholders=len(ds.shareholdings), officers=len(ds.positions),
+                entry.update(shareholders=len(ds.shareholdings), officers=len(ds.positions),
                              beneficial_owners=len(ds.beneficial_owners))
         log.info("ODL [%d/%d] %s %s: %s", i + 1, len(todo), ticker, reg, entry["status"])
     return out, report

@@ -1,5 +1,6 @@
 """Full data pipeline: wait for Neo4j -> scrape mse.mn -> load -> hand-curated datasets
-(data/manual/) -> Open Data Lab registry -> check the datasets against the registry -> summary.
+(data/manual/) -> Open Data Lab registry -> discovery (registry pages of companies the graph
+doesn't have yet, discovery.py) -> check the datasets against the registry -> summary.
 
 Real-data runs never wipe the graph: each load is compared with the previous
 one, so people who left and stakes that changed are kept as history. Every
@@ -94,6 +95,70 @@ def validation_step(g) -> None:
                        details=rep["details"])
     except Exception as exc:
         set_status("running", "manual dataset validation failed", error=str(exc))
+        log.error(traceback.format_exc())
+
+
+def registry_step(g, part, limit, keep_lease=None) -> None:
+    """Today's shard of the Open Data Lab registry (plus data/manual/'s companies), then
+    discovery. The caller holds the registry lease; `keep_lease()` renews it. Never raises."""
+    from . import discovery, opendatalab, scraper
+
+    try:
+        from .config import settings
+
+        fetcher = scraper.Fetcher()
+        # naming the route also validates ODL_PROXY_URL (a bad value fails this step only)
+        route = fetcher.router.describe(settings.odl_base_url)
+        set_status("running", "importing Open Data Lab registry", egress=route)
+        everything = g.companies_with_reg()
+        # today's shard (discovered companies: a seventh even in a full run), plus the
+        # companies of data/manual/ (re-checked every run)
+        companies = with_registry_tickers(
+            discovery.weekly_selection(everything, g.discovered_tickers(), part), everything)
+        ods, report = opendatalab.enrich_companies(companies, fetcher=fetcher, limit=limit, progress=keep_lease)
+        found = sum(1 for e in report if e["status"] == "ok")
+        failed = sum(1 for e in report if e["status"] in ("fetch failed", "skipped"))
+        if failed and not found:
+            # nothing came back: keep the previous registry data, don't archive an empty run
+            set_status("running", "Open Data Lab unreachable", egress=route, failed=failed,
+                       error=fetcher.last_error)
+        else:
+            ods.observed_at = ods.observed_at or date.today().isoformat()
+            csv_io.write_dir(ods, "data/opendatalab")
+            csv_io.archive(ods, part="opendatalab")
+            loaded = g.load(ods)
+            set_status("running", "loaded Open Data Lab registry", companies=len(report),
+                       found=found, failed=failed, stats=loaded)
+            track(g, loaded, ods, "opendatalab")
+            # numbers the registry doesn't know rest for a while (DISCOVERY_RETRY_DAYS)
+            g.note_registry_checks([{"reg": e["reg_no"], "status": e["status"],
+                                     "ticker": e["ticker"]} for e in report])
+            discovery_step(g, fetcher, limit, keep_lease)
+    except Exception as exc:
+        set_status("running", "Open Data Lab import failed", error=str(exc))
+        log.error(traceback.format_exc())
+
+
+def discovery_step(g, fetcher, limit: int | None = None, keep_lease=None) -> None:
+    """Grow the graph: read the registry pages of companies it doesn't have yet
+    (discovery.py), up to DISCOVERY_BUDGET pages. Never raises."""
+    from . import discovery
+
+    opts = discovery.settings_from_env()
+    budget = min(opts["budget"], limit) if limit else opts["budget"]
+    if budget <= 0:
+        set_status("running", "registry discovery off (DISCOVERY_BUDGET=0)")
+        return
+    try:
+        set_status("running", "discovering companies in the Open Data Lab registry", budget=budget,
+                   max_depth=opts["max_depth"])
+        report, ds = discovery.discover(g, fetcher=fetcher, budget=budget, max_depth=opts["max_depth"],
+                                        seeds_path=opts["seeds_path"], retry_days=opts["retry_days"],
+                                        progress=keep_lease)
+        discovery.save(ds)
+        set_status("running", "registry discovery done", **discovery.summary(report))
+    except Exception as exc:
+        set_status("running", "registry discovery failed", error=str(exc))
         log.error(traceback.format_exc())
 
 
@@ -239,35 +304,16 @@ def _run(force: bool = False) -> None:
             if os.getenv("ODL_ENABLE", "1") == "0":
                 set_status("running", "Open Data Lab skipped (ODL_ENABLE=0)")
             else:
-                try:
-                    from .config import settings
-
-                    fetcher = scraper.Fetcher()
-                    # naming the route also validates ODL_PROXY_URL (a bad value fails this step only)
-                    route = fetcher.router.describe(settings.odl_base_url)
-                    set_status("running", "importing Open Data Lab registry", egress=route)
-                    everything = g.companies_with_reg()
-                    # today's shard, plus the companies of data/manual/ (re-checked every run)
-                    companies = with_registry_tickers(
-                        shard.select(everything, part, key=lambda c: c[1] or c[0]), everything)
-                    ods, report = opendatalab.enrich_companies(companies, fetcher=fetcher, limit=limit)
-                    found = sum(1 for e in report if e["status"] == "ok")
-                    failed = sum(1 for e in report if e["status"] in ("fetch failed", "skipped"))
-                    if failed and not found:
-                        # nothing came back: keep the previous registry data, don't archive an empty run
-                        set_status("running", "Open Data Lab unreachable", egress=route, failed=failed,
-                                   error=fetcher.last_error)
-                    else:
-                        ods.observed_at = ods.observed_at or date.today().isoformat()
-                        csv_io.write_dir(ods, "data/opendatalab")
-                        csv_io.archive(ods, part="opendatalab")
-                        loaded = g.load(ods)
-                        set_status("running", "loaded Open Data Lab registry", companies=len(report),
-                                   found=found, failed=failed, stats=loaded)
-                        track(g, loaded, ods, "opendatalab")
-                except Exception as exc:
-                    set_status("running", "Open Data Lab import failed", error=str(exc))
-                    log.error(traceback.format_exc())
+                # opendatalab.mn is never crawled in parallel: the daily job may be reading it now
+                lease = opendatalab.RegistryLease(g, "hosted pipeline")
+                if not lease.acquire():
+                    set_status("running", "Open Data Lab skipped: another run is reading the registry",
+                               holder=lease.holder.get("owner"), until=lease.holder.get("until"))
+                else:
+                    try:
+                        registry_step(g, part, limit, lease.keep)
+                    finally:
+                        lease.release()
 
         if os.getenv("PIPELINE_DEMO") != "1":
             validation_step(g)

@@ -54,6 +54,9 @@ class BeneficialOwner:
     owner_type: str = ""             # "person" | "organization" | ""
     since: str = ""
     source: str = ""
+    # The owner's own registration number, when the registry gives one (legal
+    # entities in the ownership chain). Discovery follows it (discovery.py).
+    owner_reg_no: str = ""
 
 
 @dataclass
