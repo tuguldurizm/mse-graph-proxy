@@ -46,3 +46,55 @@ def test_redirects_are_rechecked(client):
     r = client.get("/fetch", params={"url": "https://mse.mn/redirect-in"}, headers=h)
     assert r.status_code == 200 and r.headers["x-final-url"] == "https://mse.mn/mn/companies"
 
+
+@pytest.fixture
+def routed(monkeypatch):
+    """A proxy with an upstream forward proxy configured for opendatalab.mn."""
+    seen = []
+
+    def via(name):
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((name, request.url.host))
+            if request.url.path == "/to-odl":
+                return httpx.Response(302, headers={"location": "https://www.opendatalab.mn/search/1"})
+            return httpx.Response(200, text="ok")
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(proxy_app, "PROXY_TOKEN", "secret")
+    monkeypatch.setattr(proxy_app, "UPSTREAM_PROXY_URL", "http://user-rotate:hunter2@p.webshare.io:80")
+    monkeypatch.setattr(proxy_app, "UPSTREAM_PROXY_HOSTS", ["opendatalab.mn"])
+    monkeypatch.setattr(proxy_app, "client", via("direct"))
+    monkeypatch.setattr(proxy_app, "upstream_client", via("upstream"))
+    return TestClient(proxy_app.app), seen
+
+
+def test_upstream_proxy_carries_its_hosts_only(routed):
+    c, seen = routed
+    h = {"X-Proxy-Token": "secret"}
+    assert c.get("/fetch", params={"url": "https://www.opendatalab.mn/search/2737779"}, headers=h).status_code == 200
+    assert c.get("/fetch", params={"url": "https://mse.mn/mn/companies"}, headers=h).status_code == 200
+    assert seen == [("upstream", "www.opendatalab.mn"), ("direct", "mse.mn")]
+
+
+def test_upstream_proxy_rechosen_on_redirect(routed):
+    c, seen = routed
+    r = c.get("/fetch", params={"url": "https://mse.mn/to-odl"}, headers={"X-Proxy-Token": "secret"})
+    assert r.status_code == 200
+    assert seen == [("direct", "mse.mn"), ("upstream", "www.opendatalab.mn")]
+
+
+def test_upstream_proxy_never_leaks_credentials(routed, monkeypatch):
+    c, _ = routed
+    body = c.get("/healthz").json()
+    assert body["upstream_proxy"] == {"hosts": ["opendatalab.mn"], "route": "http://p.webshare.io:80"}
+
+    def boom(request):
+        raise httpx.ProxyError("cannot reach http://user-rotate:hunter2@p.webshare.io:80 as user-rotate")
+    monkeypatch.setattr(proxy_app, "upstream_client", httpx.AsyncClient(transport=httpx.MockTransport(boom)))
+    r = c.get("/fetch", params={"url": "https://www.opendatalab.mn/search/1"}, headers={"X-Proxy-Token": "secret"})
+    assert r.status_code == 502
+    assert "hunter2" not in r.text and "user-rotate" not in r.text and "p.webshare.io:80" in r.text
+
+
+def test_no_upstream_proxy_by_default(client):
+    assert client.get("/healthz").json()["upstream_proxy"] is None
