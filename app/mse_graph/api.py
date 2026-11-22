@@ -179,25 +179,36 @@ def feed(request: Request, ticker: str | None = None, limit: int = Query(100, le
     return Response(xml, media_type="application/atom+xml")
 
 
+# Every /api/analysis/* response carries `coverage` (issue #27, quality.coverage): how many
+# listed companies the data behind it covers. A list result comes as {"items": [...], "coverage"}.
+
+def _covered(name: str, result):
+    from . import quality
+    cov = quality.coverage(g(), name)
+    if isinstance(result, dict):
+        return {**result, "coverage": cov}
+    return {"items": result, "coverage": cov}
+
+
 @app.get("/api/analysis/interlocks")
 def interlocks(min_companies: int = 2):
-    return g().interlocks(min_companies)
+    return _covered("interlocks", g().interlocks(min_companies))
 
 
 @app.get("/api/analysis/common-owners")
 def common_owners(min_companies: int = 2):
-    return g().common_owners(min_companies)
+    return _covered("common-owners", g().common_owners(min_companies))
 
 
 @app.get("/api/analysis/board-overlap")
 def board_overlap():
-    return g().board_overlap()
+    return _covered("board-overlap", g().board_overlap())
 
 
 @app.get("/api/analysis/moves")
 def moves():
     """People who used to hold a position at one listed company and now hold one at another."""
-    return g().moves()
+    return _covered("moves", g().moves())
 
 
 # ---- governance checks (analysis.py) ---------------------------------------------
@@ -205,40 +216,40 @@ def moves():
 @app.get("/api/analysis/cycles")
 def cycles(max_len: int = 6):
     from . import analysis
-    return analysis.cycles(g(), max_len)
+    return _covered("cycles", analysis.cycles(g(), max_len))
 
 
 @app.get("/api/analysis/cross-holdings")
 def cross_holdings():
     from . import analysis
-    return analysis.cross_holdings(g())
+    return _covered("cross-holdings", analysis.cross_holdings(g()))
 
 
 @app.get("/api/analysis/conflicts")
 def conflicts(kind: str | None = Query(None, pattern="^(insider_owner|competitor|related_party)$"),
               min_stake: float = 5.0):
     from . import analysis
-    return analysis.conflicts(g(), kind, min_stake)
+    return _covered("conflicts", analysis.conflicts(g(), kind, min_stake))
 
 
 @app.get("/api/analysis/state-ownership")
 def state_ownership():
     from . import analysis
-    return analysis.state_ownership(g())
+    return _covered("state-ownership", analysis.state_ownership(g()))
 
 
 @app.get("/api/analysis/nominees")
 def nominees():
     """Holders that keep shares for others, stakes by holding type, and candidates (issue #39)."""
     from . import analysis
-    return analysis.nominees(g())
+    return _covered("nominees", analysis.nominees(g()))
 
 
 @app.get("/api/analysis/roles")
 def position_roles():
     """Current positions per standard role, and the titles no rule recognises (issue #34)."""
     from . import analysis
-    return analysis.position_roles(g())
+    return _covered("roles", analysis.position_roles(g()))
 
 
 @app.get("/api/analysis/resolution")
@@ -248,7 +259,32 @@ def resolution(min_companies: int = Query(6, ge=2), min_sectors: int = Query(4, 
     people (`suspicious_people`) and keys that may be one entity (`possible_duplicates`).
     Items a reviewer decided or dismissed are left out."""
     from . import review
-    return review.queue(g(), min_companies, min_sectors)
+    return _covered("resolution", review.queue(g(), min_companies, min_sectors))
+
+
+# ---- concentration (issue #7) and data quality (issue #8): quality.py ------------------
+
+@app.get("/api/analysis/concentration")
+def concentration(sort: str = Query("hhi", pattern="^(hhi|top1|top3|free_float|ticker)$")):
+    """Per listed company: largest direct and look-through holders, free-float estimate,
+    HHI, top-1 / top-3 shares and the owner-type mix (MSE percentages only)."""
+    from . import quality
+    return quality.concentration(g(), sort)
+
+
+@app.get("/api/companies/{ticker}/concentration")
+def company_concentration(ticker: str):
+    from . import quality
+    t = g().resolve_ticker(ticker)
+    row = quality.company_concentration(g(), g().company_keys().get(t, "company:" + t))
+    return {"concentration": row, "coverage": quality.coverage(g(), "concentration")}
+
+
+@app.get("/api/quality")
+def data_quality():
+    """The data-quality report: each listed company's data problems, most severe first."""
+    from . import quality
+    return quality.report(g())
 
 
 # ---- review decisions (issue #6) -----------------------------------------------------

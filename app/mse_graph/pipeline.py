@@ -332,7 +332,13 @@ def _run(force: bool = False) -> None:
 
         stats = g.stats()
         top = [{"name": r["name"], "companies": r["companies"]} for r in g.interlocks()[:10]]
-        set_status("done", "finished", stats=stats, top_interlocks=top)
+        try:   # data quality (#8) and coverage (#27) after each run: `PIPELINE quality` in the log
+            from . import quality
+            checked = quality.summary_line(g)
+            log.info("PIPELINE quality: %s", json.dumps(checked, ensure_ascii=False))
+        except Exception as exc:  # a report must never fail the run
+            checked = {"error": str(exc)}
+        set_status("done", "finished", stats=stats, top_interlocks=top, quality=checked)
     except Exception as exc:
         set_status("failed", "pipeline crashed", error=str(exc))
         log.error(traceback.format_exc())

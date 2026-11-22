@@ -25,6 +25,13 @@
     python -m mse_graph.cli cycles | cross-holdings | state
     python -m mse_graph.cli conflicts [--kind insider_owner|competitor|related_party]
     python -m mse_graph.cli flags    <TICKER>
+    python -m mse_graph.cli concentration [--sort hhi|top1|top3|free_float|ticker] [--json]
+                                                           largest holders, free float, HHI per company (#7)
+    python -m mse_graph.cli quality [--summary] [--json]   data problems per listed company (#8)
+    python -m mse_graph.cli coverage                       how many listed companies each kind of data covers (#27)
+
+Every analysis command ends with a coverage line (on stderr for the JSON ones, so stdout
+stays JSON): how many of the listed companies its result rests on (issue #27).
 
 Set MSE_PROXY_URL / MSE_PROXY_TOKEN to route all downloads through the fetch proxy,
 and ODL_PROXY_URL to send opendatalab.mn requests through a proxy of their own
@@ -120,6 +127,13 @@ def main(argv=None):
     p = sub.add_parser("conflicts", help="insider owners, same-sector ties, related parties")
     p.add_argument("--kind", choices=["insider_owner", "competitor", "related_party"])
     p.add_argument("--min-stake", type=float, default=5.0, help="stake that counts as influence (%%)")
+    p = sub.add_parser("concentration", help="largest holders, free-float estimate, HHI per company (#7)")
+    p.add_argument("--sort", default="hhi", choices=["hhi", "top1", "top3", "free_float", "ticker"])
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("quality", help="data-quality report: problems per listed company (#8)")
+    p.add_argument("--summary", action="store_true", help="only the number of companies per problem")
+    p.add_argument("--json", action="store_true")
+    sub.add_parser("coverage", help="how many listed companies each kind of data covers (#27)")
     p = sub.add_parser("flags", help="governance flags for one company")
     p.add_argument("ticker")
     p = sub.add_parser("owners", help="look-through (ultimate) owners of a company")
@@ -369,19 +383,26 @@ def main(argv=None):
                     "past": e["history"]})
         elif args.cmd == "moves":
             _print(g.moves())
+            _coverage(g, "moves")
         elif args.cmd in ("changes", "ownership-history"):
             _history_cmd(g, args)
         elif args.cmd == "stats":
             _print(g.stats())
         elif args.cmd == "interlocks":
             _print(g.interlocks())
+            _coverage(g, "interlocks")
         elif args.cmd == "common-owners":
             _print(g.common_owners())
+            _coverage(g, "common-owners")
         elif args.cmd == "nominees":
             from . import analysis
             _print(analysis.nominees(g))
+            _coverage(g, "nominees")
         elif args.cmd == "board-overlap":
             _print(g.board_overlap())
+            _coverage(g, "board-overlap")
+        elif args.cmd in ("concentration", "quality", "coverage"):
+            _quality_cmd(g, args)
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":
@@ -405,10 +426,65 @@ def main(argv=None):
             else:
                 for f in analysis.company_flags(g, args.ticker):
                     print(f"{'!' if f['level'] == 'warn' else '-'} {f['text']}")
+            if args.cmd != "flags":
+                _coverage(g, {"state": "state-ownership"}.get(args.cmd, args.cmd),
+                          sys.stderr if args.cmd == "conflicts" else sys.stdout)
         elif args.cmd == "owners":
             _print(g.ultimate_owners(args.ticker))
         elif args.cmd == "path":
             _print(g.shortest_path(_resolve(g, args.a), _resolve(g, args.b)))
+
+
+def _coverage(g, analysis: str, out=None) -> None:
+    """The coverage line of an analysis (issue #27). JSON commands print it on stderr."""
+    from . import quality
+    print(f"coverage: {quality.coverage(g, analysis)['text']}", file=out or sys.stderr)
+
+
+def _quality_cmd(g, args) -> None:
+    from . import quality
+    if args.cmd == "coverage":
+        cov = quality.coverage(g)
+        for p in cov["parts"]:
+            print(f"{p['companies']:>4}/{p['of']:<4} {p['basis']}")
+        return
+    if args.cmd == "concentration":
+        res = quality.concentration(g, args.sort)
+        if args.json:
+            _print(res)
+            print(f"coverage: {res['coverage']['text']}", file=sys.stderr)
+            return
+        f = lambda v: "-" if v is None else f"{v:g}"
+        print(f"{'ticker':<8} {'HHI':>7} {'top1':>6} {'top3':>6} {'float~':>6}  largest holder / look-through")
+        for c in res["items"]:
+            big = f"{c['largest']['name']} {c['largest']['percent']:g}%" if c["largest"] else "-"
+            lt = c["largest_lookthrough"]
+            if lt and (not c["largest"] or lt["key"] != c["largest"]["key"]):
+                big += f"  /  {lt['name']} {lt['percent']:g}%"
+            bad = "" if c["plausible"] else f"  (!) sums to {c['total_percent']:g}%"
+            print(f"{c['ticker'] or '':<8} {c['hhi']:>7g} {f(c['top1']):>6} {f(c['top3']):>6} "
+                  f"{f(c['free_float_estimate']):>6}  {big}{bad}")
+        s = res["summary"]
+        print(f"{s['companies']} companies, {s['controlled']} controlled (look-through >= 50%), "
+              f"median HHI {f(s['median_hhi'])}, median free float ~{f(s['median_free_float'])}%")
+        print(f"coverage: {res['coverage']['text']}")
+        return
+    rep = quality.report(g)
+    if args.json:
+        _print({k: v for k, v in rep.items() if k != "companies"} if args.summary else rep)
+        print(f"coverage: {rep['coverage']['text']}", file=sys.stderr)
+        return
+    print(f"{rep['of']} listed companies: {rep['levels']['error']} with errors, {rep['levels']['warn']} with "
+          f"warnings, {rep['levels']['info']} with notes only, {rep['clean']} clean")
+    for code, v in sorted(rep["summary"].items(), key=lambda kv: -kv[1]["companies"]):
+        if v["companies"]:
+            print(f"  {v['level']:<5} {v['companies']:>4}  {code}")
+    if not args.summary:
+        for c in rep["companies"]:
+            print(f"{c['ticker'] or c['key']}  {c['name']}")
+            for i in c["issues"]:
+                print(f"    {i['level']:<5} {i['code']}: {i['text']}")
+    print(f"coverage: {rep['coverage']['text']}")
 
 
 def _print_changes(changes, as_json=False):
