@@ -5,3 +5,5 @@
 #   note    where the number came from
 # A seeded company is read once, then kept current by the daily registry import.
 reg_no,ticker,note
+5772842,,Бүтээгч ХХК (founded 2013-11-22): second step from Ochir Undraa Group; search results for its registry page name Тардай Гантөмөр as founder/shareholder (data/manual/ochir-undraa)
+5612837,,Өү Юу Жи ХХК (OUG; founded 2012-06-25): second step from Ochir Undraa Group; its registry page came up in search results for Тардай Гантөмөр (data/manual/ochir-undraa)
