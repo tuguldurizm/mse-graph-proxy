@@ -49,7 +49,7 @@ the first Open Data Lab import) get `baseline: true` and are not changes.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from neo4j import GraphDatabase
@@ -57,6 +57,7 @@ from neo4j import GraphDatabase
 from .config import settings
 from .models import Dataset
 from .normalize import clean, entity_key, is_aggregate, is_organization, parse_date
+from .opendatalab import REGISTER_NO_RE
 
 SCHEMA = [
     "CREATE CONSTRAINT entity_key IF NOT EXISTS FOR (e:Entity) REQUIRE e.key IS UNIQUE",
@@ -67,6 +68,10 @@ SCHEMA = [
     "CREATE INDEX position_current IF NOT EXISTS FOR ()-[r:HOLDS_POSITION]-() ON (r.current)",
     "CREATE INDEX owns_until IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.until)",
     "CREATE INDEX position_until IF NOT EXISTS FOR ()-[r:HOLDS_POSITION]-() ON (r.until)",
+    "CREATE INDEX company_reg_no IF NOT EXISTS FOR (c:Company) ON (c.reg_no)",
+    "CREATE INDEX company_register_no IF NOT EXISTS FOR (c:Company) ON (c.register_no)",
+    # registry numbers discovery tried and should leave alone for a while (discovery.py)
+    "CREATE CONSTRAINT registry_lead_reg IF NOT EXISTS FOR (l:RegistryLead) REQUIRE l.reg IS UNIQUE",
 ]
 
 # Graphs loaded before history tracking: every edge was the current state.
@@ -119,6 +124,10 @@ def _under(source: str | None, prefix: str) -> bool:
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def _days_ago(days: int) -> str:
+    return (date.today() - timedelta(days=days)).isoformat()
 
 
 def new_run_id() -> str:
@@ -231,6 +240,26 @@ class Graph:
         rows = self.run("""MATCH (m:Meta {key: 'pipeline'})
                            RETURN duration.inSeconds(m.last_scrape, datetime()).seconds / 3600.0 AS h""")
         return rows[0]["h"] if rows else None
+
+    def claim(self, name: str, owner: str, minutes: float) -> dict:
+        """Take the lease `name` for `minutes`, unless someone else holds an unexpired one.
+
+        Returns {"ok", "owner", "until"}; on failure `owner` / `until` are the holder's.
+        The hosted pipeline and the daily job both read opendatalab.mn, which must never
+        be crawled in parallel: each takes the "registry" lease first (see pipeline.py, cli.py).
+        """
+        return self.run(
+            """
+            MERGE (m:Meta {key: $k})
+            WITH m, m.until IS NULL OR m.until < datetime() OR m.owner = $owner AS free
+            SET m.owner = CASE WHEN free THEN $owner ELSE m.owner END,
+                m.until = CASE WHEN free THEN datetime() + duration({seconds: toInteger($secs)}) ELSE m.until END
+            RETURN free AS ok, m.owner AS owner, toString(m.until) AS until
+            """, k="lease:" + name, owner=owner, secs=minutes * 60)[0]
+
+    def release(self, name: str, owner: str) -> None:
+        self.run("MATCH (m:Meta {key: $k}) WHERE m.owner = $owner SET m.until = null",
+                 k="lease:" + name, owner=owner)
 
     def manual_digest(self, name: str) -> str | None:
         """Fingerprint of the hand-curated dataset `name` as last loaded (see pipeline.load_manual)."""
@@ -576,6 +605,11 @@ class Graph:
             return {}
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
+        # An owner the registry names by its registration number is that company,
+        # whatever it is called on the page.
+        reg_map = {row["reg"]: row["key"] for row in self.run(
+            """MATCH (c:Company) UNWIND [x IN [c.reg_no, c.register_no] WHERE x =~ $re] AS reg
+               RETURN reg, c.key AS key""", re=REGISTER_NO_RE)}
         snaps = {t.upper(): p for t, p in ds.snapshots.get("beneficial_owners", {}).items()}
         fresh = self._new_sources("BENEFICIAL_OWNER", snaps)
         rows = {}
@@ -583,12 +617,17 @@ class Graph:
             name = clean(b.owner_name)
             if not name:
                 continue
+            reg = "".join(ch for ch in (b.owner_reg_no or "") if ch.isdigit())
             key = entity_key(name, b.owner_type)
-            label = "Company" if key in alias_map else (
-                "Organization" if (b.owner_type or ("organization" if is_organization(name) else "person"))
-                .startswith("org") else "Person")
+            if reg in reg_map:
+                key, label = reg_map[reg], "Company"
+            else:
+                label = "Company" if key in alias_map else (
+                    "Organization" if (b.owner_type or ("organization" if is_organization(name) else "person"))
+                    .startswith("org") else "Person")
+                key = alias_map.get(key, key)
             ticker = b.company_ticker.upper()
-            rows[(ticker, key)] = {"ticker": ticker, "key": alias_map.get(key, key), "name": name,
+            rows[(ticker, key)] = {"ticker": ticker, "key": key, "name": name, "reg": reg or None,
                                    "label": label, "since": _opt(parse_date(b.since)), "source": b.source,
                                    "baseline": ticker in fresh}
         rows = list(rows.values())
@@ -612,6 +651,7 @@ class Graph:
             ON CREATE SET b.first_seen = $when, b.opened_run = $run, b.new = true,
                           b.baseline = CASE WHEN r.baseline THEN true END
             SET b.since = coalesce(r.since, b.since), b.source = r.source,
+                b.owner_reg = coalesce(r.reg, b.owner_reg),
                 b.last_seen = CASE WHEN coalesce(b.last_seen, '') < $when THEN $when ELSE b.last_seen END
             WITH b, b.new AS new
             REMOVE b.new
@@ -659,17 +699,128 @@ class Graph:
             rows=rows,
         )
 
-    def companies_with_reg(self) -> list[tuple[str, str]]:
+    def companies_with_reg(self, retry_days: int = 30) -> list[tuple[str, str]]:
         """(ticker, number to look up in the registry) of every company that has one, listed first.
 
         The 7-digit register number (`register_no`) wins over `reg_no`, which for
-        listed companies is mse.mn's 10-digit state registration number."""
+        listed companies is mse.mn's 10-digit state registration number. Only numbers
+        that can be register numbers count, and a number the registry answered "not
+        found" for is left out for `retry_days` (see note_registry_checks)."""
         return [(r["t"], r["reg"]) for r in self.run(
             """
-            MATCH (c:Company) WHERE coalesce(c.register_no, c.reg_no, '') <> ''
-            RETURN c.ticker AS t, coalesce(c.register_no, c.reg_no) AS reg
+            MATCH (c:Company)
+            WITH c, coalesce(c.register_no, c.reg_no) AS reg
+            WHERE reg =~ $re AND NOT EXISTS {
+                MATCH (l:RegistryLead {reg: reg}) WHERE l.status = 'not found' AND l.checked_at >= $after }
+            RETURN c.ticker AS t, reg
             ORDER BY coalesce(c.listed, true) DESC, c.ticker
-            """)]
+            """, re=REGISTER_NO_RE, after=_days_ago(retry_days))]
+
+    # ---- registry discovery (discovery.py) ------------------------------------
+
+    def note_registry_checks(self, rows: list[dict]) -> None:
+        """Remember registry numbers that led nowhere, so they rest for a while.
+
+        `rows`: {"reg", "status", "name"?, "ticker"?}. "not found" and "name clash"
+        are stored as (:RegistryLead) with today's date; "ok" forgets the number.
+        Other statuses (a failed download) are not remembered: the next run tries again.
+        """
+        keep = [{"reg": r["reg"], "status": r["status"], "name": r.get("name") or None,
+                 "ticker": r.get("ticker") or None}
+                for r in rows if r.get("reg") and r.get("status") in ("not found", "name clash")]
+        if keep:
+            self.run(
+                """
+                UNWIND $rows AS r
+                MERGE (l:RegistryLead {reg: r.reg})
+                SET l.status = r.status, l.checked_at = $today,
+                    l.name = coalesce(r.name, l.name), l.ticker = coalesce(r.ticker, l.ticker)
+                """, rows=keep, today=_today())
+        ok = sorted({r["reg"] for r in rows if r.get("reg") and r.get("status") == "ok"})
+        if ok:
+            self.run("UNWIND $regs AS reg MATCH (l:RegistryLead {reg: reg}) DELETE l", regs=ok)
+
+    def discovered_tickers(self) -> set[str]:
+        """Companies discovery added (see discovery.weekly_selection)."""
+        return {r["t"] for r in self.run("MATCH (c:Company) WHERE c.discovered_at IS NOT NULL RETURN c.ticker AS t")}
+
+    def resting_registry_numbers(self, retry_days: int = 30) -> set[str]:
+        """Numbers noted as dead ends (note_registry_checks) within the last `retry_days`."""
+        return {r["reg"] for r in self.run("MATCH (l:RegistryLead) WHERE l.checked_at >= $after RETURN l.reg AS reg",
+                                           after=_days_ago(retry_days))}
+
+    def owner_leads(self, max_depth: int, retry_days: int = 30) -> list[dict]:
+        """Registry numbers of owners in beneficial-owner chains that the graph has no
+        company for yet: {"reg", "name", "owner_key", "depth", "via"}.
+
+        A company's depth is how many such steps it is from the companies the graph
+        started with (listed, hand-curated, seeds: 0); a lead is one deeper than the
+        shallowest company whose page names it. Numbers noted as dead ends rest for
+        `retry_days`."""
+        return self.run(
+            """
+            MATCH (e:Entity)-[b:BENEFICIAL_OWNER {current: true}]->(c:Company)
+            WHERE b.owner_reg IS NOT NULL
+            WITH b.owner_reg AS reg, e, c
+            WITH reg, collect(DISTINCT e) AS owners, min(coalesce(c.discovery_depth, 0)) + 1 AS depth,
+                 collect(DISTINCT c.ticker) AS via
+            WHERE depth <= $max_depth
+              AND NOT EXISTS { MATCH (x:Company) WHERE x.reg_no = reg OR x.register_no = reg }
+              AND NOT EXISTS { MATCH (l:RegistryLead {reg: reg}) WHERE l.checked_at >= $after }
+            RETURN reg, owners[0].name AS name, owners[0].key AS owner_key, depth, via
+            ORDER BY depth, size(via) DESC, reg
+            """, max_depth=max_depth, after=_days_ago(retry_days))
+
+    def unread_companies(self, retry_days: int = 30) -> list[dict]:
+        """Companies with a register number whose registry page was never read (a new
+        listing, a new hand-curated company): {"ticker", "name", "reg", "depth"}."""
+        return self.run(
+            """
+            MATCH (c:Company) WHERE c.registry_url IS NULL
+            WITH c, coalesce(c.register_no, c.reg_no) AS reg
+            WHERE reg =~ $re AND NOT EXISTS {
+                MATCH (l:RegistryLead {reg: reg}) WHERE l.checked_at >= $after }
+            RETURN c.ticker AS ticker, c.name AS name, reg, coalesce(c.discovery_depth, 0) AS depth
+            ORDER BY coalesce(c.listed, true) DESC, c.ticker
+            """, re=REGISTER_NO_RE, after=_days_ago(retry_days))
+
+    def company_registers(self) -> dict[str, dict]:
+        """ticker -> {"reg": its register number or None, "listed": bool}."""
+        return {r["t"]: {"reg": r["reg"], "listed": r["listed"]} for r in self.run(
+            """
+            MATCH (c:Company)
+            RETURN c.ticker AS t, coalesce(c.listed, true) AS listed,
+                   [x IN [c.register_no, c.reg_no] WHERE x =~ $re][0] AS reg
+            """, re=REGISTER_NO_RE)}
+
+    def listed_without_register_no(self) -> list[dict]:
+        """Listed companies the registry can't be asked about yet: no register number."""
+        return self.run(
+            """
+            MATCH (c:Company) WHERE coalesce(c.listed, true)
+              AND NOT coalesce(c.register_no, c.reg_no, '') =~ $re
+            RETURN c.ticker AS ticker, c.name AS name, c.reg_no AS reg_no ORDER BY c.ticker
+            """, re=REGISTER_NO_RE)
+
+    def mark_discovered(self, rows: list[dict]) -> None:
+        """Record how discovery found companies: {"ticker", "via", "depth", "kind"}.
+        Companies it added get `discovered_at` / `discovered_via` / `discovery_depth`;
+        companies it found a register number for get `register_no_found_via`."""
+        self.run(
+            """
+            UNWIND $rows AS r
+            MATCH (c:Company {ticker: r.ticker})
+            CALL (r, c) {
+                WITH r, c WHERE r.kind = 'added'
+                SET c.discovered_at = coalesce(c.discovered_at, $today),
+                    c.discovered_via = r.via,
+                    c.discovery_depth = coalesce(c.discovery_depth, r.depth)
+            }
+            CALL (r, c) {
+                WITH r, c WHERE r.kind = 'attached' AND size(r.via) > 0
+                SET c.register_no_found_via = r.via, c.register_no_found_at = $today
+            }
+            """, rows=rows, today=_today())
 
     def _merge_orgs_into_companies(self):
         rows = self.run(
@@ -688,6 +839,14 @@ class Graph:
                     MATCH (o)-[old:OWNS]->(t:Company)
                     WHERE t <> c AND NOT (old.current AND EXISTS { (c)-[:OWNS {current: true}]->(t) })
                     CREATE (c)-[n:OWNS]->(t)
+                    SET n = properties(old)
+                }
+                CALL (o, c) {
+                    // ... and its place in other companies' beneficial-owner chains
+                    MATCH (o)-[old:BENEFICIAL_OWNER]->(t:Company)
+                    WHERE t <> c AND NOT (coalesce(old.current, false) AND
+                                          EXISTS { (c)-[:BENEFICIAL_OWNER {current: true}]->(t) })
+                    CREATE (c)-[n:BENEFICIAL_OWNER]->(t)
                     SET n = properties(old)
                 }
                 DETACH DELETE o

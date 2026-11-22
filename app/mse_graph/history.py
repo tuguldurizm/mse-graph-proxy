@@ -218,6 +218,8 @@ WHERE ($ticker IS NULL OR c.ticker = $ticker) AND $key IS NULL
   AND coalesce(CASE WHEN $run IS NULL THEN c.first_seen >= $since ELSE c.first_run = $run END, false)
   // the very first load adds every company: that is the baseline, not a change
   AND c.first_seen > $origin
+  // nor is a company discovery found in the registry (discovery.py): the graph learnt of it
+  AND c.discovered_at IS NULL
   // an unlisted company (a subsidiary, a registry shareholder) is news only if it
   // came with a change, not with a source's baseline (e.g. a first read of a
   // company's list of subsidiaries)

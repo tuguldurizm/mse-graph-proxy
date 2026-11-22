@@ -1,0 +1,7 @@
+# Registry numbers for discovery to read (mse_graph/discovery.py), one per row.
+#   reg_no  the 7-digit register number used by https://www.opendatalab.mn/search/<reg_no>
+#   ticker  optional: the company in the graph it belongs to (e.g. a listed company whose
+#           mse.mn profile gives only the 10-digit state registration number)
+#   note    where the number came from
+# A seeded company is read once, then kept current by the daily registry import.
+reg_no,ticker,note
