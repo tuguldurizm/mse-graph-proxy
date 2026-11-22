@@ -7,6 +7,7 @@ graph node.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 
@@ -132,3 +133,69 @@ def parse_date(value: str | None) -> str:
             return f"{y}-{int(mo):02d}"
         return y
     return text
+
+
+# ---- positions: standard role vocabulary (issue #34) ------------------------
+
+ROLES_STD = ("chair", "vice_chair", "board_member", "independent_director", "ceo", "deputy_ceo",
+             "cfo", "other_executive", "secretary", "supervisory", "unknown")
+
+# Checked in order; the first match wins, so the narrow roles come before the broad ones
+# ("ТУЗ-ийн нарийн бичгийн дарга" is the secretary, not the chair; "Гүйцэтгэх захирлын
+# орлогч" is a deputy, not the CEO; "Санхүү эрхэлсэн дэд захирал" runs finance, so the CFO).
+_BOARD = r"(туз|төлөөлөн удирдах|удирдах зөвлөл|board)"
+_ROLE_RULES = [
+    ("secretary", r"нарийн бичг|secretary"),
+    ("supervisory", r"хяналтын зөвлөл|хянан шалгах|ревиз|supervisory"),
+    ("vice_chair", r"(дэд|орлогч) дарга|vice[ -]?chair|deputy chair"),
+    ("chair", _BOARD + r".*дарга|chair"),
+    ("cfo", r"санхүү\S*\s+(\S+\s+)?захир|санхүү эрхэлсэн|cfo|chief financial|financ\S* director"),
+    ("deputy_ceo", r"(дэд|орлогч)\s+(\S+\s+)?захир|захирлын (орлогч|туслах)|"
+                   r"deputy|vice[ -]?president|дэд ерөнхийлөгч"),
+    # "захир" also covers the genitive: "Гүйцэтгэх захирлын үүрэг гүйцэтгэгч" (acting CEO)
+    ("ceo", r"гүйцэтгэх захир|ерөнхий захир|^захирал$|ceo|chief executive|managing director|"
+            r"general director"),
+    ("independent_director", r"хараат бус|independent"),
+    ("board_member", _BOARD + r"|гишүүн|member|director"),
+    ("other_executive", r"захир|менежер|manager|officer|executive|нягтлан|accountant|"
+                        r"мэргэжилтэн|specialist|ерөнхийлөгч|president|дарга|head|зөвлөх|advis"),
+]
+_ROLE_RES = [(role, re.compile(rx, re.IGNORECASE)) for role, rx in _ROLE_RULES]
+# Changes whenever the rules (or post_key) change, so graph.migrate_positions recomputes every edge.
+ROLES_VERSION = hashlib.sha1((repr(_ROLE_RULES) + "|post-v1").encode()).hexdigest()[:12]
+_TITLE_KEY_RE = re.compile(r"[^\w]+")
+
+
+def role_std(title: str | None, role: str | None = None) -> str:
+    """The standard role for a free-text position title (one of ROLES_STD).
+
+    `role` is the source's coarse "board" / "executive": a bare "Дарга" in a
+    board table is the chair. Titles that match no pattern are "unknown", for the
+    data-quality report to list.
+    """
+    t = clean(title).casefold()
+    if not t:
+        return "unknown"
+    if role == "board" and re.fullmatch(r"дарга|chair(man|woman|person)?", t):
+        return "chair"
+    for std, rx in _ROLE_RES:
+        if rx.search(t):
+            return std
+    return "unknown"
+
+
+def post_key(title: str | None, role: str | None = None) -> str:
+    """The seat a position occupies: open positions merge on (person, company, post_key).
+
+    Two spellings of one seat ("Гүйцэтгэх захирал" / "Гүйцэтгэх захирал (CEO)") give the
+    same key, so a respelt title refreshes the stint instead of closing it. An
+    independent director sits on the board, so both share "board_member". Titles too
+    vague to identify a seat (other_executive, unknown) keep their own wording, so
+    "Маркетингийн захирал" and "Хуулийн хэлтсийн дарга" stay two posts.
+    """
+    std = role_std(title, role)
+    if std == "independent_director":
+        return "board_member"
+    if std in ("other_executive", "unknown"):
+        return std + ":" + _TITLE_KEY_RE.sub(" ", clean(title).casefold()).strip()
+    return std

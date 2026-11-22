@@ -93,6 +93,12 @@ def main(argv=None):
                        help="compare data/manual/ datasets with the Open Data Lab registry data in the graph")
     p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
     p.add_argument("--summary", action="store_true", help="counts only, no per-company details")
+    p = sub.add_parser("group-people",
+                       help="people of the data/manual/ groups and the other companies the graph links them to")
+    p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
+    p.add_argument("--dataset", help="one group, e.g. ochir-undraa")
+    p.add_argument("--past", action="store_true", help="include past stakes and posts elsewhere")
+    p.add_argument("--summary", action="store_true", help="counts and company lists only")
     p = sub.add_parser("rebuild-history", help="wipe the graph and replay every archived scrape in order")
     p.add_argument("root", nargs="?", default="data/archive")
 
@@ -318,6 +324,10 @@ def main(argv=None):
         elif args.cmd == "validate-manual":
             from .manual import validate_manual
             rep = validate_manual(g, args.root)
+            _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
+        elif args.cmd == "group-people":
+            from .manual import group_people
+            rep = group_people(g, args.root, dataset=args.dataset, past=args.past)
             _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
         elif args.cmd == "rebuild-history":
             dirs = csv_io.archived_snapshots(args.root)

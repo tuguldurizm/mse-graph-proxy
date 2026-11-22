@@ -7,7 +7,7 @@ Graph model
 (:Entity:Organization {key, name})           -- non-listed corporate / state shareholders
 
 (holder:Entity)-[:OWNS {percent, shares, as_of, source, sources, <history>}]->(:Company)
-(:Person)-[:HOLDS_POSITION {title, role, since, source, sources, <history>}]->(:Company)
+(:Person)-[:HOLDS_POSITION {post, role_std, title, titles, role, since, source, sources, <history>}]->(:Company)
 (owner:Entity)-[:BENEFICIAL_OWNER {since, source, <history>}]->(:Company)  -- declared to the registry (Open Data Lab)
 
     <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline
@@ -16,6 +16,12 @@ Graph model
 snapshot of the company, can change or close it. `sources` lists every source
 that reported it (mse.mn and/or the Open Data Lab registry). A source without
 a percentage never clears one that another source gave.
+
+A position's `post` (normalize.post_key) is the seat it fills, e.g. "ceo" or
+"board_member"; `role_std` is its standard role (normalize.ROLES_STD). Open
+positions merge on (person, company, post), so a respelt title refreshes the
+stint: `title` is the owning source's latest spelling, `titles` every spelling
+seen. `role` is the source's coarse "board" / "executive".
 
 `key` is the unique merge key (see normalize.entity_key). A shareholder whose
 name matches a listed company's name / English name is linked to that
@@ -56,7 +62,8 @@ from neo4j import GraphDatabase
 
 from .config import settings
 from .models import Dataset
-from .normalize import clean, entity_key, is_aggregate, is_organization, parse_date
+from .normalize import ROLES_VERSION, clean, entity_key, is_aggregate, is_organization, parse_date, \
+    post_key, role_std
 from .opendatalab import REGISTER_NO_RE
 
 SCHEMA = [
@@ -181,7 +188,119 @@ class Graph:
         self.run(MIGRATE, today=_today())
         for stmt in MIGRATE_CHANGES:
             self.run(stmt, today=_today())
+        self.migrate_positions()
         self.rekey_entities()
+
+    def migrate_positions(self) -> dict:
+        """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
+
+        Positions used to merge on the raw title, so "Гүйцэтгэх захирал" becoming
+        "Гүйцэтгэх захирал (CEO)" closed one stint and opened another (issue #34).
+        This sets `post` / `role_std` / `titles` on edges that lack them (on all
+        edges when the role rules changed, see normalize.ROLES_VERSION), merges open
+        edges that now share a seat, and re-joins a stint closed on the day another
+        stint of the same seat opened. Safe to run on every start.
+        """
+        done = self.run("MATCH (m:Meta {key: 'roles'}) RETURN m.version AS v")
+        redo = not done or done[0]["v"] != ROLES_VERSION
+        pairs = self.run(
+            "MATCH ()-[h:HOLDS_POSITION]->() WHERE $redo OR h.post IS NULL "
+            "RETURN DISTINCT coalesce(h.title, '') AS title, coalesce(h.role, '') AS role", redo=redo)
+        table = {r["role"] + "|" + r["title"]: {"post": post_key(r["title"], r["role"] or None),
+                                                "role_std": role_std(r["title"], r["role"] or None)}
+                 for r in pairs}
+        tagged = 0
+        if table:
+            tagged = self.run(
+                """
+                MATCH ()-[h:HOLDS_POSITION]->() WHERE $redo OR h.post IS NULL
+                WITH h, $table[coalesce(h.role, '') + '|' + coalesce(h.title, '')] AS m
+                SET h.post = m.post, h.role_std = m.role_std,
+                    h.titles = coalesce(h.titles, [x IN [h.title] WHERE x IS NOT NULL])
+                RETURN count(h) AS n
+                """, redo=redo, table=table)[0]["n"]
+        merged = self._merge_open_posts()
+        rejoined = self._rejoin_respelt_stints()
+        self.run("MERGE (m:Meta {key: 'roles'}) SET m.version = $v", v=ROLES_VERSION)
+        return {"tagged": tagged, "merged": merged, "rejoined": rejoined}
+
+    def _set_edge(self, eid: str, props: dict) -> None:
+        self.run("MATCH ()-[h]->() WHERE elementId(h) = $id SET h += $p", id=eid, p=props)
+
+    def _drop_edges(self, ids: list[str]) -> None:
+        if ids:
+            self.run("MATCH ()-[h]->() WHERE elementId(h) IN $ids DELETE h", ids=ids)
+
+    @staticmethod
+    def _union(*lists) -> list:
+        out = []
+        for xs in lists:
+            for x in xs or []:
+                if x is not None and x not in out:
+                    out.append(x)
+        return out
+
+    def _merge_open_posts(self) -> int:
+        """Open positions of one person, company and seat become one edge."""
+        groups = self.run(
+            """
+            MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)
+            WITH p, c, h.post AS post, collect({id: elementId(h), e: properties(h)}) AS hs
+            WHERE size(hs) > 1
+            RETURN hs
+            """)
+        dropped = 0
+        for g in groups:
+            hs = sorted(g["hs"], key=lambda x: (x["e"].get("first_seen") or "", x["id"]))
+            keep, rest = hs[0], hs[1:]
+            # the identity and start come from the oldest edge, the wording from the latest seen
+            latest = max(hs, key=lambda x: x["e"].get("last_seen") or "")["e"]
+            es = [x["e"] for x in hs]
+            sinces = [e.get("since") for e in es if e.get("since")]
+            self._set_edge(keep["id"], {
+                "title": latest.get("title"), "role": latest.get("role"), "role_std": latest.get("role_std"),
+                "source": latest.get("source"),
+                "titles": self._union(*[e.get("titles") or [e.get("title")] for e in es]),
+                "sources": self._union(*[e.get("sources") or [e.get("source")] for e in es]),
+                "last_seen": max(e.get("last_seen") or "" for e in es) or None,
+                "since": min(sinces) if sinces else None,
+            })
+            self._drop_edges([x["id"] for x in rest])
+            dropped += len(rest)
+        return dropped
+
+    def _rejoin_respelt_stints(self) -> int:
+        """A stint closed on the day another stint of the same seat opened was one stint."""
+        total = 0
+        for _ in range(50):  # each pass joins one link of a chain of respellings
+            pairs = self.run(
+                """
+                MATCH (p:Person)-[o:HOLDS_POSITION {current: false}]->(c:Company)<-[n:HOLDS_POSITION]-(p)
+                WHERE o.post = n.post AND o.closed_at IS NOT NULL AND n.first_seen = o.closed_at
+                  AND (o.closed_run IS NULL OR n.opened_run IS NULL OR o.closed_run = n.opened_run)
+                RETURN elementId(o) AS oid, properties(o) AS o, elementId(n) AS nid, properties(n) AS n
+                ORDER BY o.closed_at
+                """)
+            used: set[str] = set()
+            joined = 0
+            for r in pairs:
+                if r["oid"] in used or r["nid"] in used:
+                    continue
+                used.update((r["oid"], r["nid"]))
+                o, n = r["o"], r["n"]
+                self._set_edge(r["nid"], {
+                    "first_seen": o.get("first_seen"), "opened_run": o.get("opened_run"),
+                    "baseline": o.get("baseline"), "since": o.get("since") or n.get("since"),
+                    "titles": self._union(o.get("titles") or [o.get("title")], n.get("titles") or [n.get("title")]),
+                    "sources": self._union(o.get("sources") or [o.get("source")],
+                                           n.get("sources") or [n.get("source")]),
+                })
+                self._drop_edges([r["oid"]])
+                joined += 1
+            total += joined
+            if not joined:
+                break
+        return total
 
     def rekey_entities(self) -> int:
         """Give people and organisations the key the current entity_key() makes.
@@ -209,7 +328,8 @@ class Graph:
                     f"""
                     MATCH (o:Entity {{key: $old}})-[r:{rel}]->(t), (n:Entity {{key: $new}})
                     WHERE t <> n AND NOT (coalesce(r.current, false) AND EXISTS {{
-                        MATCH (n)-[x:{rel} {{current: true}}]->(t) WHERE coalesce(x.title, '') = coalesce(r.title, '') }})
+                        MATCH (n)-[x:{rel} {{current: true}}]->(t)
+                        WHERE coalesce(x.post, x.title, '') = coalesce(r.post, r.title, '') }})
                     CREATE (n)-[x:{rel}]->(t)
                     SET x = properties(r)
                     """,
@@ -518,16 +638,22 @@ class Graph:
         rows: dict[tuple, dict] = {}
         for p in ds.positions:
             ticker = p.company_ticker.upper()
+            title, role = clean(p.title), p.role or "executive"
             r = {
                 "ticker": ticker, "key": entity_key(p.person_name, "person"),
-                "name": clean(p.person_name), "title": clean(p.title), "role": p.role or "executive",
+                "name": clean(p.person_name), "title": title, "role": role,
+                "role_std": role_std(title, role), "post": post_key(title, role),
                 "since": _opt(parse_date(p.since)), "until": _opt(parse_date(p.until)),
                 "source": p.source,
                 "authoritative": ticker in snaps and _under(p.source, snaps[ticker]) and not ds.supplementary,
                 "baseline": ticker in fresh,
             }
             if r["key"]:
-                rows[(r["ticker"], r["key"], r["title"], r["until"])] = r
+                # one row per seat and source; other spellings of the seat go into `titles`
+                k = (r["ticker"], r["key"], r["post"], r["until"], r["source"])
+                titles = rows[k]["titles"] if k in rows else []
+                r["titles"] = titles + [title] if title not in titles else titles
+                rows[k] = r
         active = [r for r in rows.values() if r["until"] is None]
         ended = [r for r in rows.values() if r["until"] is not None]
 
@@ -539,14 +665,18 @@ class Graph:
         """
         opened = self.run(
             "UNWIND $rows AS r" + merge_person + """
-            MERGE (p)-[h:HOLDS_POSITION {title: r.title, current: true}]->(c)
+            MERGE (p)-[h:HOLDS_POSITION {post: r.post, current: true}]->(c)
             ON CREATE SET h.first_seen = $when, h.opened_run = $run, h.new = true, h.source = r.source,
-                          h.baseline = CASE WHEN r.baseline THEN true END
-            WITH r, h, coalesce(h.sources, [x IN [h.source] WHERE x IS NOT NULL]) AS have
-            SET h.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END
+                          h.title = r.title, h.baseline = CASE WHEN r.baseline THEN true END
+            WITH r, h, coalesce(h.sources, [x IN [h.source] WHERE x IS NOT NULL]) AS have,
+                 coalesce(h.titles, [x IN [h.title] WHERE x IS NOT NULL]) AS spelt
+            SET h.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END,
+                h.titles = spelt + [t IN r.titles WHERE NOT t IN spelt]
             // as for stakes: another source can't take the edge over (see _load_shareholdings)
             WITH r, h, r.authoritative OR h.source = r.source OR h.source IS NULL AS owner
             SET h.role = CASE WHEN owner THEN r.role ELSE h.role END,
+                h.role_std = CASE WHEN owner OR h.role_std IS NULL THEN r.role_std ELSE h.role_std END,
+                h.title = CASE WHEN owner THEN r.title ELSE h.title END,
                 h.source = CASE WHEN owner THEN r.source ELSE h.source END,
                 h.since = coalesce(h.since, r.since),
                 h.last_seen = CASE WHEN coalesce(h.last_seen, '') < $when THEN $when ELSE h.last_seen END
@@ -562,18 +692,23 @@ class Graph:
         self.run(
             "UNWIND $rows AS r" + merge_person + """
             WITH r, p, c
-            OPTIONAL MATCH (p)-[o:HOLDS_POSITION {title: r.title, current: true}]->(c)
+            OPTIONAL MATCH (p)-[o:HOLDS_POSITION {post: r.post, current: true}]->(c)
             WHERE r.since IS NULL OR o.since IS NULL OR o.since = r.since
             CALL (r, o) {
                 WITH r, o WHERE o IS NOT NULL
+                WITH r, o, coalesce(o.titles, [x IN [o.title] WHERE x IS NOT NULL]) AS spelt
                 SET o.current = false, o.until = r.until, o.since = coalesce(o.since, r.since),
-                    o.role = r.role, o.source = r.source, o.closed_at = $when, o.closed_run = $run
+                    o.role = r.role, o.role_std = r.role_std, o.title = r.title,
+                    o.titles = spelt + [t IN r.titles WHERE NOT t IN spelt],
+                    o.source = r.source, o.closed_at = $when, o.closed_run = $run
             }
             CALL (r, p, c, o) {
                 WITH r, p, c, o WHERE o IS NULL
-                MERGE (p)-[h:HOLDS_POSITION {title: r.title, current: false, until: r.until}]->(c)
-                ON CREATE SET h.first_seen = $when, h.last_seen = $when
-                SET h.role = r.role, h.source = r.source, h.since = coalesce(h.since, r.since)
+                MERGE (p)-[h:HOLDS_POSITION {post: r.post, current: false, until: r.until}]->(c)
+                ON CREATE SET h.first_seen = $when, h.last_seen = $when, h.titles = []
+                SET h.role = r.role, h.role_std = r.role_std, h.title = r.title, h.source = r.source,
+                    h.titles = h.titles + [t IN r.titles WHERE NOT t IN h.titles],
+                    h.since = coalesce(h.since, r.since)
             }
             """,
             rows=ended, when=when, run=run,
@@ -583,14 +718,14 @@ class Graph:
         seen: dict[str, list[str]] = {}
         for r in active:
             if r["ticker"] in snaps:
-                seen.setdefault(r["ticker"], []).append(r["key"] + "|" + r["title"])
+                seen.setdefault(r["ticker"], []).append(r["key"] + "|" + r["post"])
         scopes = [{"ticker": t, "prefix": snaps[t], "under": snaps[t].rstrip("/") + "/", "seen": keys}
                   for t, keys in seen.items()]
         closed = self.run(
             """
             UNWIND $scopes AS s
             MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company {ticker: s.ticker})
-            WHERE (h.source = s.prefix OR h.source STARTS WITH s.under) AND NOT (p.key + '|' + h.title) IN s.seen
+            WHERE (h.source = s.prefix OR h.source STARTS WITH s.under) AND NOT (p.key + '|' + h.post) IN s.seen
             SET h.current = false, h.until = $when, h.closed_at = $when, h.closed_run = $run
             RETURN count(h) AS n
             """,
@@ -928,7 +1063,8 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (p:Person)-[r:HOLDS_POSITION]->(e)
                 RETURN collect(CASE WHEN p IS NULL THEN NULL ELSE
-                    {{key: p.key, name: p.name, title: r.title, role: r.role, source: r.source, {period}}} END) AS people
+                    {{key: p.key, name: p.name, title: r.title, titles: r.titles, role: r.role,
+                      role_std: r.role_std, source: r.source, {period}}} END) AS people
             }}
             CALL (e) {{
                 OPTIONAL MATCH (b:Entity)-[r:BENEFICIAL_OWNER]->(e)
@@ -944,7 +1080,8 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:HOLDS_POSITION]->(c:Company)
                 RETURN collect(CASE WHEN c IS NULL THEN NULL ELSE
-                    {{key: c.key, name: c.name, ticker: c.ticker, title: r.title, role: r.role, {period}}} END) AS positions
+                    {{key: c.key, name: c.name, ticker: c.ticker, title: r.title, titles: r.titles, role: r.role,
+                      role_std: r.role_std, {period}}} END) AS positions
             }}
             RETURN e {{.*, type: {_TYPE.format("e")}}} AS entity, owners, holdings, people, positions,
                    beneficial_owners, beneficially_owns

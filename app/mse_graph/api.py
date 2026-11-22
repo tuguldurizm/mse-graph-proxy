@@ -224,6 +224,13 @@ def state_ownership():
     return analysis.state_ownership(g())
 
 
+@app.get("/api/analysis/roles")
+def position_roles():
+    """Current positions per standard role, and the titles no rule recognises (issue #34)."""
+    from . import analysis
+    return analysis.position_roles(g())
+
+
 @app.get("/api/companies/{ticker}/flags")
 def company_flags(ticker: str, min_stake: float = 5.0):
     from . import analysis

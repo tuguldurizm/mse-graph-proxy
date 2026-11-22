@@ -71,7 +71,7 @@ def drop_retracted(g, ds) -> int:
     Only current edges into the dataset's companies are looked at.
     """
     from .graph import company_key
-    from .normalize import clean, entity_key, is_aggregate
+    from .normalize import clean, entity_key, is_aggregate, post_key
 
     alias = {r["a"]: r["key"] for r in g.run("MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
     owns, posts = set(), set()
@@ -87,13 +87,13 @@ def drop_retracted(g, ds) -> int:
         owns.add((h.company_ticker.upper(), key))
     for p in ds.positions:
         if not p.until:
-            posts.add((p.company_ticker.upper(), entity_key(p.person_name, "person"), clean(p.title)))
+            posts.add((p.company_ticker.upper(), entity_key(p.person_name, "person"), post_key(p.title, p.role)))
     sources = {x.source for x in ds.shareholdings + ds.positions if x.source}
     rows = g.run(
         """
         MATCH (e:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
         WHERE c.ticker IN $tickers
-        RETURN elementId(r) AS id, type(r) AS rel, e.key AS key, c.ticker AS ticker, r.title AS title,
+        RETURN elementId(r) AS id, type(r) AS rel, e.key AS key, c.ticker AS ticker, r.post AS post,
                coalesce(r.sources, [x IN [r.source] WHERE x IS NOT NULL]) AS sources
         """, tickers=sorted(_own(ds) | _referenced(ds)))
     stale = []
@@ -102,7 +102,7 @@ def drop_retracted(g, ds) -> int:
         if not srcs or not set(srcs) <= sources or _has(srcs, (REGISTRY_HOST,) + MSE_HOSTS):
             continue
         listed = ((r["ticker"], r["key"]) in owns if r["rel"] == "OWNS"
-                  else (r["ticker"], r["key"], r["title"]) in posts)
+                  else (r["ticker"], r["key"], r["post"]) in posts)
         if not listed:
             stale.append(r["id"])
     if stale:
@@ -258,3 +258,76 @@ def validate_manual(g, root: str | Path | None = None) -> list[dict]:
             "details": companies,
         })
     return report
+
+
+# ---- group people → their other companies ----------------------------------------
+
+_GROUP = """
+MATCH (seed:Company) WHERE seed.ticker IN $tickers
+OPTIONAL MATCH (seed)-[:OWNS*1..3 {current: true}]->(sub:Company)
+WITH collect(DISTINCT seed) + collect(DISTINCT sub) AS cs
+UNWIND cs AS c
+RETURN collect(DISTINCT c.ticker) AS tickers
+"""
+
+_PEOPLE = """
+MATCH (p:Person)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]->(c:Company)
+WHERE c.ticker IN $group
+WITH p, collect(DISTINCT {ticker: c.ticker, name: c.name, rel: type(r), title: r.title,
+                          percent: r.percent}) AS inside
+OPTIONAL MATCH (p)-[o:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(x:Company)
+WHERE NOT x.ticker IN $group AND ($past OR o.current)
+WITH p, inside, collect(DISTINCT CASE WHEN x IS NULL THEN null ELSE
+       {ticker: x.ticker, name: x.name, reg_no: x.reg_no, listed: coalesce(x.listed, true),
+        rel: type(o), title: o.title, percent: o.percent, current: o.current,
+        sources: coalesce(o.sources, [s IN [o.source] WHERE s IS NOT NULL])} END) AS elsewhere
+RETURN p.key AS key, p.name AS name, inside, elsewhere
+ORDER BY size(elsewhere) DESC, p.name
+"""
+
+# owners named with a registration number in the group's beneficial-owner chains whose
+# page the graph doesn't have yet: what odl-discover reads next for this group
+_LEADS = """
+MATCH (e:Entity)-[b:BENEFICIAL_OWNER {current: true}]->(c:Company)
+WHERE c.ticker IN $group AND b.owner_reg IS NOT NULL
+  AND NOT EXISTS { MATCH (k:Company) WHERE k.reg_no = b.owner_reg }
+RETURN DISTINCT b.owner_reg AS reg_no, e.name AS owner, c.ticker AS via
+ORDER BY reg_no
+"""
+
+
+def group_people(g, root: str | Path | None = None, dataset: str | None = None,
+                 past: bool = False) -> list[dict]:
+    """For each hand-curated group (data/manual/<name>): the people in its companies and the
+    *other* companies the graph links them to, plus the registry numbers still to read.
+
+    The group is the dataset's companies plus what they own (current stakes, up to three
+    steps), so the subsidiaries discovery added from the registry count as the group's.
+    People are matched by their merge key (`normalize.entity_key`: "Т.Гантөмөр" ==
+    "Тардай Гантөмөр"), so a namesake can show up as the same person: check the sources.
+
+    Reads only the graph. Open Data Lab can't be searched by name (robots.txt), so a
+    person's other companies appear here once their registry pages are in the graph:
+    through discovery (beneficial-owner chains, data/discovery/seeds.csv) or the import.
+    """
+    out = []
+    for d in csv_io.manual_dirs(_root(root)):
+        if dataset and d.name != dataset:
+            continue
+        ds = csv_io.read_dir(d)
+        seeds = sorted(_own(ds) | _referenced(ds))
+        rows = g.run(_GROUP, tickers=seeds)
+        group = sorted(set(rows[0]["tickers"] if rows else []) | set(seeds))
+        people = [{**r, "elsewhere": sorted(r["elsewhere"], key=lambda x: (not x["current"], x["ticker"]))}
+                  for r in g.run(_PEOPLE, group=group, past=past)]
+        others = {x["ticker"] for p in people for x in p["elsewhere"]}
+        out.append({
+            "dataset": d.name,
+            "group_companies": len(group),
+            "people": len(people),
+            "people_elsewhere": sum(1 for p in people if p["elsewhere"]),
+            "other_companies": sorted(others),
+            "registry_leads": g.run(_LEADS, group=group),
+            "details": people,
+        })
+    return out
