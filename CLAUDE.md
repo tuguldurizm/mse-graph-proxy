@@ -26,8 +26,10 @@ Only `README.md`, `render.yaml`, `tests/test_app.py`, `pytest.ini` and this file
    `App code from tuguldurizm/sentry <sha>` in the body. Push it, open a PR into `main` and **merge it
    yourself**. That has been the owner's standing instruction since 2026-11-22 (sentry's `CLAUDE.md`,
    "Pull requests"). Don't merge if the tests fail or it conflicts.
-5. **Auto-deploy never fires:** start the deploy with the Render MCP tool `trigger_deploy` (workspace
-   `tea-dbgti56gekts738renl0`). Then check `list_deploys` / `list_logs`.
+5. **Auto-deploy never fires** (sentry issue #3: Render gets no GitHub webhooks for this repository).
+   About a minute after the merge, check `list_deploys`. If a `new_commit` deploy of your commit already
+   started, auto-deploy works: don't start a second one. Otherwise start the deploy with the Render MCP
+   tool `trigger_deploy` (workspace `tea-dbgti56gekts738renl0`). Then check `list_deploys` / `list_logs`.
 6. Record the deploy in sentry's `docs/CHANGELOG.md` and its "Live now" table in `docs/SYSTEM.md`.
 
 Never put secrets in this repository: it is **public**. `PROXY_TOKEN`, `UPSTREAM_PROXY_URL` (Webshare),
