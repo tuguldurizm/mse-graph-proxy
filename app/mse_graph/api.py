@@ -227,6 +227,13 @@ def state_ownership():
     return analysis.state_ownership(g())
 
 
+@app.get("/api/analysis/nominees")
+def nominees():
+    """Holders that keep shares for others, stakes by holding type, and candidates (issue #39)."""
+    from . import analysis
+    return analysis.nominees(g())
+
+
 @app.get("/api/analysis/roles")
 def position_roles():
     """Current positions per standard role, and the titles no rule recognises (issue #34)."""

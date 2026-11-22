@@ -1,0 +1,10 @@
+# Holders that keep shares for others (issue #39): custodian banks, brokerages' client
+# accounts, depositories, trusts. Their stakes are typed `nominee`: control and look-through
+# don't pass through them and they are not common or ultimate owners (holdings.py).
+# name: as a shareholder table spells it; aliases: other spellings, "|"-separated;
+# register_no: the registry's 7-digit number, when known (matches whatever name the node has);
+# kind: custodian | broker | nominee | trust.
+# Names that say it themselves (кастодиан, custody, nominee, номини, итгэмжлэл, "харилцагчийн
+# данс") need no row here. Add the rest after checking them: `cli nominees` lists candidates.
+name,register_no,kind,aliases,note
+Үнэт цаасны төвлөрсөн хадгаламжийн төв,,custodian,Mongolian Central Securities Depository|MCSD|ҮЦТХТ,the central securities depository: holds for its participants' clients

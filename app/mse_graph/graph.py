@@ -17,7 +17,8 @@ their old tickers and keys still resolve (resolve_key, resolve_ticker). An
 organisation's `org_type` is "state", "foreign", "fund" or "other": from its
 source when it says (`org_type_by: 'source'`), else from its name.
 
-(holder:Entity)-[:OWNS {percent, shares, as_of, source, sources, <history>}]->(:Company)
+(holder:Entity)-[:OWNS {percent, shares, as_of, source, sources, holding_type, holding_type_by, share_class, basis,
+                        <history>}]->(:Company)
 (:Person)-[:HOLDS_POSITION {post, role_std, title, titles, role, since, source, sources, <history>}]->(:Company)
 (owner:Entity)-[:BENEFICIAL_OWNER {since, source, <history>}]->(:Company)  -- declared to the registry (Open Data Lab)
 
@@ -47,6 +48,10 @@ A person's key is `person:<patronymic stem> <given>` for a full registry name, e
 (`person:б батболд`). An initial-form row is the full-name person at a company where exactly one
 fitting full name appears (PeopleResolver, _adopt_initials; issue #36). `name_variants` lists every
 spelling seen as "<spelling> | <source>".
+
+A stake's `holding_type` is direct, nominee (held for clients), treasury (the company's
+own shares: an edge from the company to itself) or unknown; holders kept for others are
+`nominee: true`. Analyses count only direct and unknown stakes (holdings.py, issue #39).
 
 `key` is the unique merge key (see normalize.entity_key). A shareholder whose
 name matches a listed company's name / English name is linked to that
@@ -107,12 +112,14 @@ from typing import Any
 
 from neo4j import GraphDatabase
 
+from . import holdings as hold
 from . import records as rec
 from .config import settings
 from .models import Dataset
-from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, clean, entity_key, is_aggregate, \
-    is_organization, isic_section, main_activity, org_type_from_name, parse_activity, parse_date, person_name, \
-    post_key, role_std, sector_std_name, split_activities, split_reg_numbers
+from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, basis_value, clean, entity_key, \
+    holding_type_value, is_aggregate, is_organization, is_treasury_name, isic_section, main_activity, \
+    org_type_from_name, parse_activity, parse_date, person_name, post_key, role_std, sector_std_name, \
+    share_class_value, split_activities, split_reg_numbers
 from .opendatalab import REGISTER_NO_RE
 
 log = logging.getLogger(__name__)
@@ -358,6 +365,7 @@ class Graph:
         # decisions from the identity overrides file (issue #37); `overrides` replaces the file
         self.overridden = self.apply_overrides(overrides)
         self._derive_sectors()
+        self.holdings_typed = self.classify_holdings()
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -1061,6 +1069,72 @@ class Graph:
                  rows=[{"id": r["id"], "t": org_type_from_name(r["name"])} for r in rows], v=ORG_TYPES_VERSION)
         return len(rows)
 
+    # ---- holding types (issue #39) ---------------------------------------------
+
+    def mark_nominees(self, entries: list | None = None) -> int:
+        """Mark the holders that keep shares for others (`nominee`, `nominee_kind`, `nominee_by`).
+
+        From the nominees list (holdings.read_nominees, or `entries`) and the name rules,
+        for every entity that holds or held a stake. A holder that no longer qualifies (the
+        list or the rules changed) is unmarked. Returns how many holders are nominees."""
+        idx = hold.NomineeIndex(hold.read_nominees() if entries is None else entries)
+        rows = self.run("""MATCH (e:Entity) WHERE EXISTS { (e)-[:OWNS]->(:Company) } OR e.nominee IS NOT NULL
+                           RETURN elementId(e) AS id, e.key AS key, e.name AS name, e.aliases AS aliases,
+                                  e.register_no AS reg, e.nominee_kind AS kind, e.nominee_by AS by""")
+        updates, marked = [], 0
+        for r in rows:
+            hit = idx.lookup(r["key"], r["name"] or "", r["aliases"] or (), r["reg"] or "")
+            marked += hit is not None
+            kind, by = hit or (None, None)
+            if (kind, by) != (r["kind"], r["by"]):
+                updates.append({"id": r["id"], "kind": kind, "by": by})
+        self.run("""UNWIND $rows AS r MATCH (e) WHERE elementId(e) = r.id
+                    SET e.nominee = CASE WHEN r.kind IS NULL THEN null ELSE true END,
+                        e.nominee_kind = r.kind, e.nominee_by = r.by""", rows=updates)
+        return marked
+
+    def classify_holdings(self, entries: list | None = None) -> dict:
+        """Give every stake its `holding_type` (holdings.py): what its source said, else
+        treasury for a company's own shares, nominee for a nominee holder, else direct."""
+        marked = self.mark_nominees(entries)
+        typed = self.run(
+            """
+            MATCH (e:Entity)-[o:OWNS]->(c:Company) WHERE coalesce(o.holding_type_by, '') <> 'source'
+            WITH o, CASE WHEN e = c THEN 'treasury' WHEN coalesce(e.nominee, false) THEN 'nominee'
+                         ELSE 'direct' END AS t
+            WHERE o.holding_type IS NULL OR o.holding_type <> t OR o.holding_type_by IS NULL
+            SET o.holding_type = t, o.holding_type_by = 'rule'
+            RETURN count(o) AS n
+            """)[0]["n"]
+        return {"nominees_marked": marked, "stakes_typed": typed}
+
+    def nominee_holders(self, limit: int = 200) -> list[dict]:
+        """Holders whose current stakes are held for others (nominee), with those stakes."""
+        return self.run(
+            """
+            MATCH (h:Entity)-[o:OWNS {current: true}]->(c:Company) WHERE o.holding_type = 'nominee'
+            WITH h, collect({ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}) AS stakes
+            RETURN h.key AS key, h.name AS name, h.nominee_kind AS nominee_kind, h.nominee_by AS nominee_by,
+                   [l IN labels(h) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
+                   size(stakes) AS companies, stakes
+            ORDER BY companies DESC, name LIMIT $limit
+            """, limit=limit)
+
+    def ownership_summary(self, key: str) -> dict:
+        """How a company's current reported stakes split by holding type: the percent and
+        number of holders of each, so a nominee's 30% is not read as one big owner."""
+        rows = self.run(
+            """
+            MATCH (h:Entity)-[o:OWNS {current: true}]->(c:Company {key: $key})
+            WITH coalesce(o.holding_type, 'direct') AS t, o
+            RETURN t, count(o) AS holders, sum(o.percent) AS percent
+            """, key=key)
+        out = {t: {"holders": 0, "percent": None} for t in ("direct", "nominee", "treasury", "unknown")}
+        for r in rows:
+            out[r["t"]] = {"holders": r["holders"],
+                           "percent": round(r["percent"], 4) if r["percent"] is not None else None}
+        return out
+
     def _merge_node(self, old: str, new: str) -> None:
         """Merge node `old` into node `new` (element ids): edges, names and history.
 
@@ -1082,6 +1156,12 @@ class Graph:
         `old`'s outgoing edges that list no records move, and no records do (apply_overrides).
         Returns the number of edges moved."""
         n = 0
+        if "OWNS" in rels and only is None and not bare:
+            # a company's treasury shares (issue #39) are an edge to itself: they go with it
+            n += self.run("""MATCH (o)-[r:OWNS]->(o) WHERE elementId(o) = $old
+                             MATCH (n) WHERE elementId(n) = $new AND n:Company
+                             CREATE (n)-[y:OWNS]->(n) SET y = properties(r) DELETE r
+                             RETURN count(*) AS n""", old=old, new=new)[0]["n"]
         for rel in rels:
             patterns = (("(o)-[r:{rel}]->(t)", "(n)-[x:{rel} {{current: true}}]->(t)"),
                         ("(t)-[r:{rel}]->(o)", "(t)-[x:{rel} {{current: true}}]->(n)"))
@@ -1449,6 +1529,9 @@ class Graph:
         self._note_names(people.noted)
         if adopted:
             changes["people_linked"] = adopted
+        typed = self.classify_holdings()      # nominee / treasury stakes (issue #39)
+        if typed["nominees_marked"]:
+            changes["nominees_marked"] = typed["nominees_marked"]
         self._load_facts(ds)
         merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
         if merged["companies_merged"] or merged["organizations_merged"]:
@@ -1493,8 +1576,14 @@ class Graph:
             holder = h.holder_ticker.upper()
             key = entity_key(name, h.holder_type)
             ticker = h.company_ticker.upper()
-            ov = None if holder else people.match_override(name, ticker, h.source, "shareholder", h.holder_type)
-            if ov is not None:
+            stake_type = holding_type_value(h.holding_type)
+            # the company's own shares (issue #39): an edge from the company to itself
+            treasury = not holder and (stake_type == "treasury" or is_treasury_name(name))
+            ov = None if holder or treasury else people.match_override(name, ticker, h.source, "shareholder",
+                                                                       h.holder_type)
+            if treasury:
+                key, label, method, stake_type = tkeys.get(ticker) or company_key(ticker), "Company", "treasury", "treasury"
+            elif ov is not None:
                 key, label, method = ov.target, ov.label, "manual_override"
             elif holder:
                 key, label, method = tkeys.get(holder) or company_key(holder), "Company", "holder_ticker"
@@ -1514,7 +1603,9 @@ class Graph:
             row = {
                 "ticker": ticker, "key": key, "name": name, "label": label, "org_type": _org_type(h.org_type),
                 "percent": h.percent, "shares": h.shares, "as_of": _opt(parse_date(h.as_of)),
-                "source": h.source,
+                "source": h.source, "treasury": treasury, "holding_type": stake_type,
+                "share_class": share_class_value(h.share_class),
+                "basis": basis_value(h.basis),
                 # rows from a complete snapshot of the company define its current owners
                 "in_snapshot": prefix is not None and _under(h.source, prefix),
                 "in_holdings": in_holdings,
@@ -1551,7 +1642,7 @@ class Graph:
             UNWIND $rows AS r
             MATCH (c:Company {ticker: r.ticker})
             MATCH (e:Entity {key: r.key})
-            WHERE e <> c
+            WHERE e <> c OR r.treasury        // a company holds itself only as treasury shares
             OPTIONAL MATCH (e)-[o:OWNS {current: true}]->(c)
             WITH r, c, e, o,
                  o IS NOT NULL AND (
@@ -1571,7 +1662,14 @@ class Graph:
                 CREATE (e)-[n:OWNS {current: true}]->(c)
                 SET n.percent = r.percent, n.shares = r.shares, n.as_of = r.as_of, n.source = r.source,
                     n.sources = [r.source], n.first_seen = $when, n.last_seen = $when, n.opened_run = $run,
-                    n.baseline = CASE WHEN r.baseline THEN true END, n.records = r.records
+                    n.baseline = CASE WHEN r.baseline THEN true END, n.records = r.records,
+                    // what a source said of the holding outlives a new size of the stake
+                    n.holding_type = CASE WHEN r.holding_type <> '' THEN r.holding_type
+                                          WHEN o.holding_type_by = 'source' THEN o.holding_type END,
+                    n.holding_type_by = CASE WHEN r.holding_type <> '' OR o.holding_type_by = 'source'
+                                             THEN 'source' END,
+                    n.share_class = CASE WHEN r.share_class <> '' THEN r.share_class ELSE o.share_class END,
+                    n.basis = CASE WHEN r.basis <> '' THEN r.basis ELSE o.basis END
                 WITH o WHERE o IS NOT NULL
                 SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
             }
@@ -1580,7 +1678,11 @@ class Graph:
                 SET o.last_seen = CASE WHEN coalesce(o.last_seen, '') < $when THEN $when ELSE o.last_seen END,
                     o.percent = coalesce(o.percent, r.percent),
                     o.shares = coalesce(o.shares, r.shares),
-                    o.records = coalesce(o.records, []) + [x IN r.records WHERE NOT x IN coalesce(o.records, [])]
+                    o.records = coalesce(o.records, []) + [x IN r.records WHERE NOT x IN coalesce(o.records, [])],
+                    o.holding_type = CASE WHEN r.holding_type <> '' THEN r.holding_type ELSE o.holding_type END,
+                    o.holding_type_by = CASE WHEN r.holding_type <> '' THEN 'source' ELSE o.holding_type_by END,
+                    o.share_class = CASE WHEN r.share_class <> '' THEN r.share_class ELSE o.share_class END,
+                    o.basis = CASE WHEN r.basis <> '' THEN r.basis ELSE o.basis END
                 WITH r, o, coalesce(o.sources, [x IN [o.source] WHERE x IS NOT NULL]) AS have
                 SET o.sources = CASE WHEN r.source IN have THEN have ELSE have + r.source END
                 WITH r, o WHERE NOT coalesce(r.as_of =~ $iso AND o.as_of =~ $iso AND r.as_of < o.as_of, false)
@@ -1631,6 +1733,7 @@ class Graph:
             UNWIND $scopes AS s
             MATCH (c:Company {ticker: s.ticker})-[o:OWNS {current: true}]->(t:Company)
             WHERE (o.source = s.prefix OR o.source STARTS WITH s.under) AND NOT t.ticker IN s.seen
+              AND t <> c                      // its treasury shares are in its own shareholder table
             SET o.current = false, o.until = $when, o.closed_at = $when, o.closed_run = $run
             RETURN count(o) AS n
             """,
@@ -2237,12 +2340,14 @@ class Graph:
                 OPTIONAL MATCH (h:Entity)-[r:OWNS]->(e)
                 RETURN collect(CASE WHEN h IS NULL THEN NULL ELSE
                     {{key: h.key, name: h.name, type: {_TYPE.format("h")}, source: r.source, sources: r.sources,
-                      percent: r.percent, shares: r.shares, as_of: r.as_of, {period}}} END) AS owners
+                      percent: r.percent, shares: r.shares, as_of: r.as_of, holding_type: r.holding_type,
+                      share_class: r.share_class, basis: r.basis, nominee_kind: h.nominee_kind, {period}}} END) AS owners
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:OWNS]->(t:Company)
                 RETURN collect(CASE WHEN t IS NULL THEN NULL ELSE
-                    {{key: t.key, name: t.name, ticker: t.ticker,
+                    {{key: t.key, name: t.name, ticker: t.ticker, holding_type: r.holding_type,
+                      share_class: r.share_class, basis: r.basis,
                       percent: r.percent, shares: r.shares, as_of: r.as_of, {period}}} END) AS holdings
             }}
             CALL (e) {{
@@ -2286,6 +2391,8 @@ class Graph:
         out["owners"].sort(key=lambda x: -(x["percent"] or 0))
         company = out["entity"]["type"] == "Company"
         out["related_companies"] = self.related_companies(key) if company else []
+        # current stakes by holding type (issue #39): the nominee and treasury share
+        out["ownership"] = self.ownership_summary(key) if company else None
         # dated facts (issue #38): current values, and the ones that ended (former names, old addresses)
         facts = self.company_facts(key) if company else []
         out["facts"] = [f for f in facts if f["current"]]
@@ -2295,13 +2402,14 @@ class Graph:
     def related_companies(self, key: str) -> list[dict]:
         """Other listed companies connected through a shared person or shareholder (now)."""
         return self.run(
-            """
-            MATCH (c:Company {key: $key})<-[r1:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]-(link:Entity)
-                  -[r2:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]->(o:Company)
-            WHERE o <> c
+            f"""
+            MATCH (c:Company {{key: $key}})<-[r1:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]-(link:Entity)
+                  -[r2:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(o:Company)
+            WHERE o <> c AND link <> c        // a custodian or treasury stake links nothing (issue #39)
+              AND (type(r1) <> 'OWNS' OR {hold.real('r1')}) AND (type(r2) <> 'OWNS' OR {hold.real('r2')})
             RETURN o.key AS key, o.name AS name, o.ticker AS ticker,
-                   collect(DISTINCT {key: link.key, name: link.name,
-                                     via: type(r1) + '/' + type(r2)}) AS links
+                   collect(DISTINCT {{key: link.key, name: link.name,
+                                     via: type(r1) + '/' + type(r2)}}) AS links
             ORDER BY size(links) DESC, name
             """,
             key=key,
@@ -2324,7 +2432,7 @@ class Graph:
             WITH nodes, collect(DISTINCT r) AS rels
             RETURN [n IN nodes | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                  percent: r.percent, title: r.title, role: r.role}}] AS edges
+                                  percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,
             key=key, limit=limit,
         )
@@ -2343,7 +2451,7 @@ class Graph:
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
             RETURN [n IN nodes | n {.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
                    [r IN rels | {source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                 percent: r.percent, title: r.title, role: r.role}] AS edges
+                                 percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}] AS edges
             """,
             limit=limit,
         )
@@ -2359,7 +2467,7 @@ class Graph:
             WHERE all(r IN relationships(p) WHERE r.current)
             RETURN [n IN nodes(p) | n {{.key, .name, .ticker, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                              percent: r.percent, title: r.title, role: r.role}}] AS edges
+                                              percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,
             a=a, b=b,
         )
@@ -2370,14 +2478,16 @@ class Graph:
 
         Chains never pass through the same company twice: an ownership loop would
         otherwise add a partial, depth-dependent echo of the same stake. Loops are
-        reported separately (analysis.cycles)."""
+        reported separately (analysis.cycles). Nominee and treasury stakes are not
+        ownership (issue #39): no chain passes through one, so a custodian is never an
+        ultimate owner, and a company held only by nominees is the top of its chains."""
         max_depth = max(1, min(int(max_depth), 8))
         ticker = self.resolve_ticker(ticker)
         return self.run(
             f"""
             MATCH p = (owner:Entity)-[:OWNS*1..{max_depth}]->(c:Company {{ticker: $ticker}})
-            WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL)
-              AND NOT (owner)<-[:OWNS {{current: true}}]-(:Entity)
+            WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL AND {hold.real('r')})
+              AND NOT EXISTS {{ MATCH (owner)<-[x:OWNS {{current: true}}]-(:Entity) WHERE {hold.real('x')} }}
               AND all(i IN range(0, size(nodes(p)) - 2) WHERE NOT nodes(p)[i] IN nodes(p)[i + 1..])
             WITH owner, p, reduce(x = 100.0, r IN relationships(p) | x * r.percent / 100.0) AS eff
             WITH owner, sum(eff) AS effective_percent,
@@ -2396,6 +2506,7 @@ class Graph:
         return self.run(
             """
             MATCH (p:Person)-[r:HOLDS_POSITION|OWNS|BENEFICIAL_OWNER {current: true}]->(c:Company)
+            WHERE type(r) <> 'OWNS' OR coalesce(r.holding_type, 'direct') IN ['direct', 'unknown']
             WITH p, collect(DISTINCT {ticker: c.ticker, name: c.name, key: c.key,
                                       rel: type(r), title: r.title, percent: r.percent}) AS links,
                  count(DISTINCT c) AS n
@@ -2407,11 +2518,14 @@ class Graph:
         )
 
     def common_owners(self, min_companies: int = 2, limit: int = 100) -> list[dict]:
-        """Shareholders (people, organisations or listed companies) in several listed companies."""
+        """Shareholders (people, organisations or listed companies) in several listed companies.
+
+        Only stakes they own count: custodians and other nominees are listed apart
+        (nominee_holders), and treasury shares are no one's (issue #39)."""
         return self.run(
-            """
-            MATCH (h:Entity)-[o:OWNS {current: true}]->(c:Company)
-            WITH h, collect({ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}) AS stakes
+            f"""
+            MATCH (h:Entity)-[o:OWNS {{current: true}}]->(c:Company) WHERE {hold.real('o')} AND h <> c
+            WITH h, collect({{ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}}) AS stakes
             WHERE size(stakes) >= $min
             RETURN h.key AS key, h.name AS name, [l IN labels(h) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                    size(stakes) AS companies, stakes

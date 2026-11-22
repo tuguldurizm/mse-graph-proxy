@@ -18,6 +18,9 @@ COPY mse_graph ./mse_graph
 COPY data/sample ./data/sample
 COPY data/manual ./data/manual
 COPY data/discovery ./data/discovery
+# hand decisions on identities (#37, #6) and the nominee holders list (#39)
+COPY data/overrides ./data/overrides
+COPY data/reference ./data/reference
 COPY deploy/start.sh /start.sh
 
 CMD ["/bin/bash", "/start.sh"]

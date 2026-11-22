@@ -112,6 +112,7 @@ def main(argv=None):
                    help="write the review decisions into data/overrides/identity.csv and reviewed.csv")
     sub.add_parser("interlocks")
     sub.add_parser("common-owners")
+    sub.add_parser("nominees", help="custodians and other nominee holders, stakes by holding type, candidates (#39)")
     sub.add_parser("board-overlap")
     sub.add_parser("cycles", help="ownership loops (A owns B owns ... owns A)")
     sub.add_parser("cross-holdings", help="listed companies holding shares in listed companies")
@@ -376,6 +377,9 @@ def main(argv=None):
             _print(g.interlocks())
         elif args.cmd == "common-owners":
             _print(g.common_owners())
+        elif args.cmd == "nominees":
+            from . import analysis
+            _print(analysis.nominees(g))
         elif args.cmd == "board-overlap":
             _print(g.board_overlap())
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):

@@ -70,7 +70,7 @@ RECORDS_VERSION = "records-v1"
 KINDS = ("shareholder", "officer", "beneficial_owner", "company")
 METHODS = ("exact_key", "initial_match", "alias", "holder_ticker", "register_no", "manual_override")
 CONFIDENCE = {"exact_key": 1.0, "holder_ticker": 1.0, "register_no": 1.0, "manual_override": 1.0,
-              "alias": 0.9, "initial_match": 0.8}
+              "treasury": 1.0, "alias": 0.9, "initial_match": 0.8}
 
 # the dataset fields that are the company a row was reported for, per kind
 _COMPANY_FIELD = {"shareholder": "company_ticker", "officer": "company_ticker",
@@ -79,7 +79,8 @@ _COMPANY_FIELD = {"shareholder": "company_ticker", "officer": "company_ticker",
 _RAW = {
     "shareholder": (("raw_name", "holder_name"), ("raw_percent", "percent"), ("raw_shares", "shares"),
                     ("raw_as_of", "as_of"), ("raw_type", "holder_type"), ("raw_holder_ticker", "holder_ticker"),
-                    ("raw_org_type", "org_type")),
+                    ("raw_org_type", "org_type"), ("raw_holding_type", "holding_type"),
+                    ("raw_share_class", "share_class"), ("raw_basis", "basis")),
     "officer": (("raw_name", "person_name"), ("raw_title", "title"), ("raw_role", "role"),
                 ("raw_since", "since"), ("raw_until", "until")),
     "beneficial_owner": (("raw_name", "owner_name"), ("raw_type", "owner_type"), ("raw_since", "since"),

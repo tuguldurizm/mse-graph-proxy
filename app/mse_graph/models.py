@@ -44,6 +44,12 @@ class Shareholding:
     # For an organisation: "state" | "foreign" | "fund" | "other" when the source says
     # so; otherwise the loader guesses from the name (normalize.org_type_from_name).
     org_type: str = ""
+    # What kind of holding it is (issue #39, holdings.py): "direct" | "nominee" (held for
+    # clients: custodian, broker, trust) | "treasury" (the company's own shares) | "unknown".
+    # Empty: the graph decides from the holder (data/reference/nominees.csv, name rules).
+    holding_type: str = ""
+    share_class: str = ""            # "common" | "preferred" | another class, when the source says
+    basis: str = ""                  # the percent is of "outstanding" or of "voting" shares
 
 
 @dataclass

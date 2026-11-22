@@ -264,6 +264,9 @@ def _run(force: bool = False) -> None:
                      len(g.ambiguous_people()))
         if getattr(g, "overridden", None):   # identity overrides file (#37): records re-pointed by hand
             log.info("PIPELINE identity overrides applied: %s", json.dumps(g.overridden))
+        typed = getattr(g, "holdings_typed", None)
+        if typed and typed.get("stakes_typed"):   # holding types (#39): the first start types every stake
+            log.info("PIPELINE holdings typed: %s", json.dumps(typed))
         min_hours = float(os.getenv("PIPELINE_MIN_INTERVAL_HOURS", "20"))
         since = g.hours_since_last_scrape()
         if os.getenv("PIPELINE_DEMO") == "1":
