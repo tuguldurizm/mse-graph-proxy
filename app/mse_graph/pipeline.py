@@ -262,6 +262,8 @@ def _run(force: bool = False) -> None:
         if any(people.values()):   # person identity (#36): the first start splits merged namesakes
             log.info("PIPELINE people resolved: %s, under review: %d", json.dumps(people),
                      len(g.ambiguous_people()))
+        if getattr(g, "overridden", None):   # identity overrides file (#37): records re-pointed by hand
+            log.info("PIPELINE identity overrides applied: %s", json.dumps(g.overridden))
         min_hours = float(os.getenv("PIPELINE_MIN_INTERVAL_HOURS", "20"))
         since = g.hours_since_last_scrape()
         if os.getenv("PIPELINE_DEMO") == "1":

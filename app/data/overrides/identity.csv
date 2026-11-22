@@ -1,0 +1,7 @@
+# Identity overrides (issue #37, mse_graph/records.py): who the rows that spell `name` at `company` are.
+# company: ticker or register number, or * for every company. name: as a source spells it (any spelling
+# with the same name key matches). target: person:... / org:... / company:<ticker or register no>; a person
+# key may end in #<tag> to tell namesakes apart. source (optional): source prefix. kind (optional):
+# shareholder | officer | beneficial_owner. Applied on every start and load; survives rebuild-history.
+# Example (a split): XNB,Б.Батболд,person:б батболд#xnb,,,owner,2026-11-22,a different Б.Батболд
+company,name,target,source,kind,decided_by,decided_at,note

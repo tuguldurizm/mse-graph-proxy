@@ -90,7 +90,7 @@ def drop_retracted(g, ds) -> int:
         else:
             k = entity_key(name, h.holder_type)
             key = alias.get(k) or alias.get(entity_key(name)) or (
-                people.key(name, h.company_ticker) if k.startswith("person:") else k)
+                people.key(name, h.company_ticker, kind="shareholder") if k.startswith("person:") else k)
         owns.add((h.company_ticker.upper(), key))
     for p in ds.positions:
         if not p.until:
