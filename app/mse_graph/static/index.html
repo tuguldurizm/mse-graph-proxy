@@ -182,7 +182,7 @@ async function showDetails(d) {
   const pct = p => p != null ? `${p}%` : '';
   // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
   const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
-  const reg = o => o.percent == null && /opendatalab/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
+  const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
   html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}</span><span>${pct(o.percent)}${reg(o)}</span>`);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);

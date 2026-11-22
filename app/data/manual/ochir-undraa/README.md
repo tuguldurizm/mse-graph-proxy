@@ -15,6 +15,11 @@ This session ran in the Default environment, which can't reach opendatalab.mn, a
 from search-engine results** that quote those pages (the method used for `data/mcs/` numbers), not
 from reading them. That is weaker than the Shunkhlai dataset.
 
+Rows that cite a registry page this way have a source starting with **`search:`** (for example
+`search:https://www.opendatalab.mn/search/2734745`). The validator never counts those as the registry
+reporting the row. A row counts as confirmed only once the registry import has read the page itself and
+found the same owner or officer (`mse_graph/manual.py`, `UNVERIFIED_PREFIX`).
+
 The pipeline checks this. Every company with a number is read in each registry import, whatever the
 day's shard, and `cli validate-manual` compares these rows with what the registry says. The first daily
 run after the merge (04:12 Ulaanbaatar) reads all seven pages and the two seeds. Correct any row it

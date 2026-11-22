@@ -1,8 +1,8 @@
 company_ticker,person_name,title,role,since,until,source
 ~OCHIR-UNDRAA-HOLDING,Т.Гантөмөр,Ерөнхий захирал,executive,,,https://www.mongolianminingjournal.com/a/14461
 ~OCHIR-UNDRAA-HOLDING,Б.Билигүүн,Гүйцэтгэх захирал,executive,,,https://www.oug.mn/about/governance
-~2734745,Батболд Билигүүн,ТУЗ-ийн дарга,board,,,https://www.opendatalab.mn/search/2734745
-~2734745,Ганбаатар Цогтгэрэл,Гүйцэтгэх захирал,executive,2018-03-28,,https://www.opendatalab.mn/search/2734745
-~2659603,Гантөмөр Мөнхзул,Гүйцэтгэх захирал,executive,2018-05-25,,https://www.opendatalab.mn/search/2659603
-~6273475,Дамдинбал Энхтуул,Гүйцэтгэх захирал,executive,,,https://www.opendatalab.mn/search/6273475
-~6504914,Тардай Гантөмөр,Менежер,executive,2019-12-09,,https://www.opendatalab.mn/search/6504914
+~2734745,Батболд Билигүүн,ТУЗ-ийн дарга,board,,,search:https://www.opendatalab.mn/search/2734745
+~2734745,Ганбаатар Цогтгэрэл,Гүйцэтгэх захирал,executive,2018-03-28,,search:https://www.opendatalab.mn/search/2734745
+~2659603,Гантөмөр Мөнхзул,Гүйцэтгэх захирал,executive,2018-05-25,,search:https://www.opendatalab.mn/search/2659603
+~6273475,Дамдинбал Энхтуул,Гүйцэтгэх захирал,executive,,,search:https://www.opendatalab.mn/search/6273475
+~6504914,Тардай Гантөмөр,Менежер,executive,2019-12-09,,search:https://www.opendatalab.mn/search/6504914
