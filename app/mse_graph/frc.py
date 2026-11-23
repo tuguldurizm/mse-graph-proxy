@@ -41,7 +41,7 @@ API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
 # bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
-PROBE_VERSION = 4      # 4: the import (step 2) replaces the probe in the pipeline
+PROBE_VERSION = 5      # 4: the import (step 2); 5: no FRC shareholders for listed companies, BOM fix
 
 # The typed lists behind the "org" / "sct" / "decision" pages (the site's lazy chunk 454, read
 # 2026-11-23): GET, no parameters. Custodians and brokers are the nominee list's sources (#39).
@@ -157,7 +157,7 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
         report["requests"] += 1
         u = url(path, **params)
         try:
-            return json.loads(get(u, post=True) if post else get(u))
+            return json.loads((get(u, post=True) if post else get(u)).lstrip("\ufeff"))
         except Exception as exc:          # an HTTP error, a timeout, not JSON: note it and go on
             report["errors"].append(f"{path}: {type(exc).__name__}: {str(exc)[:200]}")
             log.warning("FRC layout %s failed: %s", u, exc)
@@ -361,19 +361,46 @@ def board(ans) -> list[dict]:
     return out
 
 
+# the order details are read in: securities firms and insurers, then NBFIs, then the rest
+KIND_ORDER = tuple(LICENSED.values()) + ("nbfi", "savings_coop", "money_lender")
+
+
 def _detail_queue(g, entities: dict[str, dict], tickers: dict[str, str], budget: int, days: float) -> list[str]:
-    """Register numbers whose shareholders and board to read this run: listed first, then never
-    read, then the oldest read; none read within `days`."""
-    rows = {r["reg"]: r for r in g.run(
-        "MATCH (c:Company) WHERE c.register_no IN $regs "
-        "RETURN c.register_no AS reg, coalesce(c.listed, true) AS listed, c.frc_detail_at AS at",
-        regs=list(entities))}
+    """Register numbers whose shareholders and board to read this run: unlisted entities only (a listed
+    company's come from mse.mn: FRC's are older filings), securities firms and insurers first, then
+    NBFIs, then the rest; never-read before the oldest read; none read within `days`."""
+    listed = {r["t"] for r in g.run("MATCH (c:Company) WHERE c.ticker IN $ts AND coalesce(c.listed, true) "
+                                    "RETURN c.ticker AS t", ts=list(set(tickers.values())))}
+    at = {r["t"]: r["at"] for r in g.run("MATCH (c:Company) WHERE c.ticker IN $ts RETURN c.ticker AS t, "
+                                         "c.frc_detail_at AS at", ts=list(set(tickers.values())))}
     from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    due = [reg for reg in entities if not (rows.get(reg) or {}).get("at") or rows[reg]["at"] < cutoff]
-    due.sort(key=lambda reg: (not (rows.get(reg) or {}).get("listed", False) or tickers.get(reg, "~").startswith("~"),
-                              bool((rows.get(reg) or {}).get("at")), (rows.get(reg) or {}).get("at") or "", reg))
+
+    def rank(reg):
+        kinds = [l["kind"] for l in entities[reg]["licenses"]]
+        return min((KIND_ORDER.index(k) for k in kinds if k in KIND_ORDER), default=len(KIND_ORDER))
+    due = [reg for reg in entities if tickers[reg] not in listed and (not at.get(tickers[reg]) or at[tickers[reg]] < cutoff)]
+    due.sort(key=lambda reg: (bool(at.get(tickers[reg])), rank(reg), at.get(tickers[reg]) or "", reg))
     return due[:budget]
+
+
+def withdraw_listed(g) -> dict:
+    """Remove FRC shareholdings of listed companies (loaded by the first import on 2026-11-23, before the
+    rule that mse.mn owns a listed company's shareholders): the edges, their source records and any
+    holder left with no link at all. Idempotent."""
+    holders = [r["k"] for r in g.run(
+        "MATCH (h:Entity)-[o:OWNS]->(c:Company) WHERE coalesce(c.listed, true) AND o.source STARTS WITH $b "
+        "RETURN DISTINCT h.key AS k", b=SOURCE_BASE)]
+    if not holders:
+        return {}
+    edges = g.run("MATCH (:Entity)-[o:OWNS]->(c:Company) WHERE coalesce(c.listed, true) AND o.source STARTS WITH $b "
+                  "DELETE o RETURN count(o) AS n", b=SOURCE_BASE)[0]["n"]
+    recs = g.run("MATCH (r:Record {kind: 'shareholder'})-[:REPORTED_FOR]->(c:Company) "
+                 "WHERE coalesce(c.listed, true) AND r.source STARTS WITH $b DETACH DELETE r RETURN count(r) AS n",
+                 b=SOURCE_BASE)[0]["n"]
+    gone = g.run("MATCH (h:Entity) WHERE h.key IN $ks AND NOT h:Company AND NOT (h)--() DELETE h RETURN count(h) AS n",
+                 ks=holders)[0]["n"]
+    return {"edges": edges, "records": recs, "holders": gone}
 
 
 def build(g, entities: dict[str, dict], details: dict[str, dict], when: str):
@@ -402,7 +429,7 @@ def build(g, entities: dict[str, dict], details: dict[str, dict], when: str):
         d = details.get(reg) or {}
         if d.get("stakeholders") is not None:
             for s in d["stakeholders"]:
-                ds.shareholdings.append(Shareholding(t, s["name"], s["percent"], as_of=when, source=src))
+                ds.shareholdings.append(Shareholding(t, s["name"], s["percent"], source=src))   # FRC gives no date
             ds.mark_snapshot("shareholdings", t, src)
         if d.get("board") is not None:
             for b in d["board"]:
@@ -445,8 +472,8 @@ def step(g, get=None, budget: int | None = None, delay: float | None = None,
         report["requests"] += 1
         u = (base.rstrip("/") + "/" + path + ("?" + "&".join(f"{k}={v}" for k, v in params.items()) if params else "")
              if base else url(path, **params))
-        try:
-            return json.loads(get(u, post=True) if post else get(u))
+        try:      # license.frc.mn answers start with a byte-order mark
+            return json.loads((get(u, post=True) if post else get(u)).lstrip("\ufeff"))
         except Exception as exc:
             report["errors"].append(f"{path}: {type(exc).__name__}: {str(exc)[:160]}")
             log.warning("FRC %s failed: %s", u, exc)
@@ -478,6 +505,7 @@ def step(g, get=None, budget: int | None = None, delay: float | None = None,
             _described.add("tuz")
         details[reg] = {"stakeholders": stakeholders(sh) if sh is not None else None,
                         "board": board(tz) if tz is not None else None}
+    report["withdrawn"] = withdraw_listed(g)
     ds, tickers = build(g, entities, details, when)
     loaded = g.load(ds, observed_at=when)
     gone = write_licenses(g, entities, tickers, details, when)
