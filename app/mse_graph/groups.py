@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import holdings as hold
+from .graph import VIEW_EDGE, VIEW_NODE
 
 CONTROL_MIN = 50.0          # more than this is control
 INFLUENCE_MIN = 20.0        # at least this, and the largest block, is significant influence
@@ -394,9 +395,8 @@ def community_subgraph(g, gid: str, limit: int = 600) -> dict:
         UNWIND ns AS a
         OPTIONAL MATCH (a)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(b:Entity) WHERE b IN ns
         WITH ns, collect(r)[..$limit] AS rels
-        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: {_TYPE.format("n")}}}] AS nodes,
-               [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent,
-                             title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges""", gid=gid,
+        RETURN [n IN ns | {VIEW_NODE}] AS nodes,
+               [r IN rels | {VIEW_EDGE}] AS edges""", gid=gid,
                  limit=limit)
     if rows and rows[0]["nodes"]:
         return rows[0]
@@ -412,9 +412,8 @@ def subgraph(g, keys: list[str], limit: int = 600) -> dict:
         UNWIND ns AS a
         OPTIONAL MATCH (a)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(b:Entity) WHERE b IN ns
         WITH ns, collect(r)[..$limit] AS rels
-        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: {_TYPE.format("n")}}}] AS nodes,
-               [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent,
-                             title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges""",
+        RETURN [n IN ns | {VIEW_NODE}] AS nodes,
+               [r IN rels | {VIEW_EDGE}] AS edges""",
                  keys=keys, limit=limit)
     return rows[0] if rows else {"nodes": [], "edges": []}
 

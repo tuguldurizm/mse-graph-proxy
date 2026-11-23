@@ -212,6 +212,18 @@ PERCENT_TOLERANCE = 0.001
 _REL_KIND = {"OWNS": "shareholder", "HOLDS_POSITION": "officer", "BENEFICIAL_OWNER": "beneficial_owner"}
 
 _TYPE = "[l IN labels({0}) WHERE l IN ['Company', 'Person', 'Organization']][0]"
+# What the graph views (neighbourhood, overview, path, detected group) return for a node `n` and
+# an edge `r`. Besides the centrality scores (#29) and market cap (#31) for the node size, a node
+# carries its sector and detected group (#28) with that group's label (its anchor's ticker or
+# name), so the UI can colour and filter by them (issue #10); an edge carries `role_std` for the
+# "board ties only" filter.
+VIEW_NODE = ("n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, "
+             ".market_cap, .sector, .sector_std, .group_id, listed: CASE WHEN 'Company' IN labels(n) THEN coalesce(n.listed, true) END, "
+             "group_label: CASE WHEN n.group_id IS NULL THEN null ELSE head(COLLECT { MATCH (a:Entity {key: substring(n.group_id, 4)}) "
+             "RETURN CASE WHEN a.ticker IS NOT NULL AND NOT a.ticker STARTS WITH '~' THEN a.ticker ELSE a.name END }) END, "
+             "type: " + _TYPE.format("n") + "}")
+VIEW_EDGE = ("{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent, title: r.title, "
+             "role: r.role, role_std: r.role_std, holding_type: r.holding_type}")
 
 
 def _opt(value):
@@ -2579,32 +2591,56 @@ class Graph:
             UNWIND nodes AS n WITH collect(DISTINCT n) AS nodes, rels
             UNWIND (CASE WHEN rels = [] THEN [null] ELSE rels END) AS r
             WITH nodes, collect(DISTINCT r) AS rels
-            RETURN [n IN nodes | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
-                   [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                  percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
+            RETURN [n IN nodes | {VIEW_NODE}] AS nodes,
+                   [r IN rels | {VIEW_EDGE}] AS edges
             """,
             key=key, limit=limit,
         )
         return rows[0] if rows else {"nodes": [], "edges": []}
 
-    def overview(self, limit: int = 400) -> dict:
-        """Whole-market graph (trimmed): companies plus entities linked to 2+ companies."""
+    def overview(self, limit: int = 400, sector: str | None = None) -> dict:
+        """Whole-market graph (trimmed): companies plus entities linked to 2+ companies.
+
+        `sector` (issue #10) keeps only that sector's companies (matched on the `sector` the UI
+        shows, or the standard section letter `sector_std`), all of them, and the entities linked
+        to them: any company that holds or is held by one, anything else linked to two or more."""
         rows = self.run(
-            """
-            MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {current: true}]->(c:Company)
+            f"""
+            MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(c:Company)
+            WHERE $sector IS NULL OR c.sector = $sector OR c.sector_std = $sector
+               OR (x:Company AND (x.sector = $sector OR x.sector_std = $sector))
             WITH x, collect(DISTINCT c) AS cs, collect(r) AS rs
             WHERE size(cs) >= 2 OR x:Company
             WITH x, cs, rs LIMIT $limit
             UNWIND rs AS r
             WITH collect(DISTINCT x) + collect(DISTINCT endNode(r)) AS ns, collect(DISTINCT r) AS rels
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
-            RETURN [n IN nodes | n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
-                   [r IN rels | {source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                 percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}] AS edges
+            RETURN [n IN nodes | {VIEW_NODE}] AS nodes,
+                   [r IN rels | {VIEW_EDGE}] AS edges
             """,
-            limit=limit,
+            limit=limit, sector=(sector or None),
         )
-        return rows[0] if rows else {"nodes": [], "edges": []}
+        out = rows[0] if rows else {"nodes": [], "edges": []}
+        if sector:      # every company of the sector, also those with no link to another company
+            have = {n["key"] for n in out["nodes"]}
+            out["nodes"] += [r["n"] for r in self.run(
+                f"""MATCH (n:Company) WHERE (n.sector = $sector OR n.sector_std = $sector) AND NOT n.key IN $have
+                    RETURN {VIEW_NODE} AS n ORDER BY coalesce(n.listed, true) DESC, n.name LIMIT $limit""",
+                sector=sector, have=sorted(have), limit=limit)]
+        return out
+
+    def sectors(self) -> list[dict]:
+        """The sectors companies have (the `sector` text the UI shows), with counts, for the
+        graph's sector filter and colours (issue #10)."""
+        return self.run(
+            """
+            MATCH (c:Company) WHERE coalesce(c.sector, '') <> ''
+            RETURN c.sector AS sector, count(c) AS companies,
+                   count(CASE WHEN coalesce(c.listed, true) THEN 1 END) AS listed,
+                   head(collect(DISTINCT c.sector_std)) AS sector_std
+            ORDER BY listed DESC, companies DESC, sector
+            """
+        )
 
     def shortest_path(self, a: str, b: str, max_hops: int = 8) -> dict:
         max_hops = max(1, min(int(max_hops), 12))
@@ -2614,9 +2650,8 @@ class Graph:
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
             MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
-            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
-                   [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
-                                              percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
+            RETURN [n IN nodes(p) | {VIEW_NODE}] AS nodes,
+                   [r IN relationships(p) | {VIEW_EDGE}] AS edges
             """,
             a=a, b=b,
         )

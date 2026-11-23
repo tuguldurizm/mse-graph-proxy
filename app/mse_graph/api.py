@@ -106,8 +106,15 @@ def neighborhood(key: str, depth: int = 1):
 
 
 @app.get("/api/graph/overview")
-def overview(limit: int = 400):
-    return g().overview(limit)
+def overview(limit: int = 400, sector: str | None = None):
+    """The whole-market view; `sector` keeps one sector's companies and what links them (#10)."""
+    return g().overview(limit, sector=sector)
+
+
+@app.get("/api/sectors")
+def sectors():
+    """Sectors with their company counts, for the graph's sector filter (issue #10)."""
+    return g().sectors()
 
 
 @app.get("/api/graph/path")
