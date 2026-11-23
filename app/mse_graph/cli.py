@@ -254,8 +254,7 @@ def main(argv=None):
                                    "fixed set of read-only queries")
     p.add_argument("question", nargs="+")
     p = sub.add_parser("frc", help="import FRC's licensed entities (frc.mn port 5001; needs open egress, not a cloud "
-                                   "session): lists, licences, CEOs, and the shareholders and board of --budget entities")
-    p.add_argument("--budget", type=int, help="entities whose details to read (default FRC_DETAIL_BUDGET or 20)")
+                                   "session): lists, licences, register numbers, decisions (people: Open Data Lab)")
     p = sub.add_parser("frc-decisions", help="the FRC's decisions with the companies they name (adverse only "
                                              "unless --all)")
     p.add_argument("--all", action="store_true")
@@ -531,7 +530,7 @@ def main(argv=None):
         elif args.cmd == "frc":
             from . import frc
             logging.getLogger("mse_graph.frc").setLevel(logging.INFO)
-            res = frc.step(g, budget=args.budget)
+            res = frc.step(g)
             frc.mark_step(g, res)
             print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
         elif args.cmd == "frc-decisions":

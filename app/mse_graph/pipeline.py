@@ -189,9 +189,9 @@ def market_step(g, force: bool = False) -> None:
 
 
 def frc_step(g, force: bool = False) -> None:
-    """FRC's licensed entities (issue #10, frc.py): every list, then the shareholders and board of
-    FRC_DETAIL_BUDGET (20) entities, FRC_DELAY (5 s) apart, at most every FRC_MIN_INTERVAL_HOURS (20).
-    FRC_ENABLE=0 turns it off. Never raises."""
+    """FRC's licensed entities and decisions (issue #10, frc.py): every list, FRC_DELAY (5 s) apart, at
+    most every FRC_MIN_INTERVAL_HOURS (20). No people: Open Data Lab gives them. FRC_ENABLE=0 turns it
+    off. Never raises."""
     from . import frc
 
     if os.getenv("FRC_ENABLE", "1") == "0":
