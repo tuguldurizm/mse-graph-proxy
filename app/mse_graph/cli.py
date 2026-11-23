@@ -6,6 +6,7 @@
     python -m mse_graph.cli stats
     python -m mse_graph.cli review [--summary]           the entity-resolution review queue (issue #6)
     python -m mse_graph.cli review-pending | review-export   decisions made in the UI -> data/overrides/*.csv
+    python -m mse_graph.cli relations [--summary]        possible family links from patronymics (#32, hypotheses)
     python -m mse_graph.cli history  <name-or-ticker>      current and past positions / stakes
     python -m mse_graph.cli moves                          people who moved between listed companies
     python -m mse_graph.cli changes  [--since YYYY-MM-DD] [--ticker T] [--all] [--json]
@@ -118,6 +119,8 @@ def main(argv=None):
                        help="compare data/manual/ datasets with the Open Data Lab registry data in the graph")
     p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
     p.add_argument("--summary", action="store_true", help="counts only, no per-company details")
+    p.add_argument("--compare", action="store_true",
+                   help="counts and what changed since the last saved result, then save this one in the graph")
     p = sub.add_parser("group-people",
                        help="people of the data/manual/ groups and the other companies the graph links them to")
     p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
@@ -132,7 +135,11 @@ def main(argv=None):
     p.add_argument("--summary", action="store_true", help="counts only")
     sub.add_parser("review-pending", help="review decisions in the graph that the overrides files lack")
     sub.add_parser("review-export",
-                   help="write the review decisions into data/overrides/identity.csv and reviewed.csv")
+                   help="write the review decisions into data/overrides/identity.csv, reviewed.csv and relations.csv")
+    p = sub.add_parser("relations", help="possible family links from registry patronymics (issue #32): "
+                                         "hypotheses for review, and the confirmed links")
+    p.add_argument("--summary", action="store_true", help="counts only")
+    p.add_argument("--min-score", type=float, default=0.05)
     sub.add_parser("interlocks")
     sub.add_parser("common-owners")
     sub.add_parser("nominees", help="custodians and other nominee holders, stakes by holding type, candidates (#39)")
@@ -408,18 +415,25 @@ def main(argv=None):
             q = review.queue(g)
             _print(q["counts"] if args.summary else q)
         elif args.cmd == "review-pending":
-            from . import review
-            _print(review.pending(g))
+            from . import relations, review
+            _print({**review.pending(g), "relations": relations.pending(g)})
         elif args.cmd == "review-export":
             from . import review
             _print(review.export(g))
+        elif args.cmd == "relations":
+            from . import relations
+            _print(relations.summary(g) if args.summary else relations.review(g, args.min_score))
         elif args.cmd == "load-manual":
             from .manual import load_manual
             _print(load_manual(g, args.root, force=args.force))
         elif args.cmd == "validate-manual":
             from .manual import validate_manual
             rep = validate_manual(g, args.root)
-            _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
+            if args.compare:
+                from .manual import compare_validation
+                _print(compare_validation(g, rep))
+            else:
+                _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
         elif args.cmd == "group-people":
             from .manual import group_people
             rep = group_people(g, args.root, dataset=args.dataset, past=args.past)

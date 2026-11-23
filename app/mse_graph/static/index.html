@@ -271,6 +271,8 @@ async function showDetails(d) {
   if (d.holdings_value_mnt != null)
     html += `<div class="meta">Эзэмшлийн нийт үнэлгээ ≈ ${fmtMNT(d.holdings_value_mnt)} (${d.holdings_valued} компани, зах зээлийн үнэлгээгээр; шууд эзэмшил)</div>`;
   html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
+  html += list('Ураг төрлийн холбоо (баталгаажсан)', d.relatives,
+               r => `<span>${esc(r.name)} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
   const period = i => `<span class="meta" style="white-space:nowrap">${esc(i.since || i.first_seen || '?')} – ${esc(i.until || '?')}</span>`;
@@ -366,9 +368,13 @@ const GOV = {
       `<li class="rf warn" data-key="${esc(r.key)}"><b>${esc(r.name)}</b> · ${esc(r.sector)}<br>
        <span class="meta">${r.companies.map(c => `${esc(c.ticker || c.name)}: ${roleStr(c.roles)}`).join(' · ')}</span></li>`).join('')
        || '<li class="meta">Олдсонгүй</li>')
-    + group('Холбоотой этгээд (хоёр талд албан тушаалтай)') + (by('related_party').map(r =>
+    + group('Холбоотой этгээд (хоёр талд албан тушаалтай)') + (by('related_party').filter(r => !r.relative).map(r =>
       `<li class="rf" data-key="${esc(r.key)}"><b>${esc(r.name)}</b><br><span class="meta">
        ${esc(r.company.ticker)} (${roleStr(r.company.roles)}) ← ${fmtPct(r.percent)} ← ${esc(r.counterparty.ticker || r.counterparty.name)} (${roleStr(r.counterparty.roles)})</span></li>`).join('')
+       || '<li class="meta">Олдсонгүй</li>')
+    + group('Ураг төрлийн холбоотой этгээд (баталгаажсан, #32)') + (by('related_party').filter(r => r.relative).map(r =>
+      `<li class="rf" data-key="${esc(r.key)}"><b>${esc(r.name)}</b> · ${esc(BASIS_MN[r.relative.basis] || r.relative.basis)} ${esc(r.relative.name)}<br><span class="meta">
+       ${esc(r.company.ticker || r.company.name)} (${roleStr(r.company.roles)})${r.relation === 'same_company' ? '' : ` ${r.relation === 'shareholder' ? '←' : '→'} ${fmtPct(r.percent)} ${r.relation === 'shareholder' ? '←' : '→'} ${esc(r.counterparty.ticker || r.counterparty.name)}`}: ${esc(r.relative.name)} (${roleStr(r.counterparty.roles)}) · эх сурвалж: ${esc(r.relative.source || '')}</span></li>`).join('')
        || '<li class="meta">Олдсонгүй</li>')
     + group('Өөрийн компанийн хувьцаа эзэмшигч удирдлага') + (by('insider_owner').map(r => {
       const c = r.companies[0];
@@ -402,6 +408,15 @@ const RV_REASON = {
   many_companies: 'олон компанид албан тушаалтай', many_sectors: 'олон салбарт', different_full_names: 'өөр өөр бүтэн нэр',
   one_letter: 'нэг үсгээр зөрүүтэй', transliteration: 'латин / кирилл, ижил төстэй үсэг', missing_initial: 'эцгийн нэрийн үсэггүй',
 };
+const BASIS_MN = {sibling: 'ах дүү', parent_child: 'эцэг эх / хүүхэд', spouse: 'эхнэр нөхөр', relative: 'төрөл', none: 'холбоогүй'};
+const REL_EVIDENCE = {shared_companies: 'нэг компанид', linked_companies: 'компаниуд нь бие биенээ эзэмшдэг',
+                      same_group: 'нэг бүлэгт', same_clan: 'ижил ургийн овог'};
+const reviewPw = (ask = true) => {
+  let pw = null;
+  try { pw = sessionStorage.getItem('reviewPassword'); } catch {}
+  if (!pw && ask) pw = prompt('Хяналтын нууц үг (REVIEW_PASSWORD):');
+  return pw || null;
+};
 const nameLink = (key, name) => `<span class="name" data-open="${esc(key)}">${esc(name || key)}</span>`;
 const act = (label, payload) => `<button data-act="${esc(JSON.stringify(payload))}">${esc(label)}</button>`;
 let rvStatus = null;
@@ -434,21 +449,60 @@ async function showReview() {
       <div class="meta">${esc(p.a.companies.join(', '))} | ${esc(p.b.companies.join(', '))}</div>
       <div class="acts">${act('Нэгтгэх', {action: 'merge', key: p.suggest.merge, into: p.suggest.into})}
         ${act('Өөр', {action: 'dismiss', item: p.item})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+  // possible family links (issue #32): private hypotheses, only with the review password
+  html += group('Ураг төрлийн байж болох холбоо (таамаг, #32)');
+  html += st.writable
+    ? '<li id="relBox" class="meta">Хувийн мэдээлэл: зөвхөн нууц үгээр. <button data-rel-load="1">Нууц үгээр харах</button></li>'
+    : '<li class="meta">REVIEW_PASSWORD тохируулаагүй тул харуулахгүй (хувийн мэдээлэл).</li>';
   const groups = [...new Map(ds.map(d => [d.group, d])).values()].slice(0, 30);
   html += group(`Шийдвэрүүд (${groups.length})`);
   html += groups.map(d => `<li class="rv"><span>${esc(d.action)} · ${esc(d.type === 'identity' ? `${d.before || ''} → ${d.target}` : d.item)}</span>
       <span class="meta">${esc(d.decided_by)} · ${esc(d.decided_at)}${d.note ? ' · ' + esc(d.note) : ''}</span>
       <div class="acts">${act('Буцаах', {action: 'revoke', id: d.group})}</div></li>`).join('') || '<li class="meta">Алга</li>';
   ul.innerHTML = html;
+  if (st.writable && reviewPw(false)) await showRelations(false);
+}
+async function showRelations(ask = true) {
+  const box = document.getElementById('relBox'); if (!box) return;
+  const pw = reviewPw(ask); if (!pw) return;
+  const r = await fetch('/api/review/relations', {headers: {'X-Review-Password': pw}});
+  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} box.innerHTML = 'Нууц үг буруу.'; return; }
+  if (!r.ok) { box.innerHTML = `Алдаа: ${r.status}`; return; }
+  try { sessionStorage.setItem('reviewPassword', pw); } catch {}
+  const d = await r.json();
+  const groupOf = Object.fromEntries(d.decisions.map(x => [x.item, x.group]));
+  let html = '<li class="meta">Таамаг: эцгийн нэр давхцах нь сул нотолгоо. Баталгаажуулах хүртэл граф, анхааруулгад харагдахгүй.</li>';
+  html += d.candidates.map(c => `<li class="rv">${nameLink(c.a.key, c.a.name)} ↔ ${nameLink(c.b.key, c.b.name)}
+      <span class="meta">оноо ${c.score} · «${esc(c.patronymic)}» ${c.people_with_patronymic} хүн · ${c.evidence.map(e => esc(REL_EVIDENCE[e] || e)).join(', ')}</span>
+      <div class="meta">${esc(c.a.companies.join(', '))} | ${esc(c.b.companies.join(', '))}${c.shared_companies.length ? ' · хамтын: ' + c.shared_companies.map(esc).join(', ') : ''}${c.linked_companies.length ? ' · ' + c.linked_companies.map(p => esc(p.join(' — '))).join(', ') : ''}</div>
+      <div class="acts">${act('Холбоотой (батлах)', {action: 'relate', key: c.a.key, into: c.b.key})}
+        ${act('Холбоогүй', {action: 'dismiss', item: c.item})}</div></li>`).join('') || '<li class="meta">Таамаг алга</li>';
+  html += `<li class="meta">Баталгаажсан (${d.confirmed.length}):</li>`;
+  html += d.confirmed.map(c => `<li class="rv">${nameLink(c.a, c.a_name)} ↔ ${nameLink(c.b, c.b_name)}
+      <span class="meta">${esc(BASIS_MN[c.basis] || c.basis)} · ${esc(c.source)} · ${esc(c.decided_by)} ${esc(c.decided_at)}${c.from === 'file' ? ' · relations.csv' : ''}</span>
+      <div class="acts">${c.from === 'review' && groupOf[c.item] ? act('Буцаах', {action: 'revoke', id: groupOf[c.item]})
+        : act('Холбоогүй гэж тэмдэглэх', {action: 'relate', key: c.a, into: c.b, basis: 'none'})}</div></li>`).join('');
+  box.outerHTML = html;
 }
 async function decide(payload) {
   if (rvStatus && !rvStatus.writable) return alert('Шийдвэр гаргах боломжгүй: серверт REVIEW_PASSWORD тохируулаагүй.');
-  let pw = null;
-  try { pw = sessionStorage.getItem('reviewPassword'); } catch {}
-  if (!pw) { pw = prompt('Хяналтын нууц үг (REVIEW_PASSWORD):'); if (!pw) return; }
+  const pw = reviewPw(); if (!pw) return;
+  if (payload.action === 'relate') {
+    payload = {...payload};
+    if (!payload.basis) {
+      payload.basis = (prompt('Холбоо: sibling (ах дүү) / parent_child / spouse / relative', 'sibling') || '').trim();
+      if (!payload.basis) return;
+    }
+    if (payload.basis !== 'none') {
+      payload.source = (prompt('Эх сурвалж (заавал): холбоог баримтжуулсан нийтийн эх сурвалж. ' +
+                               'data/overrides/relations.csv-д орж нийтэд ил болно.') || '').trim();
+      if (!payload.source) return;
+    }
+  }
   if (payload.action !== 'dismiss' && payload.action !== 'keep_apart') {
     const what = payload.action === 'merge' ? `${payload.key} → ${payload.into}`
-               : payload.action === 'split' ? `${payload.key}: ${payload.companies.join(', ')} тусдаа` : payload.id;
+               : payload.action === 'split' ? `${payload.key}: ${payload.companies.join(', ')} тусдаа`
+               : payload.action === 'relate' ? `${payload.key} ↔ ${payload.into}: ${BASIS_MN[payload.basis] || payload.basis}` : payload.id;
     if (!confirm(`${payload.action}: ${what}?`)) return;
   }
   const note = payload.action === 'revoke' ? '' : (prompt('Тайлбар (заавал биш):') || '');
@@ -466,6 +520,7 @@ document.getElementById('details').addEventListener('click', ev => {
 });
 document.getElementById('analysis').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
+  const rl = ev.target.closest('button[data-rel-load]'); if (rl) return showRelations(true);
   const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
   const cb = ev.target.closest('button[data-cen-by]'); if (cb) return showCentrality({ by: cb.dataset.cenBy });
   const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });

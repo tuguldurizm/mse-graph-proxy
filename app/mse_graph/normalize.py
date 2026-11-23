@@ -98,6 +98,13 @@ def _tokens(name: str) -> list[str]:
     return [t.strip("-") for t in re.split(r"[\s.,]+", _QUOTES_RE.sub("", clean(name))) if t.strip("-")]
 
 
+def patronymic_stem(patronymic: str) -> str:
+    """The father's name in a patronymic, case-folded: "Батын" -> "бат", "Доржийн" -> "дорж"."""
+    low = (patronymic or "").casefold()
+    stem = _GENITIVE_RE.sub("", low)
+    return stem if len(stem) >= 2 else low
+
+
 def person_name(name: str) -> PersonName:
     """Take a person's name apart (see PersonName)."""
     tokens = _tokens(name)
@@ -114,8 +121,7 @@ def person_name(name: str) -> PersonName:
                           given=given, initial=initial)
     if len(low) in (2, 3) and not any(short):
         clan, patronymic, given = ([""] + tokens if len(tokens) == 2 else tokens)
-        stem = _GENITIVE_RE.sub("", patronymic.casefold())
-        stem = stem if len(stem) >= 2 else patronymic.casefold()
+        stem = patronymic_stem(patronymic)
         return PersonName("full", f"person:{stem} {given.casefold()}",
                           "person:" + " ".join(sorted([patronymic[0].casefold(), given.casefold()])),
                           given=given, initial=patronymic[0], patronymic=patronymic, clan=clan,

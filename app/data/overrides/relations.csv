@@ -1,0 +1,6 @@
+# Confirmed family links between people (issue #32, mse_graph/relations.py). Each becomes a
+# RELATED_TO edge used by the related-party check. THIS FILE IS PUBLIC (deploy mirror):
+# only links documented by a public source. a, b: person keys. basis: sibling | parent_child |
+# spouse | relative | none (none = not related: removes a link). source: where it is documented.
+# Written by `python -m mse_graph.cli review-export`.
+a,b,basis,source,decided_by,decided_at,note

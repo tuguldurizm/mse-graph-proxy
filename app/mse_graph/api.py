@@ -404,6 +404,14 @@ def _review_password() -> str:
     return os.getenv("REVIEW_PASSWORD") or os.getenv("APP_PASSWORD") or ""
 
 
+def _check_review_password(request: Request, what: str = "take decisions") -> None:
+    pw = _review_password()
+    if not pw:
+        raise HTTPException(403, f"the review is read-only here: set REVIEW_PASSWORD to {what}")
+    if not hmac.compare_digest(request.headers.get("x-review-password", "").encode(), pw.encode()):
+        raise HTTPException(401, "wrong review password")
+
+
 @app.get("/api/review/status")
 def review_status():
     from . import review
@@ -419,21 +427,18 @@ def review_decisions():
 @app.post("/api/review/decide")
 async def review_decide(request: Request):
     """Record a decision and apply it at once. Body (JSON): `action` (merge | split |
-    keep_apart | dismiss | revoke), and `key`, `into`, `companies`, `new_key`, `item`, `id`,
-    `by`, `note` as the action needs (review.decide)."""
+    keep_apart | relate | dismiss | revoke), and `key`, `into`, `companies`, `new_key`, `item`,
+    `id`, `basis`, `source`, `by`, `note` as the action needs (review.decide)."""
     from . import review
-    pw = _review_password()
-    if not pw:
-        raise HTTPException(403, "the review is read-only here: set REVIEW_PASSWORD to take decisions")
-    if not hmac.compare_digest(request.headers.get("x-review-password", "").encode(), pw.encode()):
-        raise HTTPException(401, "wrong review password")
+    _check_review_password(request)
     try:
         body = await request.json()
     except ValueError:
         raise HTTPException(400, "send a JSON body") from None
     if not isinstance(body, dict):
         raise HTTPException(400, "send a JSON object")
-    args = {k: body.get(k) for k in ("key", "into", "new_key", "item", "id", "by", "note") if body.get(k)}
+    args = {k: body.get(k) for k in ("key", "into", "new_key", "item", "id", "basis", "source", "by", "note")
+            if body.get(k)}
     if body.get("companies"):
         args["companies"] = [str(c) for c in body["companies"]][:50]
     try:
@@ -441,6 +446,17 @@ async def review_decide(request: Request):
                                                                     for k, v in args.items()})
     except review.ReviewError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/review/relations")
+def review_relations(request: Request, min_score: float = Query(0.05, ge=0, le=1),
+                     limit: int = Query(200, ge=1, le=1000)):
+    """Possible family links from registry patronymics (issue #32, relations.py): hypotheses for
+    a reviewer, with the confirmed links and their decisions. People's private relationships:
+    served only with the review password (X-Review-Password), never without one."""
+    from . import relations
+    _check_review_password(request, "see possible family links")
+    return relations.review(g(), min_score, limit)
 
 
 @app.get("/api/review/export/{name}", include_in_schema=False)
