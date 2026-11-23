@@ -188,6 +188,28 @@ def market_step(g, force: bool = False) -> None:
         log.error(traceback.format_exc())
 
 
+def frc_step(g, force: bool = False) -> None:
+    """A look at FRC's data API (issue #10, frc.py): logs `FRC layout` lines, at most every
+    FRC_MIN_INTERVAL_HOURS (20), at most FRC_MAX_REQUESTS (15) requests, FRC_DELAY (5 s) apart.
+    FRC_ENABLE=0 turns it off. Never raises."""
+    from . import frc
+
+    if os.getenv("FRC_ENABLE", "1") == "0":
+        return
+    try:
+        min_hours = float(os.getenv("FRC_MIN_INTERVAL_HOURS", "20"))
+        since = frc.hours_since_probe(g)
+        if since is not None and since < min_hours and not force and os.getenv("PIPELINE_FORCE") != "1":
+            return
+        set_status("running", "reading FRC (frc.mn)")
+        res = frc.probe()
+        frc.mark_probe(g, res)
+        log.info("PIPELINE frc: %s", json.dumps({k: res[k] for k in ("requests", "menus", "listings")} |
+                                                 {"errors": res["errors"][:3]}, ensure_ascii=False))
+    except Exception as exc:
+        log.warning("PIPELINE frc failed: %s", exc)
+
+
 def keep_awake(url: str, stop: threading.Event, interval: float = 240.0, get=None) -> int:
     """GET <url>/healthz every `interval` seconds until `stop` is set; returns the ping count.
 
@@ -356,6 +378,7 @@ def _run(force: bool = False) -> None:
         if os.getenv("PIPELINE_DEMO") != "1":
             market_step(g, force=force)
             validation_step(g)
+            frc_step(g, force=force)
 
         stats = g.stats()
         top = [{"name": r["name"], "companies": r["companies"]} for r in g.interlocks()[:10]]

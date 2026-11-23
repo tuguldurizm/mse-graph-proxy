@@ -250,6 +250,11 @@ def main(argv=None):
                             "through each opendatalab.mn route (one request per route, 11 s apart)")
     p.add_argument("--reg", default="2008572", help="registration number of the page to fetch (default %(default)s)")
 
+    p = sub.add_parser("frc-probe",
+                       help="describe FRC's data API (frc.mn, port 5001): the menu and the disclosure-like listings, "
+                            "as 'FRC layout' lines; needs open egress (not a cloud session)")
+    p.add_argument("--max-requests", type=int, help="at most this many requests (default FRC_MAX_REQUESTS or 15)")
+
     p = sub.add_parser("changes", help="who joined / left and which stakes changed, newest first")
     p.add_argument("--ticker")
     p.add_argument("--source", help="mse, opendatalab, ...")
@@ -289,6 +294,12 @@ def main(argv=None):
             with _graph() as g:
                 g.drop_demo_data()
                 _print(g.load(ds))
+        return
+
+    if args.cmd == "frc-probe":
+        from . import frc
+        logging.getLogger("mse_graph.frc").setLevel(logging.INFO)
+        print(json.dumps(frc.probe(max_requests=args.max_requests), ensure_ascii=False, indent=2))
         return
 
     if args.cmd == "diff":
