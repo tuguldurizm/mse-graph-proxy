@@ -7,10 +7,12 @@
 <script src="/static/vendor/vis-network.min.js"></script>
 <style>
   :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc;
-          --company:#2f6fb2; --person:#c46a1c; --org:#5b8a3a; --accent:#2f6fb2; }
+          --company:#2f6fb2; --person:#c46a1c; --org:#5b8a3a; --accent:#2f6fb2;
+          --none:#b9b8b2; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#151514; --panel:#1f1f1d; --ink:#ecebe6; --muted:#9a9993; --line:#33332f;
-            --company:#6aa3e0; --person:#e89a55; --org:#8fbf6b; --accent:#6aa3e0; }
+            --company:#6aa3e0; --person:#e89a55; --org:#8fbf6b; --accent:#6aa3e0;
+            --none:#55554f; }
   }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink);
@@ -34,8 +36,10 @@
   .Company { background:var(--company); } .Person { background:var(--person); } .Organization { background:var(--org); }
   .meta { color:var(--muted); font-size:12px; }
   .legend { position:absolute; top:12px; right:12px; background:var(--panel); border:1px solid var(--line);
-            border-radius:8px; padding:8px 10px; font-size:12px; display:flex; gap:10px; }
-  .legend span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:50%;
+            border-radius:8px; padding:8px 10px; font-size:12px; display:flex; gap:4px 10px; flex-wrap:wrap;
+            max-width:min(520px, calc(100% - 24px)); max-height:40%; overflow:auto; }
+  .legend .n { color:var(--muted); }
+  .legend > span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:50%;
                          margin-right:4px; background:var(--c); }
   #pathFrom, #pathTo { font-size:12px; }
   .scroll { overflow-x:auto; }
@@ -89,8 +93,20 @@
   <div class="row">
     <button id="btnOverview">Зах зээлийн тойм</button>
     <select id="depth"><option value="1">1 алхам</option><option value="2" selected>2 алхам</option><option value="3">3 алхам</option></select>
+  </div>
+
+  <h2>Өнгө, шүүлтүүр / Encode &amp; filter</h2>
+  <div class="row">
+    <select id="colorBy" title="Зангилааны өнгө (issue #10): салбар = компанийн салбар, бүлэг = илрүүлсэн бүлэг (#28)"><option value="">Өнгө: төрөл</option><option value="sector">Өнгө: салбар</option><option value="group">Өнгө: илрүүлсэн бүлэг</option></select>
     <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option><option value="market_cap">Хэмжээ: зах зээлийн үнэлгээ</option></select>
   </div>
+  <div class="row">
+    <select id="sector" title="Зөвхөн нэг салбарын компани (тоймд тухайн салбарын компаниудыг дахин ачаална)"><option value="">Салбар: бүгд</option></select>
+    <select id="minPct" title="Үүнээс бага хувьтай эзэмшлийг нуух. Хувь нь тодорхойгүй эзэмшил харагдсаар байна."><option value="0">Эзэмшил: бүгд</option><option value="1">Эзэмшил ≥ 1%</option><option value="5">Эзэмшил ≥ 5%</option><option value="10">Эзэмшил ≥ 10%</option><option value="20">Эзэмшил ≥ 20%</option><option value="50">Эзэмшил ≥ 50%</option></select>
+    <select id="ties" title="Ямар холбоо харуулах"><option value="">Холбоо: бүгд</option><option value="board">Зөвхөн ТУЗ</option><option value="positions">Зөвхөн албан тушаал</option><option value="owners">Зөвхөн эзэмшил</option></select>
+    <button id="resetFilters" title="Өнгө, хэмжээ, шүүлтүүрийг анхны байдалд">Цэвэрлэх</button>
+  </div>
+  <div class="meta" id="filterNote"></div>
 
   <h2>Холбоос олох / Path</h2>
   <div id="pathFrom" class="meta">A: — (сонгоод "A" дарна)</div>
@@ -136,7 +152,7 @@
 </aside>
 <main>
   <div id="net"></div>
-  <div class="legend">
+  <div class="legend" id="legend">
     <span style="--c:var(--company)">Компани</span>
     <span style="--c:var(--person)">Хувь хүн</span>
     <span style="--c:var(--org)">Байгууллага</span>
@@ -160,7 +176,7 @@ const network = new vis.Network(document.getElementById('net'), { nodes, edges }
            font: { size: 10, color: css('--muted'), strokeWidth: 0 } },
   nodes: { font: { color: css('--ink'), size: 13 } },
 });
-let selected = null, pathA = null, pathB = null, lastDraw = null;
+let selected = null, pathA = null, pathB = null, lastDraw = null, view = null;   // view: 'overview' or null
 // node size by a centrality score (issue #29): 12 px, up to 12 + 36 px for the largest score in view
 const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree',
                     market_cap: 'market_cap' };   // market cap (issue #31): companies without one stay small
@@ -175,21 +191,99 @@ function nodeSizes(list) {
   return n => 12 + (max > 0 ? 36 * Math.sqrt(v(n) / max) : 0);
 }
 
+// ---- visual encoding and filters (issue #10) ---------------------------------------------
+// Colour by sector or detected group (#28): the eight categorical hues of the validated palette
+// (light and dark steps), assigned by how many loaded nodes a category has, so a filter never
+// repaints the nodes it leaves; a ninth category and later fold into "Бусад" (grey). The legend
+// always names the colours. Filters hide edges, then the nodes left with no visible link (the
+// selected node stays): stakes under X% (unknown percentages stay), board ties only, one sector.
+// Colours, sizes and filters work on what is drawn; nothing is read again except the overview
+// for one sector (it is trimmed, so it is read again for that sector).
+const PALETTE = { light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'],
+                  dark:  ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767'] };
+const darkMq = matchMedia('(prefers-color-scheme: dark)');
+const BOARD_ROLES = new Set(['chair', 'vice_chair', 'board_member', 'independent_director']);
+const isBoard = e => e.type === 'HOLDS_POSITION' && (BOARD_ROLES.has(e.role_std) || e.role === 'board');
+const val = id => document.getElementById(id).value;
+const edgeId = e => `${e.source}|${e.type}|${e.target}|${e.title || ''}`;
+// white or dark text on a coloured company box, whichever reads better
+const inkOn = hex => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+  .map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.3 ? '#1d1d1b' : '#fff'; };
+// a node's category in a colour mode: a string, null (none: grey) or undefined (not coloured
+// by this mode: people and organisations when colouring by sector)
+function category(n, mode) {
+  if (mode === 'sector') return n.type === 'Company' ? (n.sector || null) : undefined;
+  if (mode === 'group') return n.group_id || null;
+}
+const catLabel = (n, mode) => mode === 'group' ? (n.group_label || n.group_id) : n.sector;
+function categories(all, mode) {
+  const count = new Map(), label = new Map();
+  for (const n of all) {
+    const c = category(n, mode);
+    if (c == null) continue;
+    count.set(c, (count.get(c) || 0) + 1);
+    if (!label.has(c)) label.set(c, catLabel(n, mode));
+  }
+  const pal = darkMq.matches ? PALETTE.dark : PALETTE.light;
+  const order = [...count.keys()].sort((a, b) => count.get(b) - count.get(a) || String(label.get(a)).localeCompare(String(label.get(b))));
+  return { order, count, label, color: new Map(order.slice(0, pal.length).map((c, i) => [c, pal[i]])), slots: pal.length };
+}
+function loaded() {   // the drawn data, one entry per node and edge
+  const ns = new Map(), es = new Map();
+  for (const n of lastDraw.nodes) ns.set(n.key, n);
+  for (const e of lastDraw.edges) if (e) es.set(edgeId(e), e);
+  return { ns, es };
+}
+function visibleSet(ns, es) {
+  const minPct = +val('minPct') || 0, ties = val('ties'), sector = val('sector');
+  const active = !!(minPct > 0 || ties || sector);
+  const nodeOk = n => !!n && (!sector || n.type !== 'Company' || n.sector === sector);
+  const edgeOk = e => !(ties === 'board' && !isBoard(e)) && !(ties === 'positions' && e.type !== 'HOLDS_POSITION')
+    && !(ties === 'owners' && e.type === 'HOLDS_POSITION')
+    && !(minPct > 0 && e.type === 'OWNS' && e.percent != null && +e.percent < minPct);
+  const vis = [...es.values()].filter(e => edgeOk(e) && nodeOk(ns.get(e.source)) && nodeOk(ns.get(e.target)));
+  // a node hides when the filters took all its links; one drawn without links (a company of the
+  // chosen sector that nothing else touches) stays
+  const linked = new Set(vis.flatMap(e => [e.source, e.target]));
+  const hadLinks = new Set([...es.values()].flatMap(e => [e.source, e.target]));
+  const visN = [...ns.values()].filter(n => n.key === selected
+    || (nodeOk(n) && (!active || linked.has(n.key) || !hadLinks.has(n.key))));
+  return { visN, vis, active };
+}
+
 function draw(data, { replace = true, focus = null } = {}) {
-  const col = COLORS();
-  if (replace) { nodes.clear(); edges.clear(); lastDraw = { nodes: [], edges: [] }; }
+  if (replace) { nodes.clear(); edges.clear(); lastDraw = { nodes: [], edges: [] }; view = null; }
   lastDraw.nodes.push(...data.nodes); lastDraw.edges.push(...data.edges);
-  const sz = nodeSizes(lastDraw.nodes), cen = n => n.centrality_degree == null ? '' :
+  render();
+  if (focus) setTimeout(() => network.focus(focus, { scale: 1, animation: true }), 300);
+}
+
+function render() {
+  if (!lastDraw) return;
+  const col = COLORS(), mode = val('colorBy'), none = css('--none'), muted = css('--muted');
+  const { ns, es } = loaded(), { visN, vis, active } = visibleSet(ns, es);
+  const cats = mode ? categories(ns.values(), mode) : null;
+  const fill = n => {
+    if (!cats) return col[n.type];
+    const c = category(n, mode);
+    return c === undefined ? muted : cats.color.get(c) || none;
+  };
+  const sz = nodeSizes([...ns.values()]), cen = n => n.centrality_degree == null ? '' :
     `\nкомпани ${n.centrality_degree} · зуучлал ${(100 * n.centrality_betweenness).toFixed(1)}% · PageRank ${(+n.centrality_pagerank).toFixed(2)}`;
-  nodes.update(data.nodes.map(n => ({
+  const keepN = new Set(visN.map(n => n.key)), keepE = new Set(vis.map(edgeId));
+  nodes.remove(nodes.getIds().filter(id => !keepN.has(id)));
+  edges.remove(edges.getIds().filter(id => !keepE.has(id)));
+  nodes.update(visN.map(n => { const bg = fill(n); return {
     id: n.key, label: n.ticker && !n.ticker.startsWith('~') ? `${n.ticker}\n${n.name}` : n.name, type: n.type,
     shape: n.type === 'Company' ? 'box' : 'dot', size: sz ? sz(n) : 12,
-    font: n.type === 'Company' ? { color: '#fff', size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
-    color: { background: col[n.type], border: col[n.type], highlight: { background: col[n.type], border: css('--ink') } },
-    title: `${n.type}: ${n.name}${cen(n)}${n.market_cap != null ? `\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
-  })));
-  edges.update(data.edges.filter(Boolean).map(e => ({
-    id: `${e.source}|${e.type}|${e.target}|${e.title || ''}`, from: e.source, to: e.target,
+    font: n.type === 'Company' ? { color: inkOn(bg), size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
+    color: { background: bg, border: bg, highlight: { background: bg, border: css('--ink') } },
+    title: `${n.type}: ${n.name}${n.sector ? `\nсалбар: ${n.sector}` : ''}${n.group_id ? `\nбүлэг: ${n.group_label || n.group_id}` : ''}` +
+           `${cen(n)}${n.market_cap != null ? `\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
+  }; }));
+  edges.update(vis.map(e => ({
+    id: edgeId(e), from: e.source, to: e.target,
     label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : 'эзэмшил') + (HOLD_TAG[e.holding_type] ? ` (${HOLD_TAG[e.holding_type]})` : '')
          : e.type === 'BENEFICIAL_OWNER' ? 'эцсийн өмчлөгч' : (e.title || ''),
     dashes: e.type === 'HOLDS_POSITION' ? true : e.type === 'BENEFICIAL_OWNER' ? [2, 4]
@@ -198,7 +292,25 @@ function draw(data, { replace = true, focus = null } = {}) {
     color: { color: e.type === 'HOLDS_POSITION' ? css('--person') : HOLD_TAG[e.holding_type] ? css('--muted') : css('--company'),
              opacity: .7 },
   })));
-  if (focus) setTimeout(() => network.focus(focus, { scale: 1, animation: true }), 300);
+  showLegend(cats, mode, [...ns.values()]);
+  document.getElementById('filterNote').textContent = active
+    ? `Шүүлтүүр: ${visN.length} / ${ns.size} зангилаа, ${vis.length} / ${es.size} холбоо харагдаж байна.` : '';
+}
+
+function showLegend(cats, mode, all) {
+  const box = document.getElementById('legend'), item = (c, t, n) =>
+    `<span style="--c:${c}">${esc(t)}${n != null ? ` <span class="n">${n}</span>` : ''}</span>`;
+  if (!cats) {
+    box.innerHTML = item('var(--company)', 'Компани') + item('var(--person)', 'Хувь хүн') + item('var(--org)', 'Байгууллага');
+    return;
+  }
+  let html = cats.order.slice(0, cats.slots).map(c => item(cats.color.get(c), cats.label.get(c), cats.count.get(c))).join('');
+  const rest = cats.order.slice(cats.slots).reduce((a, c) => a + cats.count.get(c), 0);
+  const nil = all.filter(n => category(n, mode) === null).length;
+  if (rest) html += item('var(--none)', `Бусад ${cats.order.length - cats.slots} ${mode === 'group' ? 'бүлэг' : 'салбар'}`, rest);
+  if (nil) html += item('var(--none)', mode === 'group' ? 'Бүлэггүй' : 'Салбар тодорхойгүй', nil);
+  if (mode === 'sector' && all.some(n => n.type !== 'Company')) html += item('var(--muted)', 'Хүн, байгууллага');
+  box.innerHTML = html || item('var(--none)', 'Ангилал алга');
 }
 
 async function open(key) {
@@ -578,7 +690,12 @@ document.getElementById('results').addEventListener('click', ev => {
 });
 
 network.on('click', p => { if (p.nodes.length) open(p.nodes[0]); });
-document.getElementById('btnOverview').onclick = async () => draw(await api('/api/graph/overview'));
+async function showOverview() {
+  const sector = val('sector');
+  draw(await api('/api/graph/overview' + (sector ? `?sector=${encodeURIComponent(sector)}` : '')));
+  view = 'overview';
+}
+document.getElementById('btnOverview').onclick = showOverview;
 document.getElementById('setA').onclick = () => { if (!selected) return; pathA = selected;
   document.getElementById('pathFrom').textContent = 'A: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
 document.getElementById('setB').onclick = () => { if (!selected) return; pathB = selected;
@@ -731,7 +848,16 @@ async function showCentrality(change = {}) {
   ul.innerHTML = html;
 }
 document.getElementById('btnCentrality').onclick = () => showCentrality();
-document.getElementById('sizeBy').onchange = () => { if (lastDraw) draw(lastDraw); };
+for (const id of ['sizeBy', 'colorBy', 'minPct', 'ties']) document.getElementById(id).onchange = render;
+// one sector: the overview is trimmed, so it is read again for that sector; other views filter what is drawn
+document.getElementById('sector').onchange = () => view === 'overview' ? showOverview() : render();
+document.getElementById('resetFilters').onclick = () => {
+  const refetch = view === 'overview' && val('sector');
+  for (const id of ['sizeBy', 'colorBy', 'sector', 'ties']) document.getElementById(id).value = '';
+  document.getElementById('minPct').value = '0';
+  refetch ? showOverview() : render();
+};
+darkMq.addEventListener('change', render);
 document.getElementById('btnCommunities').onclick = showCommunities;
 
 // ---- trends over time (issue #30) -----------------------------------------------------
@@ -906,6 +1032,7 @@ function loadStats() {
       `${s.companies} компани${s.unlisted_companies ? ` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал${s.beneficial_owners ? ` · ${s.beneficial_owners} эцсийн өмчлөгч` : ''}` +
       (s.past_positions || s.past_ownerships ? ` · түүх: ${s.past_positions} албан тушаал, ${s.past_ownerships} эзэмшил` : '') +
       (s.first_observed && s.first_observed !== s.last_observed ? ` (${s.first_observed} – ${s.last_observed})` : '');
+    if (s.companies) loadSectors();
     if (focusKey && s.companies) open(focusKey).catch(() => document.getElementById('btnOverview').click());
     else if (s.companies) document.getElementById('btnOverview').click();
   }).catch(() => document.getElementById('stats').textContent = 'Өгөгдлийн сан ачаалж байна…');
@@ -927,6 +1054,14 @@ async function pollStatus() {
   if (st.state === 'running' || st.state === 'starting') setTimeout(pollStatus, 5000);
   else if (st.state === 'failed') box.textContent = 'Өгөгдөл ачаалахад алдаа гарлаа (logs-г шалгана уу).';
   if (st.next_run && st.state !== 'running') setTimeout(pollStatus, 60000);   // scheduled refreshes
+}
+// the sector filter's choices (issue #10): sectors by their number of listed companies
+function loadSectors() {
+  api('/api/sectors').then(rows => {
+    const sel = document.getElementById('sector');
+    sel.innerHTML = '<option value="">Салбар: бүгд</option>' + rows.map(r =>
+      `<option value="${esc(r.sector)}">${esc(r.sector)} (${r.listed || r.companies})</option>`).join('');
+  }).catch(() => {});
 }
 loadStats(); pollStatus();
 </script>
