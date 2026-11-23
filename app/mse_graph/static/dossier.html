@@ -291,6 +291,15 @@ function render(d) {
   if (e.tenders && e.tenders.length)
     h += section(L`Оролцсон тендер (${e.tenders.length}, шалгарсан ${e.tenders_won || 0})`, `<ul class="plain">${e.tenders.map(x => `<li class="meta">${esc(x)}</li>`).join('')}</ul>`);
 
+  // the Financial Regulatory Commission's decisions that name the company (frc.py)
+  const fd = d.frc_decisions || [];
+  if (fd.length)
+    h += section(tr('СЗХ-ны шийдвэрүүд'), table([{ h: tr('Огноо') }, { h: tr('Дугаар') }, { h: tr('Шийдвэр') }],
+      fd.map(x => `<td class="d">${esc(x.date || '')}</td><td class="d">${esc(x.number || '')}</td>` +
+        `<td>${x.url && /^https:/.test(x.url) ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a>` : esc(x.name)}` +
+        `${x.adverse ? `<span class="tag">${esc(x.kind)}</span>` : ''}</td>`)) +
+      tr('<p class="note">Санхүүгийн зохицуулах хорооны тогтоол (frc.mn), монголоор.</p>'));
+
   // the shareholder table over time
   const oh = d.ownership_history;
   if (oh && oh.points.length >= 2) {
