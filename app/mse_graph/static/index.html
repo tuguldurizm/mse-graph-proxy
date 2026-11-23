@@ -58,6 +58,12 @@
   .rv .name { cursor:pointer; color:var(--accent); }
   .cov { color:var(--muted); font-size:11px; cursor:default; display:block; padding:2px 6px 6px; }
   .cov:hover { background:none; }
+  /* where a link comes from (issue #10): one muted line under the row */
+  li:has(> .src) { flex-wrap:wrap; }
+  .src { flex-basis:100%; color:var(--muted); font-size:11px; line-height:1.35; }
+  .src a { color:inherit; text-decoration:underline dotted; }
+  .src .unv { color:#b0701a; }
+  @media (prefers-color-scheme: dark) { .src .unv { color:#e0a050; } }
   .rf.error { border-left-color:#c0392b; background:color-mix(in srgb, #c0392b 10%, transparent); }
   .sorts { display:flex; gap:4px; flex-wrap:wrap; cursor:default; }
   .sorts:hover { background:none; }
@@ -209,6 +215,23 @@ async function open(key) {
   showDetails(d);
 }
 
+// where a link comes from (issue #10): each source (the one that owns the link first) with a link
+// to its page, the date the source gives (a stake's as_of) and when a run last saw it
+function src(x) {
+  const ps = x.provenance || [];
+  if (!ps.length) return '';
+  const one = p => {
+    const t = esc(p.label), cls = p.kind === 'search' ? ' class="unv"' : '';
+    return p.url && /^https?:/.test(p.url)
+      ? `<a href="${esc(p.url)}" target="_blank" rel="noopener"${cls} title="${esc(p.source)}">${t}</a>`
+      : `<span${cls} title="${esc(p.source)}">${t}</span>`;
+  };
+  const parts = [`эх сурвалж: ${ps.map(one).join(', ')}`];
+  if (x.as_of) parts.push(`мэдээллийн огноо ${esc(x.as_of)}`);
+  if (x.current && x.last_seen) parts.push(`сүүлд шалгасан ${esc(x.last_seen)}`);
+  return `<span class="src">${parts.join(' · ')}</span>`;
+}
+
 function list(title, items, fmt) {
   if (!items || !items.length) return '';
   return `<h2>${title}</h2><ul>${items.map(i => `<li${i.key ? ` data-key="${esc(i.key)}"` : ''}>${fmt(i)}</li>`).join('')}</ul>`;
@@ -242,7 +265,9 @@ async function showDetails(d) {
   if (e.former_names && e.former_names.length)
     html += `<div>Хуучин нэр: ${e.former_names.map(esc).join(', ')}</div>`;
   const links = [];
-  if (e.url && /^https?:/.test(e.url)) links.push(`<a href="${esc(e.url)}" target="_blank" rel="noopener">mse.mn</a>`);
+  // the company's own page: mse.mn for listed companies, a group's site for a data/manual one
+  if (e.url && /^https?:/.test(e.url))
+    links.push(`<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(new URL(e.url).hostname.replace(/^www\./, ''))}</a>`);
   if (e.registry_url && /^https?:/.test(e.registry_url))
     links.push(`<a href="${esc(e.registry_url)}" target="_blank" rel="noopener">Open Data Lab</a>` +
                (e.registry_updated ? ` <span class="meta">(${esc(e.registry_updated)})</span>` : ''));
@@ -256,7 +281,7 @@ async function showDetails(d) {
   // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
   const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
   const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
-  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}${val(o)}</span>`);
+  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}${val(o)}</span>${src(o)}`);
   const own = d.ownership;
   if (own && (own.nominee.holders || own.treasury.holders))
     html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
@@ -265,32 +290,32 @@ async function showDetails(d) {
   html += turnoverBlock(turn);
   html += officialsBlock(e, d);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
-               b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
+               b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
-               b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>`);
-  html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
-  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}${val(h)}</span>`);
+               b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
+  html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>${src(p)}`);
+  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}${val(h)}</span>${src(h)}`);
   if (d.holdings_value_mnt != null)
     html += `<div class="meta">Эзэмшлийн нийт үнэлгээ ≈ ${fmtMNT(d.holdings_value_mnt)} (${d.holdings_valued} компани, зах зээлийн үнэлгээгээр; шууд эзэмшил)</div>`;
-  html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
+  html += list('Албан тушаал', d.positions, p => `<span>${esc(co(p))}</span><span class="meta">${esc(p.title)}</span>${src(p)}`);
   html += list('Ураг төрлийн холбоо (баталгаажсан)', d.relatives,
                r => `<span>${esc(r.name)} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
   const period = i => `<span class="meta" style="white-space:nowrap">${esc(i.since || i.first_seen || '?')} – ${esc(i.until || '?')}</span>`;
   html += list('Өмнөх удирдлага / ТУЗ', h.people,
-               p => `<span>${esc(p.name)} <span class="meta">${esc(p.title)}</span></span>${period(p)}`);
+               p => `<span>${esc(p.name)} <span class="meta">${esc(p.title)}</span></span>${period(p)}${src(p)}`);
   html += list('Өмнөх хувьцаа эзэмшигчид', h.owners,
-               o => `<span>${esc(o.name)} ${pct(o.percent)}</span>${period(o)}`);
+               o => `<span>${esc(o.name)} ${pct(o.percent)}</span>${period(o)}${src(o)}`);
   html += list('Өмнө эзэмшиж байсан', h.holdings,
-               x => `<span>${esc(co(x))} ${pct(x.percent)}</span>${period(x)}`);
+               x => `<span>${esc(co(x))} ${pct(x.percent)}</span>${period(x)}${src(x)}`);
   html += list('Өмнөх эцсийн өмчлөгч (бүртгэл)', h.beneficial_owners,
-               b => `<span>${esc(b.name)}</span>${period(b)}`);
+               b => `<span>${esc(b.name)}</span>${period(b)}${src(b)}`);
   html += list('Өмнөх мэдээлэл (нэр, хаяг, ...)', h.facts,
-               f => `<span>${esc(FACT_LABELS[f.name] || f.name)}: ${esc(f.value)} <span class="meta">${esc(f.source)}</span></span>` +
-                    `<span class="meta" style="white-space:nowrap">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</span>`);
+               f => `<span>${esc(FACT_LABELS[f.name] || f.name)}: ${esc(f.value)}</span>` +
+                    `<span class="meta" style="white-space:nowrap">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</span>${src(f)}`);
   html += list('Өмнөх албан тушаал', h.positions,
-               p => `<span>${esc(p.ticker)} <span class="meta">${esc(p.title)}</span></span>${period(p)}`);
+               p => `<span>${esc(co(p))} <span class="meta">${esc(p.title)}</span></span>${period(p)}${src(p)}`);
   html += list('Холбоотой компаниуд', d.related_companies,
                r => `<span>${esc(r.ticker)} ${esc(r.name)}</span><span class="meta">${[...new Set(r.links.map(l => l.name))].map(esc).join(', ')}</span>`);
   html += list('Эцсийн өмчлөгчид (look-through)', uo,
@@ -518,6 +543,7 @@ async function decide(payload) {
 document.getElementById('btnReview').onclick = showReview;
 
 document.getElementById('details').addEventListener('click', ev => {
+  if (ev.target.closest('a')) return;      // a source link opens the page, not the node
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 document.getElementById('analysis').addEventListener('click', ev => {

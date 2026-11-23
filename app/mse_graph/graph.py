@@ -119,6 +119,7 @@ from neo4j import GraphDatabase
 
 from . import holdings as hold
 from . import officials as officials_mod
+from . import provenance
 from . import records as rec
 from . import relations as relations_mod
 from .config import settings
@@ -2449,14 +2450,15 @@ class Graph:
         (resolve_key).
         """
         key = self.resolve_key(key)
-        period = "current: r.current, since: r.since, until: r.until, first_seen: r.first_seen, last_seen: r.last_seen"
+        period = ("current: r.current, since: r.since, until: r.until, first_seen: r.first_seen, last_seen: r.last_seen, "
+                  "source: r.source, sources: r.sources")
         rows = self.run(
             f"""
             MATCH (e:Entity {{key: $key}})
             CALL (e) {{
                 OPTIONAL MATCH (h:Entity)-[r:OWNS]->(e)
                 RETURN collect(CASE WHEN h IS NULL THEN NULL ELSE
-                    {{key: h.key, name: h.name, type: {_TYPE.format("h")}, source: r.source, sources: r.sources,
+                    {{key: h.key, name: h.name, type: {_TYPE.format("h")},
                       percent: r.percent, shares: r.shares, as_of: r.as_of, holding_type: r.holding_type,
                       share_class: r.share_class, basis: r.basis, nominee_kind: h.nominee_kind, {period}}} END) AS owners
             }}
@@ -2472,13 +2474,12 @@ class Graph:
                 OPTIONAL MATCH (p:Person)-[r:HOLDS_POSITION]->(e)
                 RETURN collect(CASE WHEN p IS NULL THEN NULL ELSE
                     {{key: p.key, name: p.name, title: r.title, titles: r.titles, role: r.role,
-                      role_std: r.role_std, source: r.source, {period}}} END) AS people
+                      role_std: r.role_std, {period}}} END) AS people
             }}
             CALL (e) {{
                 OPTIONAL MATCH (b:Entity)-[r:BENEFICIAL_OWNER]->(e)
                 RETURN collect(CASE WHEN b IS NULL THEN NULL ELSE
-                    {{key: b.key, name: b.name, type: {_TYPE.format("b")}, since: r.since, source: r.source,
-                      {period}}} END) AS beneficial_owners
+                    {{key: b.key, name: b.name, type: {_TYPE.format("b")}, {period}}} END) AS beneficial_owners
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:BENEFICIAL_OWNER]->(t:Company)
@@ -2507,6 +2508,10 @@ class Graph:
             out["history"][part] = sorted((i for i in items if not i["current"]),
                                           key=lambda i: i["until"] or "", reverse=True)
         out["owners"].sort(key=lambda x: -(x["percent"] or 0))
+        # where each link comes from, with a link and the dates (issue #10, provenance.py)
+        for part in ("owners", "holdings", "people", "positions", "beneficial_owners", "beneficially_owns"):
+            for i in out[part] + out["history"][part]:
+                provenance.annotate(i)
         company = out["entity"]["type"] == "Company"
         self._value_stakes(out)
         out["related_companies"] = self.related_companies(key) if company else []
@@ -2514,6 +2519,8 @@ class Graph:
         out["ownership"] = self.ownership_summary(key) if company else None
         # dated facts (issue #38): current values, and the ones that ended (former names, old addresses)
         facts = self.company_facts(key) if company else []
+        for f in facts:
+            provenance.annotate(f)
         out["facts"] = [f for f in facts if f["current"]]
         out["history"]["facts"] = [f for f in facts if not f["current"]]
         # officials whose declarations name the company (issue #9): a disclosed interest, not a finding
