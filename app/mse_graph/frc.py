@@ -4,17 +4,22 @@ frc.mn is an Angular site. Its pages load everything from a JSON API on a separa
 `https://www.frc.mn:5001/api/` (the site's `environment.apiUrl`), with the calls
 
     menu?site=main&lang=mn&status=1         the site's menu (every section)
-    document?menuid=<id>&site=main&lang=mn  the documents filed under one menu (files, decisions)
+    document?menuid=<id>&site=main&lang=mn  the documents filed under one menu (files)
     news?menuid=<id>&site=main&lang=mn&page=<n>   the posts under one menu
-    document/get?id=<id>, news/get?id=<id>  one document or post
+    securitie/custodian, securitie/secbroker, frc/nbfi, insurance/insurance, ...   licensed entities
+    frc/orgdetails?id=<id>                  one licensed entity
+    tabinfo/stakeholder?register=<reg no>   its stakeholders (POST, empty body), tabinfo/branch too
+    frc/decision?sctId=<sector>&decId=<menu id>   the commission's decisions
 
 Claude Code cloud sessions can't reach that port (their proxy only carries HTTPS on 443), so this
 module runs where the data is reachable: the hosted pipeline on Render (`frc_step` in
 pipeline.py), or `python -m mse_graph.cli frc-probe` on a machine with open egress. For now it
-only *describes* what the API returns, as `FRC layout` log lines (the menu tree, then the
-listings of the menus whose titles look like disclosures: large holdings, insiders, issuers'
-filings), so the parser for the disclosures can be written against real data. Nothing is stored
-except the time of the last probe (`(:Meta {key: 'frc'})`).
+only *describes* what the API returns, as `FRC layout` log lines, so the parsers can be written
+against real data. What the probes found (2026-11-23): the menu has 569 entries and no
+large-holding or insider section; the licensed entities are typed lists (`LISTS`: custodians,
+brokers, nominee accounts, NBFIs, insurers, ...), each entity has details, stakeholders and
+branches by register number, and the commission's decisions are per sector and year. Nothing is
+stored except the time and version of the last probe (`(:Meta {key: 'frc'})`).
 
 frc.mn has no robots.txt. The probe is gentle anyway: one request at a time, FRC_DELAY (5 s)
 apart, at most FRC_MAX_REQUESTS (15) per probe, at most once per FRC_MIN_INTERVAL_HOURS (20).
@@ -35,26 +40,17 @@ log = logging.getLogger(__name__)
 API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
-# The menus worth reading, most useful first (the first probe, 2026-11-23, listed FRC's 569 menus: no
-# large-holding or insider section; decisions, violations, sanctions and licence holders are there).
-TARGETS = (
-    r"хорооны шийдвэр$",                       # the commission's decisions
-    r"зөрчлийн мэдээлэл",                      # violations
-    r"сахилгын шийтгэл",                       # disciplinary sanctions
-    r"тусгай зөвшөөрөлтэй хуулийн этгээд",     # licensed legal entities
-    r"тусгай зөвшөөрөл эзэмшигчид",            # licence holders
-    r"үнэт цаасны компани",                    # securities firms (brokers, custodians: nominees, #39)
-    r"хүчингүй болсон хуулийн этгээд",         # revoked licences, legal entities
-    r"хувьцаа эзэмшигч|дотоод мэдээлэл|insider|large hold",   # in case such a section appears
-)
-DISCLOSURE = re.compile("|".join(f"(?:{t})" for t in TARGETS), re.I)
 # bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
-PROBE_VERSION = 2
+PROBE_VERSION = 3
 
+# The typed lists behind the "org" / "sct" / "decision" pages (the site's lazy chunk 454, read
+# 2026-11-23): GET, no parameters. Custodians and brokers are the nominee list's sources (#39).
+LISTS = ("securitie/custodian", "securitie/secbroker", "securitie/nominal", "securitie/underwriter",
+         "securitie/dealer", "frc/nbfi", "insurance/insurance")
+# per licensed entity: details (GET frc/orgdetails?id=), stakeholders and branches (POST
+# tabinfo/stakeholder?register=, tabinfo/branch?register=); decisions: GET frc/decision?sctId=&decId=
+_REG = re.compile(r"regist|regno|reg_no|rd$|^reg", re.I)
 
-def rank(title: str) -> int:
-    """The position of the first TARGETS pattern the title matches (len(TARGETS) for none)."""
-    return next((i for i, t in enumerate(TARGETS) if re.search(t, title or "", re.I)), len(TARGETS))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -64,17 +60,18 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _client_get(timeout: float = 60.0) -> Callable[[str], str]:
+def _client_get(timeout: float = 60.0) -> Callable[..., str]:
     """A plain GET (direct, not through MSE_PROXY_URL: the fetch proxy only allows mse.mn and
-    opendatalab.mn). Returns the body; raises on an HTTP error."""
+    opendatalab.mn); `post=True` sends the empty POST the site uses for its read-only `tabinfo`
+    calls. Returns the body; raises on an HTTP error."""
     import httpx
 
     client = httpx.Client(timeout=httpx.Timeout(timeout, connect=20), follow_redirects=True,
                           headers={"User-Agent": "mse-graph/0.1 (research crawler)",
                                    "Content-Type": "application/json"})
 
-    def get(url: str) -> str:
-        r = client.get(url)
+    def get(url: str, post: bool = False) -> str:
+        r = client.post(url) if post else client.get(url)
         r.raise_for_status()
         return r.text
     return get
@@ -152,7 +149,7 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
     delay = _env_float("FRC_DELAY", 5.0) if delay is None else delay
     report: dict = {"api": API, "requests": 0, "menus": 0, "candidates": [], "listings": {}, "errors": []}
 
-    def fetch(path: str, **params):
+    def fetch(path: str, post: bool = False, **params):
         if report["requests"] >= max_requests:
             return None
         if report["requests"]:
@@ -160,7 +157,7 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
         report["requests"] += 1
         u = url(path, **params)
         try:
-            return json.loads(get(u))
+            return json.loads(get(u, post=True) if post else get(u))
         except Exception as exc:          # an HTTP error, a timeout, not JSON: note it and go on
             report["errors"].append(f"{path}: {type(exc).__name__}: {str(exc)[:200]}")
             log.warning("FRC layout %s failed: %s", u, exc)
@@ -169,33 +166,41 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
     menu = fetch("menu", **SITE, status=1)
     if menu is None:
         return report
-    describe(menu, "menu")
     items = menu_items(menu)
     report["menus"] = len(items)
-    for i in range(0, len(items), 25):                    # the whole tree, 25 entries a line
-        log.info("FRC layout menu %d-%d: %s", i + 1, min(i + 25, len(items)),
-                 json.dumps([[m["id"], m["parent"], m["title"][:60], m["kind"]] + ([m["link"][:60]] if m["link"] else [])
-                             for m in items[i:i + 25]], ensure_ascii=False))
-    cands = sorted((m for m in items if m["id"] is not None and DISCLOSURE.search(m["title"])),
-                   key=lambda m: rank(m["title"]))
-    report["candidates"] = [[m["id"], m["title"][:60], m["kind"], m["link"][:80]] for m in cands]
-    for m in cands:
-        if report["requests"] >= max_requests:
-            break
-        if m["link"]:                       # a link elsewhere (e.g. the licence registry): nothing to list here
+    # the typed lists of licensed entities
+    first: dict | None = None
+    for path in LISTS:
+        ans = fetch(path)
+        if ans is None:
             continue
-        # a `list` menu holds posts, a `doc` / `file` menu documents; anything else: try both
-        kinds = (("news", {"page": 0}),) if m["kind"] == "list" else \
-                (("document", {}),) if m["kind"] in ("doc", "document", "file") else \
-                (("document", {}), ("news", {"page": 0}))
-        for kind, extra in kinds:
-            ans = fetch(kind, menuid=m["id"], **SITE, **extra)
-            if ans is None:
-                continue
-            n = len(records(ans))
-            report["listings"][f"{kind}:{m['id']}"] = n
-            if n:
-                describe(ans, f"{kind} menu={m['id']} {m['title'][:40]!r}")
+        recs = records(ans)
+        report["listings"][path] = len(recs)
+        describe(ans, path)
+        if recs and first is None and path in ("securitie/custodian", "securitie/secbroker"):
+            first = recs[0]
+    # one entity's details, stakeholders and branches, from the first custodian or broker
+    if first:
+        eid = _first(first, _ID)
+        reg = next((v for k, v in first.items() if _REG.search(k) and v), None)
+        report["sample"] = {"id": eid, "register": reg}
+        if eid is not None:
+            ans = fetch("frc/orgdetails", id=eid)
+            if ans is not None:
+                describe(ans, f"frc/orgdetails id={eid}")
+        if reg:
+            for path in ("tabinfo/stakeholder", "tabinfo/branch"):
+                ans = fetch(path, post=True, register=reg)
+                if ans is not None:
+                    report["listings"][path] = len(records(ans))
+                    describe(ans, f"{path} register={reg}")
+    # one decisions page: the securities sector (11) and its newest year's menu
+    dec = sorted((m for m in items if m["kind"] == "decision" and m["parent"] == 181), key=lambda m: -(m["id"] or 0))
+    if dec:
+        ans = fetch("frc/decision", sctId=11, decId=dec[0]["id"])
+        if ans is not None:
+            report["listings"][f"frc/decision:{dec[0]['id']}"] = len(records(ans))
+            describe(ans, f"frc/decision sctId=11 decId={dec[0]['id']}")
     log.info("FRC layout summary: %s", json.dumps(report, ensure_ascii=False)[:3000])
     return report
 
