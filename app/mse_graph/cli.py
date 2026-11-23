@@ -19,8 +19,10 @@
     python -m mse_graph.cli odl-company <REG_NO>
     python -m mse_graph.cli odl-enrich [--from data/scraped] [--limit N] [--shard K/N|auto] [--load]
     python -m mse_graph.cli odl-import <file-or-url> [--kind auto|shareholders|executives|companies] [--load]
-    python -m mse_graph.cli odl-discover [--budget N] [--max-depth D] [--dry-run]
+    python -m mse_graph.cli odl-discover [--budget N|auto] [--max-depth D] [--dry-run]
                                                            grow the graph: registry pages of companies it lacks
+    python -m mse_graph.cli odl-holders [--minutes M] [--quota auto|all|N] [--key KEY] [--dry-run]
+                                                           search each holder's other companies (a 7th a day)
     python -m mse_graph.cli egress-check [--reg REG_NO]   fetch one registry page through each opendatalab.mn route
     python -m mse_graph.cli cycles | cross-holdings | state
     python -m mse_graph.cli conflicts [--kind insider_owner|competitor|related_party]
@@ -208,11 +210,23 @@ def main(argv=None):
     p = sub.add_parser("odl-discover",
                        help="grow the graph from the registry: read the pages of companies it doesn't have yet "
                             "(owners named in ownership chains, data/discovery/seeds.csv, companies never read)")
-    p.add_argument("--budget", type=int, help="registry pages to read, 11 s each (default DISCOVERY_BUDGET or 25)")
+    p.add_argument("--budget", help="registry pages to read, 11 s each, or \"auto\": the waiting leads spread "
+                                    "over a week, 25 to DISCOVERY_MAX_BUDGET (300) (default DISCOVERY_BUDGET or 25)")
     p.add_argument("--max-depth", type=int,
                    help="steps along ownership chains from the starting companies (default DISCOVERY_MAX_DEPTH or 3)")
     p.add_argument("--seeds", help="seeds file (default DISCOVERY_SEEDS or data/discovery/seeds.csv)")
     p.add_argument("--dry-run", action="store_true", help="only list what would be read; fetch nothing")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("odl-holders",
+                       help="search the registry for the other companies each person and organisation in the "
+                            "graph owns; what it finds becomes discovery leads (holder_search.py)")
+    p.add_argument("--minutes", type=float,
+                   help="time budget, 11 s a request (default HOLDER_SEARCH_MINUTES or 60; 0 = no limit)")
+    p.add_argument("--quota", help="holders to search: auto (a seventh of all, the default), all, or a number")
+    p.add_argument("--every-days", type=int, help="search each holder again after this many days (default 7)")
+    p.add_argument("--key", action="append", help="search this holder (graph key, e.g. 'person:батын батболд'); "
+                                                  "repeatable; due or not")
+    p.add_argument("--dry-run", action="store_true", help="only list who would be searched; fetch nothing")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("egress-check",
                        help="show how requests leave this server; fetch one Open Data Lab registry page "
@@ -330,6 +344,10 @@ def main(argv=None):
 
     if args.cmd == "odl-discover":
         _discover_cmd(args)
+        return
+
+    if args.cmd == "odl-holders":
+        _holders_cmd(args)
         return
 
     if args.cmd == "egress-check":
@@ -742,10 +760,15 @@ def _discover_cmd(args):
     from . import discovery
 
     opts = discovery.settings_from_env()
-    budget = opts["budget"] if args.budget is None else args.budget
-    max_depth = opts["max_depth"] if args.max_depth is None else args.max_depth
-    seeds_path = args.seeds or opts["seeds_path"]
+    if args.budget is not None:
+        opts["budget"] = "auto" if str(args.budget).strip().lower() == "auto" else int(args.budget)
+    if args.max_depth is not None:
+        opts["max_depth"] = args.max_depth
+    if args.seeds:
+        opts["seeds_path"] = args.seeds
+    max_depth, seeds_path = opts["max_depth"], opts["seeds_path"]
     with _graph() as g:
+        budget = discovery.resolve_budget(g, opts)
         if args.dry_run:
             leads = discovery.frontier(g, max_depth, discovery.read_seeds(seeds_path), opts["retry_days"])
             missing = g.listed_without_register_no()
@@ -802,6 +825,54 @@ def _discover_cmd(args):
             print(f"stopped: {report['stopped']}", file=sys.stderr)
     nothing = not (report["added"] or report["attached"] or report["not_found"] or report["clashes"])
     sys.exit(1 if report["stopped"] or (report["failed"] and nothing) else 0)
+
+
+def _holders_cmd(args):
+    from . import holder_search
+    from .opendatalab import RegistryLease
+
+    opts = holder_search.settings_from_env()
+    minutes = opts["minutes"] if args.minutes is None else args.minutes
+    quota = args.quota or opts["quota"]
+    every = args.every_days or opts["every_days"]
+    with _graph() as g:
+        if args.dry_run:
+            total = g.holder_target_count()
+            limit = holder_search.quota_for(total, quota, every)
+            due = g.holder_targets(every, keys=args.key)
+            print(f"{total} holders are searched every {every} days; {len(due)} are due; "
+                  f"this run takes up to {limit or len(due)} of them ({minutes:g} minutes at most):")
+            for t in due[:limit or 50][:50]:
+                print(f"  {t['kind']:<12} depth {t['depth']}  {t['query']}"
+                      f"{'  (last ' + t['searched_at'] + ')' if t['searched_at'] else ''}")
+            print(f"{len(g.holding_leads())} companies found by earlier searches wait for discovery")
+            return
+        if not minutes and minutes != 0:
+            minutes = holder_search.DEFAULT_MINUTES
+        lease = RegistryLease(g, "odl-holders")
+        if not lease.acquire():
+            print(f"holder search skipped: {lease.busy_message()}")
+            return
+        try:
+            report = holder_search.search(g, minutes=minutes, quota=quota, every_days=every, keys=args.key,
+                                          progress=lease.keep)
+        finally:
+            lease.release()
+    if args.json:
+        _print(report)
+    else:
+        for f in report["found"]:
+            if f["holdings"]:
+                print(f"{f['name']}: {f['holdings']} holdings, {f['new']} new")
+                for c in f["companies"]:
+                    print(f"    {c}")
+        print(f"searched {report['searched']} of {report['due']} holders due ({report['total']} in all, "
+              f"quota {report['quota'] or 'none'}): {report['holdings']} holdings, {report['in_graph']} already in "
+              f"the graph, {report['new']} new companies for discovery, {report['unresolved']} unresolved; "
+              f"{report['requests']} requests; {report['left']} holders still due")
+        if report["stopped"]:
+            print(f"stopped: {report['stopped']}", file=sys.stderr)
+    sys.exit(1 if report["stopped"] and "time budget" not in report["stopped"] else 0)
 
 
 def _history_cmd(g, args):

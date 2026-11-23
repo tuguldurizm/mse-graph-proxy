@@ -13,6 +13,9 @@ and each run:
    * the numbers in data/discovery/seeds.csv;
    * owners in the chains that the graph has no company for, the shallowest first,
      up to `max_depth` steps away from the companies the graph started with;
+   * companies that holder searches found (holder_search.py: a person's or an
+     organisation's other holdings, from Open Data Lab's name search), one step deeper
+     than the holder, the closest first;
 2. reads up to `budget` of those pages, one every 11 s like every opendatalab.mn
    request, and loads each one (`discover`):
    * a company the graph already has (its own number, or the page's name matches a
@@ -54,13 +57,17 @@ SEEDS = Path("data/discovery/seeds.csv")
 DEFAULT_BUDGET = 25          # pages per run: about 5 minutes at 11 s a page
 DEFAULT_MAX_DEPTH = 3        # steps along ownership chains from the starting companies
 DEFAULT_RETRY_DAYS = 30
+AUTO_SPREAD_DAYS = 7         # budget "auto": the frontier spread over a week of daily runs ...
+AUTO_MAX_BUDGET = 300        # ... but at most this many pages a run (55 minutes)
 
 
 def settings_from_env() -> dict:
-    """DISCOVERY_BUDGET (0 turns discovery off), DISCOVERY_MAX_DEPTH, DISCOVERY_RETRY_DAYS,
-    DISCOVERY_SEEDS."""
+    """DISCOVERY_BUDGET (0 turns discovery off; "auto": see auto_budget), DISCOVERY_MAX_DEPTH,
+    DISCOVERY_RETRY_DAYS, DISCOVERY_SEEDS, DISCOVERY_MAX_BUDGET (the cap of "auto")."""
+    raw = (os.getenv("DISCOVERY_BUDGET") or "").strip().lower()
     return {
-        "budget": int(os.getenv("DISCOVERY_BUDGET") or DEFAULT_BUDGET),
+        "budget": "auto" if raw == "auto" else int(raw or DEFAULT_BUDGET),
+        "max_budget": int(os.getenv("DISCOVERY_MAX_BUDGET") or AUTO_MAX_BUDGET),
         "max_depth": int(os.getenv("DISCOVERY_MAX_DEPTH") or DEFAULT_MAX_DEPTH),
         "retry_days": int(os.getenv("DISCOVERY_RETRY_DAYS") or DEFAULT_RETRY_DAYS),
         "seeds_path": os.getenv("DISCOVERY_SEEDS") or str(SEEDS),
@@ -70,11 +77,26 @@ def settings_from_env() -> dict:
 @dataclass
 class Lead:
     reg: str
-    kind: str                    # "unread" | "seed" | "owner"
+    kind: str                    # "unread" | "seed" | "owner" | "holding"
     name: str = ""               # the name it was found under
     ticker: str = ""             # the company the page belongs to, when that is known
     depth: int = 0
-    via: list[str] = field(default_factory=list)   # companies whose page named it
+    via: list[str] = field(default_factory=list)   # companies whose page named it (holders, for "holding")
+
+
+def auto_budget(leads: int, max_budget: int = AUTO_MAX_BUDGET, spread_days: int = AUTO_SPREAD_DAYS) -> int:
+    """Pages for one run with budget "auto": the waiting leads spread over `spread_days`
+    daily runs, at least DEFAULT_BUDGET and at most `max_budget`. As holder searches find
+    more companies the daily share grows with them."""
+    return max(DEFAULT_BUDGET, min(max_budget, -(-leads // max(1, spread_days))))
+
+
+def resolve_budget(g, opts: dict) -> int:
+    """The page budget of a run: DISCOVERY_BUDGET, or for "auto" auto_budget() of the frontier."""
+    if opts["budget"] != "auto":
+        return int(opts["budget"])
+    leads = frontier(g, opts["max_depth"], read_seeds(opts["seeds_path"]), opts["retry_days"])
+    return auto_budget(len(leads), opts.get("max_budget", AUTO_MAX_BUDGET))
 
 
 def read_seeds(path: str | Path | None = None) -> list[dict]:
@@ -127,6 +149,8 @@ def frontier(g, max_depth: int = DEFAULT_MAX_DEPTH, seeds: list[dict] | None = N
             add(Lead(s["reg"], "seed", s["note"], ticker, 0))
     for r in g.owner_leads(max_depth, retry_days):
         add(Lead(r["reg"], "owner", r["name"] or "", "", r["depth"], list(r["via"] or [])))
+    for r in g.holding_leads(retry_days):
+        add(Lead(r["reg"], "holding", r["name"] or "", "", r["depth"], list(r["via"] or [])))
     return out
 
 

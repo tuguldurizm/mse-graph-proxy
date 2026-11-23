@@ -264,7 +264,9 @@ def _fetcher():
 # Rows flagged "(хасагдсан)" were removed from the registry; they are kept in
 # the parsed page but not imported. The registry has no ownership percentages.
 # robots.txt asks for a 10 s crawl delay and disallows /search?query=... and
-# ?page= listings, so the client only requests these per-company pages.
+# ?page= listings. The owner has an agreement with Open Data Lab that this project may
+# ignore it: the client reads these per-company pages and, for the holder search
+# (holder_search.py), name searches and record pages, one request every 11 s.
 
 SECTIONS = {
     "info": ["үндсэн мэдээлэл"],
@@ -380,7 +382,8 @@ def _org_type(text: str) -> str:
 
 def _holder_type(text: str) -> str:
     t = text.lower()
-    if "хуулийн этгээд" in t or "аж ахуй" in t:
+    # "Х/Этгээд" is how newer registry rows abbreviate "Хуулийн этгээд" (a legal entity)
+    if "хуулийн этгээд" in t or "аж ахуй" in t or re.search(r"х\s*[/.]\s*этгээд", t):
         return "organization"
     if "иргэн" in t or "хувь хүн" in t:
         return "person"

@@ -138,6 +138,9 @@ SCHEMA = [
     "CREATE INDEX company_state_reg_no IF NOT EXISTS FOR (c:Company) ON (c.state_reg_no)",
     # registry numbers discovery tried and should leave alone for a while (discovery.py)
     "CREATE CONSTRAINT registry_lead_reg IF NOT EXISTS FOR (l:RegistryLead) REQUIRE l.reg IS UNIQUE",
+    # holdings found by searching the registry for a holder's name (holder_search.py)
+    "CREATE CONSTRAINT holding_lead_record IF NOT EXISTS FOR (h:HoldingLead) REQUIRE h.record IS UNIQUE",
+    "CREATE INDEX holding_lead_reg IF NOT EXISTS FOR (h:HoldingLead) ON (h.reg)",
     # source records (issue #37, records.py)
     "CREATE CONSTRAINT record_id IF NOT EXISTS FOR (r:Record) REQUIRE r.record_id IS UNIQUE",
     "CREATE INDEX record_name_key IF NOT EXISTS FOR (r:Record) ON (r.name_key)",
@@ -2233,6 +2236,101 @@ class Graph:
                 SET c.register_no_found_via = r.via, c.register_no_found_at = $today
             }
             """, rows=rows, today=_today())
+
+    # ---- holder search (holder_search.py) -----------------------------------
+
+    def holder_targets(self, every_days: int = 7, limit: int | None = None,
+                       keys: list[str] | None = None) -> list[dict]:
+        """People and organisations whose holdings the registry search should look up:
+        {"key", "keys" (the key and a company's "org:" aliases), "name", "reg", "query", "kind",
+        "depth", "searched_at"}.
+
+        People need a full registry-style name ("Patronymic Given"): an initial form
+        ("Б.Батболд") matches thousands. Organisations are searched by name. A holder is
+        due when it was never searched or last searched `every_days` or more days ago.
+        Order: never searched first, then the closest to the starting companies (`depth`:
+        the smallest discovery_depth of the companies it is linked to; listed = 0), then
+        the longest ago. Nominees (custodians, brokers) and the state are left out.
+        `keys` picks given holders, due or not."""
+        return self.run(
+            """
+            MATCH (e:Entity)
+            WHERE ($keys IS NULL OR e.key IN $keys)
+              AND (e:Organization OR e:Company OR (e:Person AND e.name_form = 'full'
+                   AND e.patronymic IS NOT NULL AND e.given_name IS NOT NULL))
+              AND NOT coalesce(e.nominee, false)
+              AND coalesce(e.org_type, '') <> 'state'
+              AND ($keys IS NOT NULL OR e.holdings_searched_at IS NULL OR e.holdings_searched_at <= $due)
+            OPTIONAL MATCH (e)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company)
+            WHERE coalesce(r.current, true)
+            WITH e, CASE WHEN e:Company THEN coalesce(e.discovery_depth, 0)
+                         ELSE min(coalesce(c.discovery_depth, 0)) END AS depth
+            RETURN e.key AS key, e.name AS name,
+                   [e.key] + [a IN coalesce(e.aliases, []) WHERE a STARTS WITH 'org:'] AS keys,
+                   CASE WHEN e.register_no =~ $re THEN e.register_no END AS reg,
+                   CASE WHEN e:Person THEN e.patronymic + ' ' + e.given_name
+                        ELSE coalesce(e.registry_name, e.name) END AS query,
+                   CASE WHEN e:Person THEN 'person' ELSE 'organization' END AS kind,
+                   coalesce(depth, 0) AS depth, e.holdings_searched_at AS searched_at
+            ORDER BY searched_at IS NOT NULL, depth, searched_at, key
+            """ + (" LIMIT $limit" if limit else ""),
+            due=_days_ago(every_days), keys=keys, limit=limit, re=REGISTER_NO_RE)
+
+    def holder_target_count(self) -> int:
+        """How many holders the search covers (see holder_targets), due or not."""
+        return self.run(
+            """
+            MATCH (e:Entity)
+            WHERE (e:Organization OR e:Company OR (e:Person AND e.name_form = 'full'
+                   AND e.patronymic IS NOT NULL AND e.given_name IS NOT NULL))
+              AND NOT coalesce(e.nominee, false) AND coalesce(e.org_type, '') <> 'state'
+            RETURN count(e) AS n
+            """)[0]["n"]
+
+    def note_holder_searched(self, rows: list[dict]) -> None:
+        """{"key", "found", "new"}: when each holder was searched and what it gave."""
+        if rows:
+            self.run(
+                """
+                UNWIND $rows AS r
+                MATCH (e:Entity {key: r.key})
+                SET e.holdings_searched_at = $today, e.holdings_found = r.found, e.holdings_new = r.new
+                """, rows=rows, today=_today())
+
+    def holding_records(self) -> dict[str, str]:
+        """Search records already resolved to a register number: record id -> reg."""
+        return {r["rec"]: r["reg"] for r in self.run(
+            "MATCH (h:HoldingLead) WHERE h.reg IS NOT NULL RETURN h.record AS rec, h.reg AS reg")}
+
+    def save_holding_leads(self, rows: list[dict]) -> None:
+        """Keep what a holder search found: one (:HoldingLead) per registry record
+        ({"record", "model", "company", "company_key", "reg", "ticker", "holder_key",
+        "holder_name", "role", "since", "depth", "status"})."""
+        if rows:
+            self.run(
+                """
+                UNWIND $rows AS r
+                MERGE (h:HoldingLead {record: r.record})
+                SET h.model = r.model, h.company = r.company, h.company_key = r.company_key,
+                    h.reg = coalesce(r.reg, h.reg), h.ticker = r.ticker, h.holder_key = r.holder_key,
+                    h.holder_name = r.holder_name, h.role = r.role, h.since = r.since, h.depth = r.depth,
+                    h.status = r.status, h.found_at = coalesce(h.found_at, $today), h.checked_at = $today
+                """, rows=rows, today=_today())
+
+    def holding_leads(self, retry_days: int = 30, max_depth: int | None = None) -> list[dict]:
+        """Register numbers that holder searches found and the graph has no company for:
+        {"reg", "name", "depth", "via"} (`via`: the holders' names). Closest first."""
+        return self.run(
+            """
+            MATCH (h:HoldingLead) WHERE h.reg IS NOT NULL
+              AND NOT EXISTS { MATCH (x:Company) WHERE x.register_no = h.reg }
+              AND NOT EXISTS { MATCH (l:RegistryLead {reg: h.reg}) WHERE l.checked_at >= $after }
+            WITH h.reg AS reg, collect(h) AS hs, min(h.depth) AS depth
+            WHERE $max_depth IS NULL OR depth <= $max_depth
+            RETURN reg, hs[0].company AS name, depth,
+                   [x IN hs | x.holder_name][..5] AS via, size(hs) AS holders
+            ORDER BY depth, holders DESC, reg
+            """, after=_days_ago(retry_days), max_depth=max_depth)
 
     def _merge_orgs_into_companies(self):
         rows = self.run(
