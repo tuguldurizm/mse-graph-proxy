@@ -146,7 +146,8 @@ def discovery_step(g, fetcher, limit: int | None = None, keep_lease=None) -> Non
     from . import discovery
 
     opts = discovery.settings_from_env()
-    budget = min(opts["budget"], limit) if limit else opts["budget"]
+    budget = discovery.resolve_budget(g, opts)
+    budget = min(budget, limit) if limit else budget
     if budget <= 0:
         set_status("running", "registry discovery off (DISCOVERY_BUDGET=0)")
         return
