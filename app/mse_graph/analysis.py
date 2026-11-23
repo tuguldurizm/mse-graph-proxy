@@ -234,12 +234,30 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
              collect(CASE WHEN d IS NULL THEN NULL ELSE {{key: d.key, name: d.name, percent: o.percent}} END) AS holders
         RETURN c.key AS key, c.ticker AS ticker, c.name AS name, coalesce(c.listed, true) AS listed,
                round(direct, 3) AS direct_percent, round(lookthrough, 3) AS lookthrough_percent,
-               holders AS direct_holders, via AS top_owners
+               holders AS direct_holders, via AS top_owners, c.market_cap AS market_cap,
+               coalesce(c.price_stale, false) AS price_stale, c.price_date AS price_date
         ORDER BY lookthrough DESC, ticker
         """,
         keys=keys,
     )
-    return [r for r in rows if r["lookthrough_percent"] > 0 or r["direct_percent"] > 0]
+    from .market import value_mnt
+
+    out = [r for r in rows if r["lookthrough_percent"] > 0 or r["direct_percent"] > 0]
+    for r in out:   # MNT (issue #31): the state's share of the company's market cap
+        r["direct_value_mnt"] = value_mnt(r["direct_percent"], r["market_cap"])
+        r["lookthrough_value_mnt"] = value_mnt(r["lookthrough_percent"], r["market_cap"])
+    return out
+
+
+def state_value_summary(rows: list[dict]) -> dict:
+    """Totals over state_ownership(): companies, and the MNT value of the state's stakes in the
+    ones with a market cap (issue #31)."""
+    valued = [r for r in rows if r["market_cap"] is not None]
+    return {"companies": len(rows), "listed": sum(1 for r in rows if r["listed"]),
+            "valued": len(valued),
+            "direct_value_mnt": round(sum(r["direct_value_mnt"] or 0 for r in valued), 0) if valued else None,
+            "lookthrough_value_mnt": round(sum(r["lookthrough_value_mnt"] or 0 for r in valued), 0) if valued else None,
+            "market_cap_of_valued": round(sum(r["market_cap"] for r in valued), 0) if valued else None}
 
 
 # ---- nominee and treasury holdings (issue #39) --------------------------------------

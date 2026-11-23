@@ -2347,7 +2347,8 @@ class Graph:
                 OPTIONAL MATCH (e)-[r:OWNS]->(t:Company)
                 RETURN collect(CASE WHEN t IS NULL THEN NULL ELSE
                     {{key: t.key, name: t.name, ticker: t.ticker, holding_type: r.holding_type,
-                      share_class: r.share_class, basis: r.basis,
+                      share_class: r.share_class, basis: r.basis, market_cap: t.market_cap,
+                      price_date: t.price_date, price_stale: t.price_stale,
                       percent: r.percent, shares: r.shares, as_of: r.as_of, {period}}} END) AS holdings
             }}
             CALL (e) {{
@@ -2390,6 +2391,7 @@ class Graph:
                                           key=lambda i: i["until"] or "", reverse=True)
         out["owners"].sort(key=lambda x: -(x["percent"] or 0))
         company = out["entity"]["type"] == "Company"
+        self._value_stakes(out)
         out["related_companies"] = self.related_companies(key) if company else []
         # current stakes by holding type (issue #39): the nominee and treasury share
         out["ownership"] = self.ownership_summary(key) if company else None
@@ -2398,6 +2400,23 @@ class Graph:
         out["facts"] = [f for f in facts if f["current"]]
         out["history"]["facts"] = [f for f in facts if not f["current"]]
         return out
+
+    @staticmethod
+    def _value_stakes(out: dict) -> None:
+        """MNT values of the stakes (issue #31, market.py): percent x the market cap of the company
+        the stake is in. `holdings_value_mnt` sums the current direct holdings that have one."""
+        from .market import value_mnt
+
+        e = out["entity"]
+        e.pop("px_dates", None), e.pop("px_close", None), e.pop("px_cap", None)   # the series: /market
+        for part in ("owners", "holdings"):
+            for row in out[part] + out["history"][part]:
+                cap = e.get("market_cap") if part == "owners" else row.get("market_cap")
+                row["value_mnt"] = value_mnt(row.get("percent"), cap) if row.get("current") else None
+        vals = [h["value_mnt"] for h in out["holdings"]
+                if h["value_mnt"] is not None and (h.get("holding_type") or "direct") in ("direct", "unknown")]
+        out["holdings_value_mnt"] = round(sum(vals), 0) if vals else None
+        out["holdings_valued"] = len(vals)
 
     def related_companies(self, key: str) -> list[dict]:
         """Other listed companies connected through a shared person or shareholder (now)."""
@@ -2430,7 +2449,7 @@ class Graph:
             UNWIND nodes AS n WITH collect(DISTINCT n) AS nodes, rels
             UNWIND (CASE WHEN rels = [] THEN [null] ELSE rels END) AS r
             WITH nodes, collect(DISTINCT r) AS rels
-            RETURN [n IN nodes | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
+            RETURN [n IN nodes | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                   percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,
@@ -2449,7 +2468,7 @@ class Graph:
             UNWIND rs AS r
             WITH collect(DISTINCT x) + collect(DISTINCT endNode(r)) AS ns, collect(DISTINCT r) AS rels
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
-            RETURN [n IN nodes | n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
+            RETURN [n IN nodes | n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}] AS nodes,
                    [r IN rels | {source: startNode(r).key, target: endNode(r).key, type: type(r),
                                  percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}] AS edges
             """,
@@ -2465,7 +2484,7 @@ class Graph:
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
             MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
-            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
+            RETURN [n IN nodes(p) | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: [l IN labels(n) WHERE l IN ['Company', 'Person', 'Organization']][0]}}] AS nodes,
                    [r IN relationships(p) | {{source: startNode(r).key, target: endNode(r).key, type: type(r),
                                               percent: r.percent, title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges
             """,

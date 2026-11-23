@@ -59,7 +59,7 @@ _NODES = f"""
 MATCH (e:Entity) WHERE EXISTS {{ (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]-(:Entity) }}
 RETURN e.key AS key, e.name AS name, e.ticker AS ticker, {_TYPE.format("e")} AS type,
        CASE WHEN e:Company THEN coalesce(e.listed, true) ELSE false END AS listed,
-       e.register_no AS register_no
+       e.register_no AS register_no, e.market_cap AS market_cap
 """
 
 _EDGES = """
@@ -220,7 +220,19 @@ def _group(net: Network, owner: str, members: dict, parent: dict) -> dict:
                           "via": [{"key": m, "name": net.label(m), "percent": p} for m, p in parts]})
     companies.sort(key=lambda x: (x["level"] != "control", not x["listed"], -x["lookthrough_percent"],
                                   x["ticker"] or x["name"] or ""))
+    # MNT (issue #31): the market cap of the companies it controls, and its look-through share
+    # of the market cap of all its companies (percent x market cap); companies without one count 0
+    for x in companies:
+        x["market_cap"] = (net.nodes.get(x["key"]) or {}).get("market_cap")
+    valued = [x for x in companies if x["market_cap"] is not None]
+    for x in companies:
+        x["lookthrough_value_mnt"] = (round(x["lookthrough_percent"] / 100.0 * x["market_cap"], 0)
+                                      if x["market_cap"] is not None else None)
     return {**net.node(owner),
+            "controlled_market_cap": round(sum(x["market_cap"] for x in valued if x["level"] == "control"), 0)
+                                     if valued else None,
+            "lookthrough_value_mnt": round(sum(x["lookthrough_value_mnt"] for x in valued), 0) if valued else None,
+            "valued_companies": len(valued),
             "companies": companies,
             "controlled": sum(1 for x in companies if x["level"] == "control"),
             "influenced": sum(1 for x in companies if x["level"] == "influence"),
@@ -382,7 +394,7 @@ def community_subgraph(g, gid: str, limit: int = 600) -> dict:
         UNWIND ns AS a
         OPTIONAL MATCH (a)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(b:Entity) WHERE b IN ns
         WITH ns, collect(r)[..$limit] AS rels
-        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: {_TYPE.format("n")}}}] AS nodes,
+        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: {_TYPE.format("n")}}}] AS nodes,
                [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent,
                              title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges""", gid=gid,
                  limit=limit)
@@ -400,7 +412,7 @@ def subgraph(g, keys: list[str], limit: int = 600) -> dict:
         UNWIND ns AS a
         OPTIONAL MATCH (a)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(b:Entity) WHERE b IN ns
         WITH ns, collect(r)[..$limit] AS rels
-        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, type: {_TYPE.format("n")}}}] AS nodes,
+        RETURN [n IN ns | n {{.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, .market_cap, type: {_TYPE.format("n")}}}] AS nodes,
                [r IN rels | {{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent,
                              title: r.title, role: r.role, holding_type: r.holding_type}}] AS edges""",
                  keys=keys, limit=limit)
