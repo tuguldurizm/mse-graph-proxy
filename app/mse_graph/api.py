@@ -396,6 +396,18 @@ def company_market(ticker: str):
     return {"market": row, "coverage": quality.coverage(g(), "market")}
 
 
+# ---- public officials' declared interests (issue #9): officials.py ---------------------------
+
+@app.get("/api/analysis/officials")
+def officials(min_companies: int = Query(1, ge=1), listed_only: bool = False,
+              limit: int = Query(500, ge=1, le=5000)):
+    """Public officials whose asset and income declarations name a company, from the companies'
+    Open Data Lab registry pages: a disclosed interest, not a finding. Officials are kept apart
+    from people (their names are initials only); possible matches need the review password."""
+    from . import officials as off
+    return _covered("officials", off.report(g(), min_companies, listed_only, limit))
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.
@@ -457,6 +469,16 @@ def review_relations(request: Request, min_score: float = Query(0.05, ge=0, le=1
     from . import relations
     _check_review_password(request, "see possible family links")
     return relations.review(g(), min_score, limit)
+
+
+@app.get("/api/review/officials")
+def review_officials(request: Request, limit: int = Query(500, ge=1, le=5000)):
+    """Officials (issue #9) and the people at the same company whose name fits theirs (same
+    initial and given name). Hypotheses about who is a public official: served only with the
+    review password (X-Review-Password), never without one."""
+    from . import officials as off
+    _check_review_password(request, "see possible matches between officials and people")
+    return {"items": off.possible_people(g(), limit)}
 
 
 @app.get("/api/review/export/{name}", include_in_schema=False)

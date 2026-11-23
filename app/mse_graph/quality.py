@@ -56,7 +56,8 @@ CALL (c) {{
 }}
 RETURN c.key AS key, c.ticker AS ticker, c.name AS name, c.sector AS sector, c.sector_mse AS sector_mse,
        c.sector_std AS sector_std, c.register_no AS register_no, c.state_reg_no AS state_reg_no,
-       c.registry_url AS registry_url, c.market_cap AS market_cap, stakes, officers
+       c.registry_url AS registry_url, c.registry_lists_at AS registry_lists_at, c.market_cap AS market_cap,
+       stakes, officers
 ORDER BY c.ticker
 """
 
@@ -115,6 +116,9 @@ PARTS = {
     "sector": ("a sector", "салбартай", lambda r: r["sector_any"]),
     "sector_std": ("a standard sector (registry activity codes)", "стандарт салбартай (үйл ажиллагааны код)",
                    lambda r: bool(r["sector_std"])),
+    "registry_lists": ("registry page read for officials, licences and tenders (Open Data Lab)",
+                       "албан тушаалтан, тусгай зөвшөөрөл, тендер уншсан (Open Data Lab)",
+                       lambda r: bool(r.get("registry_lists_at"))),
     "market_cap": ("a market cap (mse.mn price x shares)", "зах зээлийн үнэлгээтэй (mse.mn)",
                    lambda r: r.get("market_cap") is not None),
 }
@@ -141,6 +145,7 @@ ANALYSES = {
     "accumulation": ("holdings", "registry_owners"),
     "trends": ("holdings", "officers", "registry_owners", "registry_officers"),
     "market": ("market_cap", "holdings"),
+    "officials": ("registry_lists", "registry"),
 }
 
 

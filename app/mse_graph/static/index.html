@@ -124,6 +124,7 @@
   </div>
   <div class="row">
     <button id="btnMarket">Ханш, зах зээлийн үнэлгээ</button>
+    <button id="btnOfficials" title="Хөрөнгө, орлогын мэдүүлэгтээ компанийг дурдсан нийтийн албан тушаалтан (Open Data Lab, issue #9)">Нийтийн албан тушаалтан</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -262,6 +263,7 @@ async function showDetails(d) {
             (own.treasury.holders ? ` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
   html += concBlock(conc);
   html += turnoverBlock(turn);
+  html += officialsBlock(e, d);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
@@ -526,6 +528,7 @@ document.getElementById('analysis').addEventListener('click', ev => {
   const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });
   const ts = ev.target.closest('button[data-turn-sort]'); if (ts) return showTurnover(ts.dataset.turnSort);
   const ms = ev.target.closest('button[data-msort]'); if (ms) return showMarket(ms.dataset.msort);
+  const ol = ev.target.closest('button[data-off-listed]'); if (ol) return showOfficials(ol.dataset.offListed === '1');
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const gr = ev.target.closest('li[data-group]'); if (gr) return showGroup(gr.dataset.group);
   const cm = ev.target.closest('li[data-community]'); if (cm) return showCommunity(cm.dataset.community);
@@ -818,6 +821,56 @@ async function showMarket(sort = 'cap') {
   ul.innerHTML = html;
 }
 document.getElementById('btnMarket').onclick = () => showMarket();
+
+// ---- public officials' declared interests, licences, tenders (issue #9) ----------------------
+// From the company's Open Data Lab registry page. A declaration that names a company is a
+// disclosed interest, not a finding. Officials are not people nodes: their names are initials.
+const ODL_NOTE = 'Хөрөнгө, орлогын мэдүүлэгтээ (ХОМ) компанийг дурдсан нь ашиг сонирхлын мэдээлэл болохоос дүгнэлт биш. Эх сурвалж: Open Data Lab (opendatalab.mn).';
+const safeUrl = u => /^https:\/\/(www\.)?opendatalab\.mn\//.test(u || '') ? u : '';
+function declYears(x) {
+  return (x.years || []).map((y, i) => {
+    const u = safeUrl((x.reports || [])[i]);
+    return u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(y || 'ХОМ')}</a>` : esc(y);
+  }).join(', ');
+}
+function officialRow(o) {
+  return `<li style="cursor:default"><span>${esc(o.name)} <span class="meta">${esc(o.position || '')}</span>` +
+    `${o.iaac ? ' <span class="flag" title="АТГ-т мэдүүлгээ бүртгүүлдэг албан тушаалтан">АТГ</span>' : ''}</span>` +
+    `<span class="meta" style="white-space:nowrap">${declYears(o)}</span></li>`;
+}
+function officialsBlock(e, d) {
+  let html = '';
+  const di = d.declared_interests || [], ended = (d.history || {}).declared_interests || [];
+  if (di.length)
+    html += `<h2>Хамаарал бүхий нийтийн албан тушаалтан (${di.length})</h2><div class="meta">${ODL_NOTE}</div>` +
+            `<ul>${di.map(officialRow).join('')}</ul>`;
+  if (ended.length)
+    html += `<h2>Бүртгэлээс хасагдсан албан тушаалтан</h2><ul>${ended.map(officialRow).join('')}</ul>`;
+  if (e.licenses && e.licenses.length)
+    html += `<h2>Тусгай зөвшөөрөл (${e.licenses.length})</h2><ul>${e.licenses.map(l =>
+      `<li style="cursor:default"><span class="meta">${esc(l)}</span></li>`).join('')}</ul>`;
+  if (e.tenders && e.tenders.length)
+    html += `<h2>Оролцсон тендер (${e.tenders.length}, шалгарсан ${e.tenders_won || 0})</h2><ul>${e.tenders.map(t =>
+      `<li style="cursor:default"><span class="meta">${esc(t)}</span></li>`).join('')}</ul>`;
+  return html;
+}
+async function showOfficials(listed = false) {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api(`/api/analysis/officials?limit=300${listed ? '&listed_only=true' : ''}`), s = r.summary;
+  let html = covLine(r.coverage);
+  html += `<li class="sorts"><button data-off-listed="0" class="${listed ? '' : 'on'}">Бүх компани</button>` +
+          `<button data-off-listed="1" class="${listed ? 'on' : ''}">Бүртгэлтэй (MSE) компанитай</button></li>`;
+  html += `<li class="meta" style="cursor:default">${s.officials} албан тушаалтан (${s.iaac_officials} нь АТГ-т мэдүүлдэг) · ` +
+          `${s.interests} холбоо · ${s.companies} компани (${s.listed_companies} нь MSE-д бүртгэлтэй) · ${s.in_several_companies} нь 2+ компанитай · ` +
+          `${s.pages_read} компанийн хуудас уншсан. ${ODL_NOTE}</li>`;
+  html += r.items.map(o => `<li class="rv" style="cursor:default">
+      <span class="name">${esc(o.name)}${o.iaac ? ' <span class="flag">АТГ</span>' : ''} <span class="meta">${esc(o.position || '')}</span></span>
+      <div class="meta">${o.companies.map(c => `<span data-open="${esc(c.company_key)}" style="cursor:pointer; text-decoration:underline">${esc(c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.company)}</span> (${declYears(c)})`).join(' · ')}</div></li>`).join('')
+    || '<li class="meta">Албан тушаалтны мэдээлэл хараахан алга (компанийн бүртгэлийн хуудсыг уншихад нэмэгдэнэ)</li>';
+  ul.innerHTML = html;
+}
+document.getElementById('btnOfficials').onclick = () => showOfficials();
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');
