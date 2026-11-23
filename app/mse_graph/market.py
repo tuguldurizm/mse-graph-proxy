@@ -1,18 +1,20 @@
 """Market data (issue #31): share prices, shares outstanding and market capitalisation from
 mse.mn, so stakes, state holdings and groups can be valued in MNT, not only counted.
 
-Sources, all on mse.mn, read through the scraper's Fetcher (the same egress route, 1 s crawl
-delay and 20 h page cache as the company scrape):
+Source: each listed company's trading tab, open.mse.mn/securities/<id>/tab/tradeinfo, read
+through the scraper's Fetcher (the same egress route, 1 s crawl delay and 20 h page cache as the
+company scrape). As served on 2026-11-23 it holds two label/value tables (Өмнөх өдрийн хаалтын ханш,
+Хаалтын ханш (0.00 until the day's first trade), Нийт гаргасан хувьцаа, Эргэлтэд гаргасан хувьцаа,
+Зах зээлийн үнэлгээ = previous close × all shares issued, ...) and "Арилжигдсан түүх", every
+trading day newest first (Огноо | Нээлтийн ханш | Хаалтын ханш | ...): the last close and its date
+come from there when there was no trade today. A page is 0.5 to 2 MB. The profile page
+(open.mse.mn/securities/<id>) is read only when the tab has no share count.
 
-* the trade report, `MSE_TRADE_REPORT_API` (mse.mn/api/public/trade-report/detailed): the
-  day's trades of every security in one request;
-* each listed company's trading tab, open.mse.mn/securities/<id>/tab/tradeinfo;
-* the company's profile page, open.mse.mn/securities/<id>, for shares outstanding when the
-  tab doesn't give them (it is usually still cached from the company scrape).
-
-mse.mn could not be reached while this was written, so, like scraper.py, parsing goes by
-labels and JSON key names rather than a fixed layout, and every read logs the layout it saw
-(`MARKET layout ...` lines: tables, labels, JSON keys) so the next session can tighten it.
+Parsing goes by labels (and, for JSON, key names) rather than positions, and skips the previous
+day's, bid / ask, 52-week and range values. MARKET_LAYOUT_LOG=N logs the layout of the first N
+pages (`MARKET layout` lines) to check it again if the site changes. The trade report
+(`MSE_TRADE_REPORT_API`, mse.mn/api/public/trade-report/detailed) turned out to be an .xlsx
+download; it is read only with MARKET_TRADE_REPORT=1 and the JSON / HTML-table parsers here.
 
 Stored on the Company node (only listed companies, matched by ticker):
 
@@ -53,7 +55,6 @@ log = logging.getLogger(__name__)
 
 TRADE_REPORT_API = os.getenv("MSE_TRADE_REPORT_API",
                              "https://mse.mn/api/public/trade-report/detailed?lang=mn")
-STOCK_CHART_JS = os.getenv("MSE_STOCK_CHART_JS", "https://open.mse.mn/assets/js/stock-chart.js")
 
 
 def stale_days() -> int:
@@ -168,7 +169,8 @@ LABEL_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 # words in a label that make it about something else (the previous day, a 52-week range, a dividend)
 _SKIP_LABEL = re.compile(r"өмнөх|prev|52|жилийн|year|ногдол|dividend|нэрлэсэн|nominal|par value|ipo|санал|bid|ask|"
-                         r"захиалга|order|шинэчлэгдсэн|updated|нийтэлсэн|published")
+                         r"авах|зарах|vwap|хязгаар|range|захиалга|order|шинэчлэгдсэн|updated|нийтэлсэн|published|"
+                         r"цэвэр хөрөнгө|нэгж эрх")
 # an absolute change ("Өөрчлөлт", "Change") is no price; its percent form is matched first
 _CHANGE = re.compile(r"өөрчлөлт|change")
 
@@ -297,7 +299,10 @@ def parse_html(html: str, ticker: str, source: str = "") -> Quote:
             q.series = _series(table)
         _row_quote(table, q.ticker, q)
     if q.series and q.close is None:
+        # no trade yet today (today's close is 0.00): the last close is the history's newest row,
+        # and today's zero volume and turnover don't belong to it
         q.trade_date, q.close = q.series[-1]
+        q.volume = q.turnover = None
     if q.series and not q.trade_date and q.close == q.series[-1][1]:
         q.trade_date = q.series[-1][0]
     return q
@@ -460,8 +465,9 @@ def listed_companies(g) -> list[dict]:
 
 def read(g=None, fetcher=None, companies: list[dict] | None = None, limit: int | None = None,
          profile: bool | None = None, layout: int | None = None) -> tuple[dict[str, Quote], dict]:
-    """Read today's quotes: the trade report, then each listed company's trading tab (and its
-    profile page when the tab gives no share count). Returns ({ticker: Quote}, report)."""
+    """Read today's quotes: each listed company's trading tab (and its profile page when the tab
+    gives no share count; first the trade report with MARKET_TRADE_REPORT=1).
+    Returns ({ticker: Quote}, report)."""
     from .scraper import OPEN_BASE, Fetcher
 
     fetcher = fetcher or Fetcher()
@@ -469,26 +475,23 @@ def read(g=None, fetcher=None, companies: list[dict] | None = None, limit: int |
     if limit:
         companies = companies[:limit]
     profile = os.getenv("MARKET_PROFILE", "1") != "0" if profile is None else profile
-    layout = int(os.getenv("MARKET_LAYOUT_LOG", "2")) if layout is None else layout
+    layout = int(os.getenv("MARKET_LAYOUT_LOG", "0")) if layout is None else layout
     report = {"companies": len(companies), "report_quotes": 0, "tabs_read": 0, "tabs_failed": 0,
               "profiles_read": 0, "errors": []}
     quotes: dict[str, Quote] = {}
 
-    if os.getenv("MARKET_TRADE_REPORT", "1") != "0":
+    if os.getenv("MARKET_TRADE_REPORT", "0") == "1":
         text = fetcher.get(TRADE_REPORT_API, use_cache=False)
-        if text:
+        if text and text.startswith("PK"):
+            # what mse.mn serves there (2026-11-23) is an .xlsx download, not JSON
+            report["errors"].append("trade report: a spreadsheet (.xlsx), not read")
+        elif text:
             if layout:
                 describe(text, TRADE_REPORT_API)
             quotes = parse_report(text)
             report["report_quotes"] = len(quotes)
         else:
             report["errors"].append(f"trade report: {fetcher.last_error or fetcher.last_status}")
-        if layout:
-            js = fetcher.get(STOCK_CHART_JS)
-            if js:   # where the chart's price history comes from
-                paths = sorted(set(re.findall(r"""[`"'](/?[\w/.:{}$-]*(?:api|chart|trade|price|histor)[\w/.?=&:{}$-]*)[`"']""",
-                                              js, re.I)))[:30]
-                log.info("MARKET layout %s: paths=%s", STOCK_CHART_JS, paths)
 
     for i, c in enumerate(companies):
         t = (c.get("ticker") or "").upper()
