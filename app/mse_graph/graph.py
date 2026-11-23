@@ -352,7 +352,11 @@ class Graph:
             self.driver = HttpDriver(uri, auth, database=self.database)
             self.http = True
         else:
-            self.driver = GraphDatabase.driver(uri, auth=auth, notifications_min_severity="OFF")
+            # Aura drops connections that sit idle (the FRC step fetches for minutes between two queries:
+            # "Failed to read from defunct connection", 2026-11-23): test a connection idle for more than
+            # 30 s before using it, and replace connections after 10 minutes.
+            self.driver = GraphDatabase.driver(uri, auth=auth, notifications_min_severity="OFF",
+                                               liveness_check_timeout=30, max_connection_lifetime=600)
             self.http = False
 
     def close(self):
