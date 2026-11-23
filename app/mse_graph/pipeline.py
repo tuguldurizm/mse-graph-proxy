@@ -189,8 +189,8 @@ def market_step(g, force: bool = False) -> None:
 
 
 def frc_step(g, force: bool = False) -> None:
-    """A look at FRC's data API (issue #10, frc.py): logs `FRC layout` lines, at most every
-    FRC_MIN_INTERVAL_HOURS (20), at most FRC_MAX_REQUESTS (15) requests, FRC_DELAY (5 s) apart.
+    """FRC's licensed entities (issue #10, frc.py): every list, then the shareholders and board of
+    FRC_DETAIL_BUDGET (20) entities, FRC_DELAY (5 s) apart, at most every FRC_MIN_INTERVAL_HOURS (20).
     FRC_ENABLE=0 turns it off. Never raises."""
     from . import frc
 
@@ -202,12 +202,13 @@ def frc_step(g, force: bool = False) -> None:
         if since is not None and since < min_hours and not force and os.getenv("PIPELINE_FORCE") != "1":
             return
         set_status("running", "reading FRC (frc.mn)")
-        res = frc.probe()
-        frc.mark_probe(g, res)
-        log.info("PIPELINE frc: %s", json.dumps({k: res[k] for k in ("requests", "menus", "listings")} |
-                                                 {"errors": res["errors"][:3]}, ensure_ascii=False))
+        res = frc.step(g)
+        frc.mark_step(g, res)
+        log.info("PIPELINE frc: %s", json.dumps({k: v for k, v in res.items() if k != "errors"} |
+                                                 {"errors": res["errors"][:3]}, ensure_ascii=False, default=str))
     except Exception as exc:
         log.warning("PIPELINE frc failed: %s", exc)
+        log.error(traceback.format_exc())
 
 
 def keep_awake(url: str, stop: threading.Event, interval: float = 240.0, get=None) -> int:

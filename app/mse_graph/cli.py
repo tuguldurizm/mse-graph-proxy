@@ -253,6 +253,9 @@ def main(argv=None):
     p = sub.add_parser("ask", help="ask the graph a question in plain Mongolian or English (#10); answered by a "
                                    "fixed set of read-only queries")
     p.add_argument("question", nargs="+")
+    p = sub.add_parser("frc", help="import FRC's licensed entities (frc.mn port 5001; needs open egress, not a cloud "
+                                   "session): lists, licences, CEOs, and the shareholders and board of --budget entities")
+    p.add_argument("--budget", type=int, help="entities whose details to read (default FRC_DETAIL_BUDGET or 20)")
     p = sub.add_parser("frc-probe",
                        help="describe FRC's data API (frc.mn, port 5001): the menu and the disclosure-like listings, "
                             "as 'FRC layout' lines; needs open egress (not a cloud session)")
@@ -520,6 +523,12 @@ def main(argv=None):
             _trends_cmd(g, args)
         elif args.cmd == "market":
             _market_cmd(g, args)
+        elif args.cmd == "frc":
+            from . import frc
+            logging.getLogger("mse_graph.frc").setLevel(logging.INFO)
+            res = frc.step(g, budget=args.budget)
+            frc.mark_step(g, res)
+            print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
         elif args.cmd == "ask":
             from . import ask
             print(json.dumps(ask.answer(g, " ".join(args.question)), ensure_ascii=False, indent=2, default=str))
