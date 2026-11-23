@@ -337,6 +337,41 @@ def centrality(kind: str = Query("all", pattern="^(all|person|company|organizati
     return _covered("centrality", cen.report(g(), kind=kind, by=by, limit=limit, fresh=fresh))
 
 
+# ---- trends over time (issue #30): trends.py ----------------------------------------------
+
+@app.get("/api/analysis/turnover")
+def turnover(sort: str = Query("rate", pattern="^(rate|departures|tenure|ceo_tenure|ticker)$")):
+    """Officer turnover per listed company: arrivals and departures per year, the turnover
+    rate (only over a full year of history), average tenure and the current CEO's tenure.
+    A departure happened between `last_seen` and the scrape that missed the person."""
+    from . import trends
+    return _covered("turnover", trends.turnover(g(), sort))
+
+
+@app.get("/api/companies/{ticker}/turnover")
+def company_turnover(ticker: str):
+    from . import quality, trends
+    t = g().resolve_ticker(ticker)
+    return {"turnover": trends.company_turnover(g(), g().company_keys().get(t, "company:" + t)),
+            "settings": trends.settings(), "coverage": quality.coverage(g(), "turnover")}
+
+
+@app.get("/api/analysis/accumulation")
+def accumulation():
+    """Holders whose stake rose over several consecutive scrapes and still holds, with the
+    thresholds crossed or approached (alert settings, not legal rules)."""
+    from . import trends
+    return _covered("accumulation", trends.accumulation_report(g()))
+
+
+@app.get("/api/analysis/trends")
+def market_trends(every: str = Query("auto", pattern="^(auto|day|week|month)$")):
+    """Market-wide time series rebuilt from the edge periods: direct state stakes, interlocks,
+    cross-holdings, median HHI and coverage counts per date, from `history_start`."""
+    from . import trends
+    return _covered("trends", trends.market(g(), every))
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.

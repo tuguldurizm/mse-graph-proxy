@@ -51,6 +51,10 @@ def describe(c: dict) -> str:
         return f"Албан тушаалаас гарсан: {who} — {c['old']}"
     if k == "position_changed":
         return f"Албан тушаал өөрчлөгдсөн: {who}: {c['old']} → {c['new']}"
+    if k == "stake_accumulation":
+        near = f" · {c['approaching']:g}%-д ойртож байна" if c.get("approaching") is not None else ""
+        return (f"Хуримтлуулж байна: {who} {_pct(c['old'])} → {_pct(c['new'])} "
+                f"({c['steps']} алхам, {c.get('since', '')}-аас){flag}{near}")
     if k == "company_added":
         return "Жагсаалтад шинээр нэмэгдсэн компани"
     if k == "company_removed":

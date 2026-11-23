@@ -36,6 +36,11 @@
     python -m mse_graph.cli centrality [--kind all|person|company|organization] [--by betweenness|pagerank|degree]
                                        [--limit N] [--write] [--json]
                                                            brokers and influential owners (#29); --write sets centrality_*
+    python -m mse_graph.cli turnover [--sort rate|departures|tenure|ceo_tenure|ticker] [--ticker T] [--json]
+                                                           officers who arrived / left, tenure, CEO tenure (#30)
+    python -m mse_graph.cli accumulation [--json]          holders whose stake keeps rising, thresholds crossed (#30)
+    python -m mse_graph.cli trends [--every auto|day|week|month] [--json]
+                                                           market time series: state, interlocks, HHI (#30)
 
 Every analysis command ends with a coverage line (on stderr for the JSON ones, so stdout
 stays JSON): how many of the listed companies its result rests on (issue #27).
@@ -154,6 +159,16 @@ def main(argv=None):
     p.add_argument("--by", default="betweenness", choices=["betweenness", "pagerank", "degree"])
     p.add_argument("--limit", type=int, default=30)
     p.add_argument("--write", action="store_true", help="write centrality_* onto the nodes")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("turnover", help="officer turnover, tenure and CEO tenure per listed company (#30)")
+    p.add_argument("--sort", default="rate", choices=["rate", "departures", "tenure", "ceo_tenure", "ticker"])
+    p.add_argument("--ticker", help="one company, with its arrivals and departures")
+    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("accumulation", help="holders whose stake rose over several scrapes (#30)")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("trends", help="market-wide time series rebuilt from the edge periods (#30)")
+    p.add_argument("--every", default="auto", choices=["auto", "day", "week", "month"])
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("flags", help="governance flags for one company")
     p.add_argument("ticker")
@@ -428,6 +443,8 @@ def main(argv=None):
             _groups_cmd(g, args)
         elif args.cmd == "centrality":
             _centrality_cmd(g, args)
+        elif args.cmd in ("turnover", "accumulation", "trends"):
+            _trends_cmd(g, args)
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":
@@ -530,6 +547,71 @@ def _centrality_cmd(g, args) -> None:
     if written:
         print(f"centrality written: {written['nodes']} nodes")
     _coverage(g, "centrality", sys.stdout)
+
+
+def _trends_cmd(g, args) -> None:
+    """Trends over time (issue #30, trends.py)."""
+    from . import trends
+
+    def f(v, fmt="{:g}"):
+        return "-" if v is None else fmt.format(v)
+
+    if args.cmd == "turnover":
+        res = trends.turnover(g, args.sort, key=g.resolve_key("company:" + g.resolve_ticker(args.ticker))
+                              if args.ticker else None)
+        if args.json:
+            _print(res)
+            _coverage(g, "turnover")
+            return
+        s = res["summary"]
+        print(f"history {s['history_start']} – {s['as_of']}; a rate needs a full year of history")
+        print(f"{'ticker':<10} {'officers':>8} {'arrived':>7} {'left':>5} {'left/yr':>7} {'rate':>6}"
+              f" {'tenure':>7}  CEO (years)")
+        for c in res["items"][:args.limit]:
+            ceo = f"{c['ceo']['name']} ({f(c['ceo']['tenure_years'])}{'+' if c['ceo']['tenure_from'] == 'first_seen' else ''})" \
+                if c["ceo"] else "-"
+            print(f"{c['ticker'] or c['name']:<10} {c['officers']:>8} {c['arrivals']:>7} {c['departures']:>5}"
+                  f" {f(c['departures_per_year']):>7} {f(c['turnover_rate']):>6} {f(c['avg_tenure_years']):>7}"
+                  f"  {ceo}{'  HIGH' if c['high'] else ''}")
+            if args.ticker:
+                for a in c["arrived"]:
+                    print(f"    + {a['date']}  {a['name']} — {a['title']}")
+                for d in c["left"]:
+                    print(f"    - {d['between'][0]} … {d['between'][1]}  {d['name']} — {d['title']}")
+        print(f"{s['companies']} companies, {s['rated']} with a rate, {s['high']} high; "
+              f"median rate {f(s['median_rate'])}, median tenure {f(s['median_tenure_years'])} y, "
+              f"median CEO tenure {f(s['median_ceo_tenure_years'])} y  ('+' = at least: since first seen)")
+        _coverage(g, "turnover", sys.stdout)
+    elif args.cmd == "accumulation":
+        res = trends.accumulation_report(g)
+        if args.json:
+            _print(res)
+            _coverage(g, "accumulation")
+            return
+        for a in res["items"]:
+            path = " → ".join(f"{p['percent']:g}%" for p in a["path"])
+            mark = (" crossed " + ", ".join(f"{t:g}%" for t in a["crossed"]) if a["crossed"] else "") + \
+                   (f" near {a['approaching']:g}%" if a["approaching"] is not None else "")
+            print(f"{a['ticker'] or a['company']:<10} {a['entity'][:40]:<40} {path}  ({a['steps']} steps since"
+                  f" {a['since']}){mark}")
+        print(f"{len(res['items'])} holders accumulating (history from {res['history_start']}; "
+              f"thresholds {', '.join(f'{t:g}' for t in res['settings']['accumulation_thresholds'])}%"
+              " are alert settings, not legal rules)")
+        _coverage(g, "accumulation", sys.stdout)
+    else:
+        res = trends.market(g, args.every)
+        if args.json:
+            _print(res)
+            _coverage(g, "trends")
+            return
+        print(f"history from {res['history_start']}, one point per {res['every']}")
+        print(f"{'date':<10} {'cos':>4} {'held':>4} {'state':>5} {'state%':>6} {'interl':>6} {'cross':>5}"
+              f" {'medHHI':>7} {'officers':>8}")
+        for p in res["points"]:
+            print(f"{p['date']:<10} {p['companies']:>4} {p['with_holdings']:>4} {p['state_companies']:>5}"
+                  f" {f(p['state_mean_percent']):>6} {p['interlocks']:>6} {p['cross_holdings']:>5}"
+                  f" {f(p['median_hhi']):>7} {p['officers']:>8}")
+        _coverage(g, "trends", sys.stdout)
 
 
 def _coverage(g, analysis: str, out=None) -> None:

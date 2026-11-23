@@ -135,6 +135,9 @@ ANALYSES = {
     "groups": ("holdings", "holdings_plausible", "registry_owners"),
     "communities": ("holders", "officers", "registry_owners", "registry_officers"),
     "centrality": ("holders", "officers", "registry_owners", "registry_officers"),
+    "turnover": ("officers", "registry_officers"),
+    "accumulation": ("holdings", "registry_owners"),
+    "trends": ("holdings", "officers", "registry_owners", "registry_officers"),
 }
 
 

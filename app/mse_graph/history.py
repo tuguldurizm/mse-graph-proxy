@@ -28,6 +28,9 @@ company_renamed                       a source gives the company another name (a
                                       the old name stays an alias)
 company_fact_changed                  another value for the English name, address, legal form, sector
                                       or activity codes (`field`); shown, never sent as an alert
+stake_accumulation                    a holder's stake rose over several consecutive periods (`steps`,
+                                      from `old` to `new`, `crossed` / `approaching` thresholds;
+                                      trends.py, issue #30). Comes with that last step's stake_changed
 """
 from __future__ import annotations
 
@@ -336,6 +339,12 @@ def changes(g, *, run: str | None = None, since: str | None = None, ticker: str 
         for x in gone.values():
             add("position_removed", x, old=x["title"], role=x["role"], role_std=x.get("role_std"),
                 last_seen=x["last_seen"])
+
+    # stakes that kept rising over several scrapes (issue #30), dated by their latest step
+    from . import trends
+    for a in trends.accumulations(g, current_only=False, listed_only=False, ticker=params["ticker"], key=key,
+                                  run=run, since=None if run else params["since"]):
+        out.append({k: v for k, v in a.items() if k not in ("opened_run", "current", "listed")})
 
     # newest first; within a day by company, the company itself first, then the biggest moves
     out.sort(key=lambda c: (c["ticker"], c["kind"] != "company_added", -abs(c.get("delta") or 0)))
