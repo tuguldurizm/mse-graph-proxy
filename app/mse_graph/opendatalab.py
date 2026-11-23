@@ -257,9 +257,15 @@ def _fetcher():
 #   Удирдах албан тушаалтан       officers:     Д/д | Албан тушаал | Улс | Нэр | Огноо | flag
 #   Үйл ажиллагаа                 activity codes (a <table>)
 #   Эцсийн өмчлөгч                ultimate owners: Дугаар | Ангилал (Иргэн or a reg. no.) | Нэр | Бүртгэсэн
-#   Тусгай зөвшөөрөл              special licences
-#   Оролцсон тендер               public tenders
-#   Хамаарал бүхий нийтийн ...    public officials whose asset declarations mention the company
+#   Тусгай зөвшөөрөл              special licences: Дугаар | Код | Нэр | Хүчинтэй (from / to) | Олгосон
+#   Оролцсон тендер               public tenders: Дугаар | Нэр (a link) | Төлөв (Шалгарсан = won,
+#                                 Хасагдсан = rejected, Илгээгдсэн = submitted, ...)
+#   Хамаарал бүхий нийтийн ...    public officials whose asset and income declarations (ХОМ) mention
+#                                 the company: Дугаар | Албан тушаал, нэр ("<agency> <title> Ц.Нэр",
+#                                 one cell) | ХОМ огноо (the year, a link to the declaration)
+#
+# The last three are read into RegistryLists (officials.py, issue #9). A tender's "Хасагдсан"
+# status is a rejected bid, not a removed row.
 #
 # Rows flagged "(хасагдсан)" were removed from the registry; they are kept in
 # the parsed page but not imported. The registry has no ownership percentages.
@@ -319,7 +325,7 @@ def _grid_rows(body) -> list[dict]:
         for tr in table.find_all("tr"):
             cells = [clean(td.get_text(" ")) for td in tr.find_all("td")]
             if cells:
-                out.append({**dict(zip(header, cells)), "_removed": False})
+                out.append({**dict(zip(header, cells)), "_removed": False, "_links": _links(tr)})
         return out
     header: list[str] = []
     out = []
@@ -335,8 +341,16 @@ def _grid_rows(body) -> list[dict]:
             continue
         rec = dict(zip(header, texts))
         rec["_removed"] = any(REMOVED in t.lower() for t in texts)
+        rec["_links"] = _links(row)
         out.append(rec)
     return out
+
+
+def _links(tag) -> list[str]:
+    """The row's links, made absolute (an official's declaration, a tender's page)."""
+    base = settings.odl_base_url.rstrip("/")
+    return [a["href"] if a["href"].startswith("http") else base + "/" + a["href"].lstrip("/")
+            for a in tag.find_all("a", href=True)]
 
 
 def parse_registry_page(html: str) -> dict:
@@ -455,6 +469,8 @@ def registry_dataset(page: dict, ticker: str, url: str) -> Dataset:
             otype = _holder_type(cat) or ("organization" if is_organization(name) else "person")
         ds.beneficial_owners.append(BeneficialOwner(ticker, name, otype, since, url, owner_reg_no=owner_reg,
                                                     org_type=_org_type(cat) if otype == "organization" else ""))
+    from .officials import registry_lists
+    ds.registry_lists.append(registry_lists(page, ticker, url))
     # The page is the registry's complete record of this company: a holder, officer
     # or owner it no longer lists closes the registry's edge (never mse.mn's).
     ds.supplementary = True

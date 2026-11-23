@@ -28,6 +28,9 @@ source when it says (`org_type_by: 'source'`), else from its name.
 (:Record)-[:REPORTED_FOR]->(:Company)           -- the source rows behind the edges (records.py, issue #37)
 (:Company)-[:HAS_FACT]->(:Fact {name, value, norm, source, current, first_seen, last_seen, until, closed_at,
                                 opened_run, closed_run, baseline})  -- dated company facts (issue #38)
+(:Official {key, name, position, iaac, match_key})-[:DECLARED_INTEREST {years, reports, first_year, last_year,
+                                source, <history>}]->(:Company)  -- public officials whose asset declarations
+                                name the company (officials.py, issue #9). Not :Entity: names are initials only
 
     <history> = current, first_seen, last_seen, until, closed_at, opened_run, closed_run, baseline, records
 
@@ -115,6 +118,7 @@ from typing import Any
 from neo4j import GraphDatabase
 
 from . import holdings as hold
+from . import officials as officials_mod
 from . import records as rec
 from . import relations as relations_mod
 from .config import settings
@@ -153,6 +157,8 @@ SCHEMA = [
     "CREATE CONSTRAINT validation_snapshot_at IF NOT EXISTS FOR (v:ValidationSnapshot) REQUIRE v.at IS UNIQUE",
     # dated company facts (issue #38)
     "CREATE INDEX fact_name IF NOT EXISTS FOR (f:Fact) ON (f.name, f.source)",
+    # public officials whose asset declarations name a company (issue #9, officials.py)
+    "CREATE CONSTRAINT official_key IF NOT EXISTS FOR (o:Official) REQUIRE o.key IS UNIQUE",
 ]
 # company properties kept as dated facts (issue #38): fact name -> company-row field
 COMPANY_FACTS = {"name": "name", "name_en": "name_en", "address": "address", "sector": "sector_mse"}
@@ -1269,6 +1275,8 @@ class Graph:
                             SET f.current = false, f.until = f.last_seen, f.merged = true)
                         CREATE (n)-[:HAS_FACT]->(f)
                         DELETE x""", old=old, new=new)
+        if company:
+            officials_mod.move(self, old, new)      # officials' declared interests (issue #9)
         self._move_refs(old, new)
         # records reported for a company that is merged away are reported for the one kept
         self.run("""MATCH (o) WHERE elementId(o) = $old MATCH (n) WHERE elementId(n) = $new
@@ -1321,7 +1329,7 @@ class Graph:
                 by_reg[reg] = t
         for t in {x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners} | \
                  {x.holder_ticker.upper() for x in ds.shareholdings if x.holder_ticker} | \
-                 {f.ticker.upper() for f in ds.facts} | \
+                 {f.ticker.upper() for f in ds.facts} | {x.ticker.upper() for x in ds.registry_lists} | \
                  {t.upper() for scopes in ds.snapshots.values() for t in scopes}:
             new = canon(t)
             if new != t:
@@ -1339,6 +1347,8 @@ class Graph:
                 x.holder_ticker = tmap.get(x.holder_ticker.upper(), x.holder_ticker)
         for f in ds.facts:
             f.ticker = tmap.get(f.ticker.upper(), f.ticker)
+        for x in ds.registry_lists:
+            x.ticker = tmap.get(x.ticker.upper(), x.ticker)
         for kind, scopes in ds.snapshots.items():
             ds.snapshots[kind] = {tmap.get(t.upper(), t): p for t, p in scopes.items()}
         return tmap
@@ -1543,6 +1553,7 @@ class Graph:
         if typed["nominees_marked"]:
             changes["nominees_marked"] = typed["nominees_marked"]
         self._load_facts(ds)
+        changes.update({k: v for k, v in officials_mod.load(self, ds, when, run).items() if v})   # issue #9
         merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
         if merged["companies_merged"] or merged["organizations_merged"]:
             changes.update({k: merged[k] for k in ("companies_merged", "organizations_merged")})
@@ -2505,6 +2516,10 @@ class Graph:
         facts = self.company_facts(key) if company else []
         out["facts"] = [f for f in facts if f["current"]]
         out["history"]["facts"] = [f for f in facts if not f["current"]]
+        # officials whose declarations name the company (issue #9): a disclosed interest, not a finding
+        di = officials_mod.company_interests(self, out["entity"]["key"]) if company else {"current": [], "ended": []}
+        out["declared_interests"] = di["current"]
+        out["history"]["declared_interests"] = di["ended"]
         # confirmed family links only (issue #32); hypotheses are never served here
         out["relatives"] = relations_mod.relatives(self, key) if out["entity"]["type"] == "Person" else []
         return out

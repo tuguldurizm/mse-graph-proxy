@@ -7,6 +7,8 @@
     python -m mse_graph.cli review [--summary]           the entity-resolution review queue (issue #6)
     python -m mse_graph.cli review-pending | review-export   decisions made in the UI -> data/overrides/*.csv
     python -m mse_graph.cli relations [--summary]        possible family links from patronymics (#32, hypotheses)
+    python -m mse_graph.cli officials [--summary] [--min-companies N] [--listed] [--matches]
+                                                           officials whose asset declarations name a company (#9)
     python -m mse_graph.cli history  <name-or-ticker>      current and past positions / stakes
     python -m mse_graph.cli moves                          people who moved between listed companies
     python -m mse_graph.cli changes  [--since YYYY-MM-DD] [--ticker T] [--all] [--json]
@@ -140,6 +142,14 @@ def main(argv=None):
                                          "hypotheses for review, and the confirmed links")
     p.add_argument("--summary", action="store_true", help="counts only")
     p.add_argument("--min-score", type=float, default=0.05)
+    p = sub.add_parser("officials", help="public officials whose asset declarations name a company, from the "
+                                         "Open Data Lab registry pages (issue #9): disclosed interests, not findings")
+    p.add_argument("--summary", action="store_true", help="counts only (officials, interests, licences, tenders)")
+    p.add_argument("--min-companies", type=int, default=1)
+    p.add_argument("--listed", action="store_true", help="only officials linked to a listed company")
+    p.add_argument("--matches", action="store_true",
+                   help="people at the same company whose name fits an official's (hypotheses for review)")
+    p.add_argument("--limit", type=int, default=None)
     sub.add_parser("interlocks")
     sub.add_parser("common-owners")
     sub.add_parser("nominees", help="custodians and other nominee holders, stakes by holding type, candidates (#39)")
@@ -423,6 +433,14 @@ def main(argv=None):
         elif args.cmd == "relations":
             from . import relations
             _print(relations.summary(g) if args.summary else relations.review(g, args.min_score))
+        elif args.cmd == "officials":
+            from . import officials
+            if args.summary:
+                _print(officials.counts(g))
+            elif args.matches:
+                _print(officials.possible_people(g, args.limit or 500))
+            else:
+                _print(officials.report(g, args.min_companies, args.listed, args.limit))
         elif args.cmd == "load-manual":
             from .manual import load_manual
             _print(load_manual(g, args.root, force=args.force))

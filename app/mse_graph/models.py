@@ -102,12 +102,38 @@ class CompanyFacts:
 
 
 @dataclass
+class DeclaredInterest:
+    """A public official whose asset and income declaration (ХОМ) mentions a company, one row
+    per declaration year, from the company's Open Data Lab registry page (issue #9). A disclosed
+    interest, not a finding."""
+    official_name: str               # as the page writes it, an initial form: "Ц.Алтанцэцэг"
+    position: str                    # agency and title in one text, as the page gives them
+    year: str = ""                   # the declaration's year
+    report_url: str = ""             # the declaration on Open Data Lab (…/search/<id>?model=XReport)
+    iaac: bool = False               # files with the IAAC (АТГ-т мэдүүлгээ бүртгүүлдэг: senior officials)
+
+
+@dataclass
+class RegistryLists:
+    """The lists on a company's registry page that are not owners or officers (issue #9): the
+    officials whose declarations name it, its special licences and the public tenders it took
+    part in. A page read is the complete picture of these lists for that company."""
+    ticker: str
+    source: str                      # the registry page
+    declarations: list[DeclaredInterest] = field(default_factory=list)
+    licenses: list[str] = field(default_factory=list)    # "<code> <name> | <issuer> | <valid from / to>"
+    tenders: list[str] = field(default_factory=list)     # "<status>: <tender name>"
+
+
+@dataclass
 class Dataset:
     companies: list[Company] = field(default_factory=list)
     shareholdings: list[Shareholding] = field(default_factory=list)
     positions: list[Position] = field(default_factory=list)
     beneficial_owners: list[BeneficialOwner] = field(default_factory=list)
     facts: list[CompanyFacts] = field(default_factory=list)
+    # officials' declared interests, licences, tenders (registry pages, issue #9)
+    registry_lists: list[RegistryLists] = field(default_factory=list)
     # Date (YYYY-MM-DD) the data was observed, e.g. the scrape date. The loader
     # stamps first_seen / last_seen / until with it; empty means "today".
     observed_at: str = ""
@@ -136,6 +162,7 @@ class Dataset:
         self.positions += other.positions
         self.beneficial_owners += other.beneficial_owners
         self.facts += other.facts
+        self.registry_lists += other.registry_lists
         self.observed_at = self.observed_at or other.observed_at
         self.supplementary = self.supplementary or other.supplementary
         for kind, scopes in other.snapshots.items():
@@ -151,6 +178,8 @@ class Dataset:
             out["beneficial_owners"] = len(self.beneficial_owners)
         if self.facts:
             out["company_facts"] = len(self.facts)
+        if any(r.declarations for r in self.registry_lists):
+            out["declared_interests"] = sum(len(r.declarations) for r in self.registry_lists)
         return out
 
 

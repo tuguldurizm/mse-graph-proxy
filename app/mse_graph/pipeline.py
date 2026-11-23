@@ -386,6 +386,11 @@ def _run(force: bool = False) -> None:
             log.info("PIPELINE trends: %s", json.dumps(trends.summary_line(g), ensure_ascii=False))
         except Exception as exc:  # nor the trends
             log.warning("PIPELINE trends failed: %s", exc)
+        try:   # officials' declared interests, licences, tenders (#9), read with the registry pages
+            from . import officials
+            log.info("PIPELINE officials: %s", json.dumps(officials.counts(g), ensure_ascii=False))
+        except Exception as exc:  # nor the officials' counts
+            log.warning("PIPELINE officials failed: %s", exc)
         try:   # market data (#31): prices, market caps, the largest companies
             from . import market
             log.info("PIPELINE market: %s", json.dumps(market.summary_line(g), ensure_ascii=False))
