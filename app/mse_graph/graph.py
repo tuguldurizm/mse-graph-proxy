@@ -110,6 +110,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -373,7 +374,24 @@ class Graph:
         with self.driver.session(database=self.database) as s:
             yield s
 
+    # A statement that starts `UNWIND $rows` is sent in chunks of this many rows: Aura's Query
+    # API gateway times out (HTTP 504) on one call with thousands of rows, e.g. a registry page
+    # with 4,000 shareholders. Each row of such a statement stands alone, so chunks add up to
+    # the same writes; a `RETURN count(...)` is summed over the chunks, other results joined.
+    ROWS_PER_CALL = int(os.getenv("MSE_ROWS_PER_CALL", "500"))
+
     def run(self, cypher: str, **params) -> list[dict[str, Any]]:
+        rows = params.get("rows")
+        if (isinstance(rows, list) and len(rows) > self.ROWS_PER_CALL > 0
+                and cypher.lstrip().startswith("UNWIND $rows")):
+            n = self.ROWS_PER_CALL
+            parts = [self._run(cypher, {**params, "rows": rows[i:i + n]}) for i in range(0, len(rows), n)]
+            if re.search(r"RETURN\s+count\(", cypher):
+                return [{k: sum(p[0][k] for p in parts) for k in parts[0][0]}]
+            return [r for p in parts for r in p]
+        return self._run(cypher, params)
+
+    def _run(self, cypher: str, params: dict) -> list[dict[str, Any]]:
         if self.http:
             return self.driver.run(cypher, params)
         with self.session() as s:
@@ -1594,6 +1612,73 @@ class Graph:
         )
         return {r["t"] for r in rows}
 
+    # A listed company whose registry page lists more holders than this shows its share
+    # register: thousands of small holders without a percentage (Хаан банк: 4,105). From such
+    # a list only the rows that confirm an mse.mn owner are loaded; shorter lists (Голомт
+    # Банк's holding companies) are kept whole (owner's decision, 2026-11-23).
+    REGISTRY_LISTED_MAX_HOLDERS = int(os.getenv("REGISTRY_LISTED_MAX_HOLDERS", "50"))
+
+    def _mse_owners_of_listed(self, ds: Dataset) -> dict[str, set[str]]:
+        """For each listed company with a registry shareholder list longer than
+        REGISTRY_LISTED_MAX_HOLDERS in the dataset: the keys of its current owners from
+        other sources (mse.mn), the only ones of that list to load."""
+        count: dict[str, int] = {}
+        for h in ds.shareholdings:
+            if REGISTRY_MARK in (h.source or ""):
+                count[h.company_ticker.upper()] = count.get(h.company_ticker.upper(), 0) + 1
+        tickers = sorted(t for t, n in count.items() if n > self.REGISTRY_LISTED_MAX_HOLDERS)
+        if not tickers:
+            return {}
+        rows = self.run(
+            """
+            UNWIND $t AS t
+            MATCH (c:Company {ticker: t}) WHERE coalesce(c.listed, true) AND NOT t STARTS WITH '~'
+            OPTIONAL MATCH (e:Entity)-[o:OWNS {current: true}]->(c)
+            WHERE any(s IN coalesce(o.sources, [o.source]) WHERE NOT s CONTAINS $reg)
+            RETURN t, collect(e.key) AS keys
+            """, t=tickers, reg=REGISTRY_MARK)
+        out = {r["t"]: set(r["keys"]) for r in rows}
+        for h in ds.shareholdings:    # the same dataset's own mse.mn rows count too
+            t = h.company_ticker.upper()
+            if t in out and REGISTRY_MARK not in (h.source or "") and not h.holder_ticker:
+                out[t].add(entity_key(clean(h.holder_name), h.holder_type))
+        return out
+
+    def drop_registry_owners_of_listed(self, apply: bool = False) -> dict:
+        """Remove what `_mse_owners_of_listed` now keeps out: in listed companies with more
+        than REGISTRY_LISTED_MAX_HOLDERS registry holders, the stakes only the registry
+        reports, their source records, and the people and organisations left with no link
+        at all. `apply=False` only counts."""
+        edges = self.run(
+            """
+            MATCH (:Entity)-[r:OWNS]->(c:Company)
+            WHERE coalesce(c.listed, true) AND NOT c.ticker STARTS WITH '~'
+              AND any(s IN coalesce(r.sources, [r.source]) WHERE s CONTAINS $reg)
+            WITH c, count(r) AS n WHERE n > $max
+            MATCH (e:Entity)-[o:OWNS]->(c) WHERE NOT e:Company
+              AND all(s IN coalesce(o.sources, [o.source]) WHERE s CONTAINS $reg)
+            RETURN elementId(o) AS id, e.key AS key, c.ticker AS ticker, coalesce(o.records, []) AS records
+            """, reg=REGISTRY_MARK, max=self.REGISTRY_LISTED_MAX_HOLDERS)
+        by_company: dict[str, int] = {}
+        for r in edges:
+            by_company[r["ticker"]] = by_company.get(r["ticker"], 0) + 1
+        out = {"stakes": len(edges), "by_company": by_company, "records": 0, "entities": 0, "applied": apply}
+        if not apply or not edges:
+            return out
+        recs = sorted({x for r in edges for x in r["records"]})
+        out["records"] = self.run(
+            "UNWIND $rows AS rid MATCH (r:Record {record_id: rid}) DETACH DELETE r RETURN count(r) AS n",
+            rows=recs)[0]["n"] if recs else 0
+        self.run("UNWIND $rows AS id MATCH ()-[o:OWNS]->() WHERE elementId(o) = id DELETE o",
+                 rows=[r["id"] for r in edges])
+        out["entities"] = self.run(
+            """
+            UNWIND $rows AS k
+            MATCH (e:Entity {key: k}) WHERE NOT e:Company AND NOT (e)--()
+            DELETE e RETURN count(e) AS n
+            """, rows=sorted({r["key"] for r in edges}))[0]["n"]
+        return out
+
     def _load_shareholdings(self, ds: Dataset, when: str, run: str, people: PeopleResolver) -> dict:
         alias_map = {row["a"]: row["key"] for row in self.run(
             "MATCH (c:Company) UNWIND c.aliases AS a RETURN a, c.key AS key")}
@@ -1608,6 +1693,7 @@ class Graph:
         by_pair: dict[tuple, dict] = {}
         held: dict[str, list[str]] = {t: [] for t in hsnaps}   # holder -> targets it reported
         recs = []
+        mse_owners = self._mse_owners_of_listed(ds)
         for h in ds.shareholdings:
             name = clean(h.holder_name)
             if not name or is_aggregate(name):
@@ -1634,6 +1720,8 @@ class Graph:
                 method = "exact_key"
                 if label == "Person":
                     key, method = people.resolve(name, h.company_ticker, h.source, "shareholder")
+            if ticker in mse_owners and REGISTRY_MARK in (h.source or "") and key not in mse_owners[ticker]:
+                continue  # a listed company's registry list: only its mse.mn owners count (below)
             recs.append(rec.record_row("shareholder", h, ticker, key, method, ov))
             prefix = snaps.get(ticker)
             in_holdings = holder in hsnaps and _under(h.source, hsnaps[holder])
