@@ -354,6 +354,11 @@ def _run(force: bool = False) -> None:
             log.info("PIPELINE centrality: %s", json.dumps(written, ensure_ascii=False))
         except Exception as exc:  # nor may the centrality
             log.warning("PIPELINE centrality failed: %s", exc)
+        try:   # trends over time (#30): accumulation alerts, high turnover, the market now
+            from . import trends
+            log.info("PIPELINE trends: %s", json.dumps(trends.summary_line(g), ensure_ascii=False))
+        except Exception as exc:  # nor the trends
+            log.warning("PIPELINE trends failed: %s", exc)
         set_status("done", "finished", stats=stats, top_interlocks=top, quality=checked)
     except Exception as exc:
         set_status("failed", "pipeline crashed", error=str(exc))

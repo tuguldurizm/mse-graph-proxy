@@ -62,6 +62,8 @@
   .sorts { display:flex; gap:4px; flex-wrap:wrap; cursor:default; }
   .sorts:hover { background:none; }
   .sorts button { font-size:12px; padding:2px 7px; }
+  .spark { display:block; width:100%; height:44px; color:var(--accent); }
+  .spark .axis { stroke:var(--line); }
   .sorts button.on { border-color:var(--accent); color:var(--accent); }
   .flag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--accent); color:var(--accent); margin-left:4px; }
   @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
@@ -114,6 +116,11 @@
     <button id="btnGroups">Хяналтын бүлэг</button>
     <button id="btnCommunities">Илрүүлсэн бүлгүүд</button>
     <button id="btnCentrality">Гол зангилаа / Brokers</button>
+  </div>
+  <div class="row">
+    <button id="btnTurnover">Удирдлагын солилцоо</button>
+    <button id="btnAccum">Хувьцаа хуримтлуулалт</button>
+    <button id="btnTrends">Зах зээлийн чиг хандлага</button>
   </div>
   <ul id="analysis"></ul>
 </aside>
@@ -205,13 +212,14 @@ const FACT_LABELS = {name: 'Нэр', name_en: 'Англи нэр', address: 'Х�
 async function showDetails(d) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
   // Company extras load in parallel; the flags go right under the company facts.
-  const [uo, hist, chg, flags, conc] = await Promise.all(isCo ? [
+  const [uo, hist, chg, flags, conc, turn] = await Promise.all(isCo ? [
     api(`/api/companies/${t}/ultimate-owners`),
     api(`/api/companies/${t}/ownership-history`).catch(() => null),
     api(`/api/changes?ticker=${t}&limit=30`).catch(() => []),
     api(`/api/companies/${t}/flags`).catch(() => []),
     api(`/api/companies/${t}/concentration`).catch(() => null),
-  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null]);
+    api(`/api/companies/${t}/turnover`).catch(() => null),
+  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null, null]);
 
   let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
   for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['register_no','Регистр'],
@@ -242,6 +250,7 @@ async function showDetails(d) {
     html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
             (own.treasury.holders ? ` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
   html += concBlock(conc);
+  html += turnoverBlock(turn);
   html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
                b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
@@ -286,6 +295,9 @@ function describe(c) {
     case 'position_added':   return `Томилогдсон: ${who} — ${esc(c.new)}`;
     case 'position_removed': return `Албан тушаалаас гарсан: ${who} — ${esc(c.old)}`;
     case 'position_changed': return `${who}: ${esc(c.old)} → ${esc(c.new)}`;
+    case 'stake_accumulation':
+      return `Хуримтлуулж байна: ${who} ${fmtPct(c.old)} → ${fmtPct(c.new)}${d} · ${c.steps} алхам, ${esc(c.since || '')}-аас${flag}` +
+             (c.approaching != null ? ` <span class="meta">${c.approaching}%-д ойртож байна</span>` : '');
     case 'company_added':    return 'Жагсаалтад шинээр нэмэгдсэн';
     case 'company_removed':  return 'Жагсаалтаас хасагдсан';
     case 'company_renamed':  return `Нэр өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
@@ -443,6 +455,7 @@ document.getElementById('analysis').addEventListener('click', ev => {
   const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
   const cb = ev.target.closest('button[data-cen-by]'); if (cb) return showCentrality({ by: cb.dataset.cenBy });
   const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });
+  const ts = ev.target.closest('button[data-turn-sort]'); if (ts) return showTurnover(ts.dataset.turnSort);
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const gr = ev.target.closest('li[data-group]'); if (gr) return showGroup(gr.dataset.group);
   const cm = ev.target.closest('li[data-community]'); if (cm) return showCommunity(cm.dataset.community);
@@ -619,6 +632,89 @@ async function showCentrality(change = {}) {
 document.getElementById('btnCentrality').onclick = () => showCentrality();
 document.getElementById('sizeBy').onchange = () => { if (lastDraw) draw(lastDraw); };
 document.getElementById('btnCommunities').onclick = showCommunities;
+
+// ---- trends over time (issue #30) -----------------------------------------------------
+// Precision is the scrape date: a departure happened between last_seen and the scrape that
+// missed the person. A rate needs a full year of history; '+' marks a tenure counted from
+// the first scrape (a lower bound).
+const yrs = v => v == null ? '—' : `${(+v).toFixed(1)} жил`;
+const ceoText = c => c ? `${esc(c.name)} · ${yrs(c.tenure_years)}${c.tenure_from === 'first_seen' ? '+' : ''}` : '—';
+const histNote = s => `<li class="meta" style="cursor:default">Түүх ${esc(s.history_start || '?')}-аас ${esc(s.as_of || '?')} хүртэл (скрейп эхэлсэн өдрөөс). Огноо скрейпийн нарийвчлалтай: гарсан хүн сүүлд харагдсан өдөр ба дараагийн скрейпийн хооронд гарсан. Солилцооны хувийг бүтэн жилийн түүхтэй компанид л тооцно; «+» = хамгийн багадаа.</li>`;
+const TURN_SORT = { rate: 'Солилцоо', departures: 'Гарсан', tenure: 'Дундаж хугацаа', ceo_tenure: 'Захирлын хугацаа' };
+async function showTurnover(sort = 'rate') {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api(`/api/analysis/turnover?sort=${sort}`), s = r.summary;
+  let html = covLine(r.coverage) + histNote(s);
+  html += `<li class="sorts">${Object.entries(TURN_SORT).map(([k, l]) =>
+    `<button data-turn-sort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
+  html += `<li class="meta" style="cursor:default">${s.companies} компани · ирсэн ${s.arrivals} · гарсан ${s.departures}` +
+          (s.median_rate != null ? ` · медиан солилцоо ${s.median_rate}/жил` : ' · солилцооны хувь: бүтэн жилийн түүх хараахан алга') +
+          ` · медиан хугацаа ${yrs(s.median_tenure_years)} · медиан захирлын хугацаа ${yrs(s.median_ceo_tenure_years)}</li>`;
+  html += r.items.map(c => `<li class="rv${c.high ? ' rf warn' : ''}" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span>${c.high ? ' <span class="flag">өндөр солилцоо</span>' : ''}</span>
+      <div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}${c.turnover_rate != null ? ` · солилцоо ${c.turnover_rate}/жил` : ''} · дундаж ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>
+      <div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}${c.ceo_changes ? ` · солигдсон ${c.ceo_changes}` : ''}</div></li>`).join('')
+    || '<li class="meta">Үр дүн алга</li>';
+  ul.innerHTML = html;
+}
+function turnoverBlock(r) {
+  const c = r && r.turnover;
+  if (!c) return '';
+  const yr = c.by_year.map(y => `${esc(y.year)}: +${y.arrivals} / −${y.departures}`).join(' · ');
+  return `<h2>Удирдлагын солилцоо</h2><div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}` +
+    (c.turnover_rate != null ? ` · солилцоо ${c.turnover_rate}/жил` : ' · солилцоо: бүтэн жилийн түүх алга') +
+    ` · дундаж хугацаа ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>` +
+    `<div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}</div>` + (yr ? `<div class="meta">${yr}</div>` : '') +
+    list('Гарсан', c.left.slice(0, 10), d => `<span>${esc(d.name)} <span class="meta">${esc(d.title)}</span></span>` +
+         `<span class="meta" style="white-space:nowrap">${esc(d.between[0])} … ${esc(d.between[1])}</span>`) +
+    `<div class="meta" style="font-size:11px">Түүх ${esc(c.history_start)}-аас. ${r.coverage ? covText(r.coverage) : ''}</div>`;
+}
+
+const ACC_LEVEL = { crossed: 'босго давсан', approaching: 'босгод ойртож байна', rising: 'өсөж байна' };
+async function showAccumulation() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api('/api/analysis/accumulation'), st = r.settings;
+  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Дараалсан ${st.accumulation_min_steps}+ скрейпэд эзэмшлээ нэмсэн, одоо ч эзэмшиж буй эзэмшигчид. Босго ${st.accumulation_thresholds.join(', ')}% нь энэ төслийн анхааруулгын тохиргоо, хуулийн шаардлага биш. Түүх ${esc(r.history_start || '?')}-аас.</li>`;
+  html += r.items.map(a => `<li class="rv${a.level === 'crossed' ? ' rf warn' : ''}" data-key="${esc(a.entity_key)}">
+      <span class="name">${esc(coName({ ticker: a.ticker, name: a.company }))} · ${esc(a.entity)}</span>
+      <div class="meta">${a.path.map(p => fmtPct(p.percent)).join(' → ')} · ${a.steps} алхам, ${esc(a.since)}-аас · ${ACC_LEVEL[a.level]}${a.crossed.length ? ' ' + a.crossed.map(t => `<span class="flag">${t}%</span>`).join('') : ''}${a.approaching != null ? ` (${a.approaching}%)` : ''}</div></li>`).join('')
+    || '<li class="meta">Одоогоор хуримтлуулж буй эзэмшигч алга</li>';
+  ul.innerHTML = html;
+}
+
+// one small line chart per metric; the date range under each
+function spark(pts, k) {
+  const vs = pts.map(p => p[k]).filter(v => v != null);
+  if (!vs.length) return '<div class="meta">өгөгдөл алга</div>';
+  const W = 260, H = 40, lo = Math.min(...vs), hi = Math.max(...vs), n = pts.length;
+  const ts = pts.map(p => Date.parse(p.date)), t0 = ts[0], t1 = ts[n - 1];   // a time axis: scrapes are uneven
+  const x = i => n < 2 || t1 === t0 ? W / 2 : 4 + (W - 8) * (ts[i] - t0) / (t1 - t0), y = v => hi === lo ? H / 2 : H - 4 - (H - 8) * (v - lo) / (hi - lo);
+  const line = pts.map((p, i) => p[k] == null ? null : `${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).filter(Boolean).join(' ');
+  const last = pts.map((p, i) => [i, p[k]]).filter(([, v]) => v != null).pop();
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">` +
+    `<line class="axis" x1="0" x2="${W}" y1="${H - 1}" y2="${H - 1}"/>` +
+    `<polyline points="${line}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/>` +
+    `<circle cx="${x(last[0])}" cy="${y(last[1])}" r="3" fill="currentColor"/></svg>`;
+}
+const TREND_MN = { state_companies: 'Төрийн шууд эзэмшилтэй компани', state_mean_percent: 'Төрийн шууд эзэмшлийн дундаж %',
+  interlocks: 'Олон компанитай холбоотой хүн', cross_holdings: 'Бүртгэлтэй компаниудын хөндлөн эзэмшил',
+  median_hhi: 'Медиан HHI (төвлөрөл)', with_holdings: 'Эзэмшлийн мэдээлэлтэй компани', officers: 'Албан тушаал (бүртгэлтэй компани)' };
+async function showTrends() {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api('/api/analysis/trends'), pts = r.points;
+  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Ирмэгийн хугацаануудаас сэргээсэн цуваа: цэг бүр тухайн өдөр скрейпээр харагдсан граф (${pts.length} цэг, ${{ day: 'өдөр', week: '7 хоног', month: 'сар' }[r.every] || r.every} тутам). Түүх ${esc(r.history_start || '?')}-аас эхэлнэ; дараа нэмэгдсэн компани тоог өсгөнө.</li>`;
+  const first = pts[0] || {}, last = pts[pts.length - 1] || {};
+  html += Object.entries(TREND_MN).map(([k, l]) => `<li style="cursor:default; display:block">
+      <span>${l}: <b>${last[k] ?? '—'}</b> <span class="meta">(${esc(first.date || '')}: ${first[k] ?? '—'})</span></span>
+      ${spark(pts, k)}<div class="meta" style="display:flex; justify-content:space-between; font-size:11px"><span>${esc(first.date || '')}</span><span>${esc(last.date || '')}</span></div></li>`).join('');
+  ul.innerHTML = html;
+}
+document.getElementById('btnTurnover').onclick = () => showTurnover();
+document.getElementById('btnAccum').onclick = showAccumulation;
+document.getElementById('btnTrends').onclick = showTrends;
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');
