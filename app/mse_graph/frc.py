@@ -35,10 +35,26 @@ log = logging.getLogger(__name__)
 API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
-# menu titles that may hold disclosures: large holdings, insiders, issuers' reports, registers
-DISCLOSURE = re.compile(
-    r"хувьцаа|эзэмш|дотоод|мэдээлэл|тайлан|ил тод|бүртгэл|үнэт цаас|шийдвэр|хувьцаат|компани|"
-    r"insider|disclos|sharehold|securit|report|register|issuer", re.I)
+# The menus worth reading, most useful first (the first probe, 2026-11-23, listed FRC's 569 menus: no
+# large-holding or insider section; decisions, violations, sanctions and licence holders are there).
+TARGETS = (
+    r"хорооны шийдвэр$",                       # the commission's decisions
+    r"зөрчлийн мэдээлэл",                      # violations
+    r"сахилгын шийтгэл",                       # disciplinary sanctions
+    r"тусгай зөвшөөрөлтэй хуулийн этгээд",     # licensed legal entities
+    r"тусгай зөвшөөрөл эзэмшигчид",            # licence holders
+    r"үнэт цаасны компани",                    # securities firms (brokers, custodians: nominees, #39)
+    r"хүчингүй болсон хуулийн этгээд",         # revoked licences, legal entities
+    r"хувьцаа эзэмшигч|дотоод мэдээлэл|insider|large hold",   # in case such a section appears
+)
+DISCLOSURE = re.compile("|".join(f"(?:{t})" for t in TARGETS), re.I)
+# bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
+PROBE_VERSION = 2
+
+
+def rank(title: str) -> int:
+    """The position of the first TARGETS pattern the title matches (len(TARGETS) for none)."""
+    return next((i for i, t in enumerate(TARGETS) if re.search(t, title or "", re.I)), len(TARGETS))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -87,7 +103,7 @@ def records(obj, depth: int = 0) -> list[dict]:
     return []
 
 
-_ID = ("id", "_id", "menuid", "menuId", "menu_id")
+_ID = ("id", "ids", "_id", "menuid", "menuId", "menu_id")   # FRC's menu calls it `iDs`
 _TITLE = ("title", "name", "menuname", "menuName", "text", "label", "caption")
 _PARENT = ("parentid", "parentId", "parent_id", "parent", "pid")
 
@@ -107,7 +123,8 @@ def menu_items(obj) -> list[dict]:
     def walk(items, parent=None):
         for m in items:
             mid, title = _first(m, _ID), _first(m, _TITLE)
-            out.append({"id": mid, "title": str(title or "").strip(), "parent": _first(m, _PARENT) or parent})
+            out.append({"id": mid, "title": str(title or "").strip(), "parent": _first(m, _PARENT) or parent,
+                        "kind": m.get("menutid"), "link": m.get("menulink") or ""})
             for k, v in m.items():
                 if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
                     walk(v, mid)
@@ -157,13 +174,21 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
     report["menus"] = len(items)
     for i in range(0, len(items), 25):                    # the whole tree, 25 entries a line
         log.info("FRC layout menu %d-%d: %s", i + 1, min(i + 25, len(items)),
-                 json.dumps([[m["id"], m["parent"], m["title"][:60]] for m in items[i:i + 25]], ensure_ascii=False))
-    cands = [m for m in items if m["id"] is not None and DISCLOSURE.search(m["title"])]
-    report["candidates"] = [[m["id"], m["title"][:60]] for m in cands]
+                 json.dumps([[m["id"], m["parent"], m["title"][:60], m["kind"]] + ([m["link"][:60]] if m["link"] else [])
+                             for m in items[i:i + 25]], ensure_ascii=False))
+    cands = sorted((m for m in items if m["id"] is not None and DISCLOSURE.search(m["title"])),
+                   key=lambda m: rank(m["title"]))
+    report["candidates"] = [[m["id"], m["title"][:60], m["kind"], m["link"][:80]] for m in cands]
     for m in cands:
         if report["requests"] >= max_requests:
             break
-        for kind, extra in (("document", {}), ("news", {"page": 0})):
+        if m["link"]:                       # a link elsewhere (e.g. the licence registry): nothing to list here
+            continue
+        # a `list` menu holds posts, a `doc` / `file` menu documents; anything else: try both
+        kinds = (("news", {"page": 0}),) if m["kind"] == "list" else \
+                (("document", {}),) if m["kind"] in ("doc", "document", "file") else \
+                (("document", {}), ("news", {"page": 0}))
+        for kind, extra in kinds:
             ans = fetch(kind, menuid=m["id"], **SITE, **extra)
             if ans is None:
                 continue
@@ -176,12 +201,14 @@ def probe(get: Callable[[str], str] | None = None, max_requests: int | None = No
 
 
 def hours_since_probe(g) -> float | None:
-    rows = g.run("MATCH (m:Meta {key: 'frc'}) RETURN m.at AS at")
-    if not rows or not rows[0]["at"]:
+    """Hours since the last probe of this PROBE_VERSION (None: never, or an older version)."""
+    rows = g.run("MATCH (m:Meta {key: 'frc'}) RETURN m.at AS at, m.version AS v")
+    if not rows or not rows[0]["at"] or rows[0]["v"] != PROBE_VERSION:
         return None
     return (datetime.now(timezone.utc) - datetime.fromisoformat(rows[0]["at"])).total_seconds() / 3600
 
 
 def mark_probe(g, report: dict) -> None:
-    g.run("MERGE (m:Meta {key: 'frc'}) SET m.at = $at, m.requests = $r, m.menus = $n, m.errors = size($e)",
-          at=datetime.now(timezone.utc).isoformat(), r=report["requests"], n=report["menus"], e=report["errors"])
+    g.run("MERGE (m:Meta {key: 'frc'}) SET m.at = $at, m.version = $v, m.requests = $r, m.menus = $n, "
+          "m.errors = size($e)", at=datetime.now(timezone.utc).isoformat(), v=PROBE_VERSION, r=report["requests"],
+          n=report["menus"], e=report["errors"])
