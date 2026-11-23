@@ -32,8 +32,13 @@ A decision is stored in the graph as a ``(:Decision)`` node, applied at once
 
 Actions (`decide`): ``merge`` (key into another key), ``split`` (a key's rows at some companies
 become a new ``#`` key), ``keep_apart`` (pin an initial-form person's rows to itself, so the
-rules never link it), ``dismiss`` (an item needs nothing) and ``revoke`` (undo a decision: an
-identity decision's rows go back to the key they named before).
+rules never link it), ``relate`` (confirm a family link between two people, with its basis and
+source: relations.py, issue #32), ``dismiss`` (an item needs nothing) and ``revoke`` (undo a
+decision: an identity decision's rows go back to the key they named before).
+
+Possible family links (``related:<a>|<b>`` items, relations.py) are not part of the public
+queue: they are served only with the review password, left out of `decisions()` and never
+written to reviewed.csv (the deploy mirror is public).
 
 Into git: ``python -m mse_graph.cli review-export`` writes the decisions into
 ``data/overrides/identity.csv`` and ``data/overrides/reviewed.csv``; a PR then makes them part
@@ -51,6 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import records as rec
+from . import relations as rel
 from .normalize import clean, is_organization, person_name
 
 REVIEWED_FILE = "data/overrides/reviewed.csv"
@@ -60,7 +66,7 @@ MIN_COMPANIES = 6           # current positions at this many companies: possibly
 MIN_SECTORS = 4             # current links to companies in this many sectors
 MIN_TOKEN = 4               # a one-letter difference counts only in a word at least this long
 MIN_ORG = 6                 # ... and in an organisation name at least this long
-ACTIONS = ("merge", "split", "keep_apart", "dismiss", "revoke")
+ACTIONS = ("merge", "split", "keep_apart", "relate", "dismiss", "revoke")
 _REL_KIND = {"OWNS": "shareholder", "HOLDS_POSITION": "officer", "BENEFICIAL_OWNER": "beneficial_owner"}
 
 
@@ -166,9 +172,16 @@ def reviewed_items(g, path=None) -> set[str]:
         r["item"] for r in g.run("MATCH (d:Decision {type: 'reviewed'}) RETURN d.item AS item")}
 
 
-def decisions(g) -> list[dict]:
-    """Every decision stored in the graph, newest first."""
-    return [r["d"] for r in g.run("MATCH (d:Decision) RETURN d {.*} AS d ORDER BY d.created_at DESC, d.id")]
+def _private(d: dict) -> bool:
+    """A decision about a possible family link (issue #32): only served with the review password."""
+    return d.get("type") == "relation" or (d.get("item") or "").startswith(rel.ITEM_PREFIX)
+
+
+def decisions(g, private: bool = False) -> list[dict]:
+    """Every decision stored in the graph, newest first. Family-link decisions only when
+    `private` (relations.review serves them behind the password)."""
+    rows = [r["d"] for r in g.run("MATCH (d:Decision) RETURN d {.*} AS d ORDER BY d.created_at DESC, d.id")]
+    return rows if private else [d for d in rows if not _private(d)]
 
 
 def _store(g, rows: list[dict]) -> None:
@@ -376,8 +389,10 @@ def _identity_rows(rows: list[dict], target: str, before: str, group: str, actio
 
 
 def decide(g, action: str, *, key: str = "", into: str = "", companies: list[str] | None = None,
-           new_key: str = "", item: str = "", id: str = "", by: str = "", note: str = "") -> dict:
-    """Record a decision and apply it. Returns {"decision": group id, "stored": n, "applied": ...}."""
+           new_key: str = "", item: str = "", id: str = "", by: str = "", note: str = "",
+           basis: str = "", source: str = "") -> dict:
+    """Record a decision and apply it. Returns {"decision": group id, "stored": n, "applied": ...,
+    "relations": ...}. `relate` takes `key`, `into` (the other person), `basis` and `source`."""
     if action not in ACTIONS:
         raise ReviewError(f"unknown action {action!r}")
     by = clean(by) or "review"
@@ -385,7 +400,9 @@ def decide(g, action: str, *, key: str = "", into: str = "", companies: list[str
     now = _now()
     group = _id(action, key, into, ",".join(companies or []), new_key, item, id, now)
     rows: list[dict] = []
-    if action == "dismiss":
+    if action == "relate":
+        rows = rel.decision_rows(g, key, into, basis, source, by, note, now, group, _id)
+    elif action == "dismiss":
         if not item:
             raise ReviewError("dismiss needs an item")
         rows = [{"id": _id("reviewed", item), "type": "reviewed", "group": group, "action": action, "item": item,
@@ -444,7 +461,7 @@ def decide(g, action: str, *, key: str = "", into: str = "", companies: list[str
             raise ReviewError(f"{e['key']} has no rows to decide")
     _store(g, rows)
     applied = g.apply_overrides()
-    return {"decision": group, "stored": len(rows), "applied": applied}
+    return {"decision": group, "stored": len(rows), "applied": applied, "relations": rel.apply(g)}
 
 
 def _entity_exists(g, key: str) -> bool:
@@ -484,11 +501,12 @@ def _comments(p: Path) -> str:
 
 
 def all_reviewed(g, path=None) -> list[dict]:
-    """The file's reviewed items and the graph's, one row per item (the file's first)."""
+    """The file's reviewed items and the graph's, one row per item (the file's first). Dismissed
+    family-link hypotheses (`related:`) stay in the graph only: the file goes to a public repository."""
     out = {r["item"]: r for r in read_reviewed(path)}
     for d in g.run("MATCH (d:Decision {type: 'reviewed'}) RETURN d {.*} AS d ORDER BY d.created_at"):
         out.setdefault(d["d"]["item"], {k: d["d"].get(k) or "" for k in REVIEWED_HEADER})
-    return list(out.values())
+    return [r for item, r in out.items() if not item.startswith(rel.ITEM_PREFIX)]
 
 
 def pending(g, identity_path=None, reviewed_path_=None) -> dict:
@@ -511,8 +529,10 @@ def export(g, identity_path=None, reviewed_path_=None) -> dict:
     ip.parent.mkdir(parents=True, exist_ok=True)
     ip.write_text(_comments(ip) + identity_csv(rows), encoding="utf-8")
     rp.write_text((_comments(rp) or REVIEWED_COMMENT) + reviewed_csv(reviewed), encoding="utf-8")
-    return {"identity_file": str(ip), "identity_rows": len(rows), "reviewed_file": str(rp),
-            "reviewed_rows": len(reviewed), "added": before}
+    out = {"identity_file": str(ip), "identity_rows": len(rows), "reviewed_file": str(rp),
+           "reviewed_rows": len(reviewed), "added": before}
+    out.update(rel.export(g))       # confirmed family links (issue #32)
+    return out
 
 
 REVIEWED_COMMENT = ("# Review queue items a reviewer dismissed or decided (issue #6, mse_graph/review.py).\n"

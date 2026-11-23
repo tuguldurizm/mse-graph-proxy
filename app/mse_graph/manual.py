@@ -11,7 +11,9 @@ so validation needs no requests of its own: it only reads the graph.
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import csv_io
@@ -273,6 +275,84 @@ def validate_manual(g, root: str | Path | None = None) -> list[dict]:
             "details": companies,
         })
     return report
+
+
+# ---- validation snapshots: what changed since the last run -----------------------
+# `validate-manual --compare` keeps each result in the graph (a :ValidationSnapshot node)
+# and prints only the counts and what changed since the previous one, so the daily report
+# doesn't depend on a chat remembering yesterday's output.
+
+_LISTS = ("confirmed_by_registry", "not_in_registry", "registry_only")
+
+
+def _counts(r: dict) -> dict:
+    return {"companies": r["companies"], "checked": r["checked"], **r["summary"]}
+
+
+def validation_diff(prev: list[dict] | None, cur: list[dict]) -> list[dict]:
+    """Per dataset: today's counts, the previous counts, and per company what was added
+    to or dropped from each owners/officers list and the possible duplicates, and
+    status changes. `prev` None (no earlier snapshot) gives counts only."""
+    before = {r["dataset"]: r for r in prev or []}
+    out = []
+    for r in cur:
+        p = before.get(r["dataset"])
+        entry = {"dataset": r["dataset"], "now": _counts(r),
+                 "before": _counts(p) if p else None, "changes": []}
+        if p is not None:
+            old = {c["ticker"]: c for c in p.get("details", [])}
+            new = {c["ticker"]: c for c in r.get("details", [])}
+            for t in sorted(old.keys() - new.keys()):
+                entry["changes"].append({"ticker": t, "name": old[t].get("name", ""), "removed": True})
+            for t in sorted(new):
+                c, o = new[t], old.get(t)
+                ch: dict = {}
+                if o is None:
+                    ch["added"] = True
+                    o = {}
+                if c.get("status") != o.get("status") and o:
+                    ch["status"] = [o.get("status"), c.get("status")]
+                for part in ("owners", "officers"):
+                    for k in _LISTS:
+                        a = set((c.get(part) or {}).get(k, []))
+                        b = set((o.get(part) or {}).get(k, []))
+                        if a - b:
+                            ch.setdefault(part, {}).setdefault(k, {})["new"] = sorted(a - b)
+                        if b - a:
+                            ch.setdefault(part, {}).setdefault(k, {})["gone"] = sorted(b - a)
+                a, b = set(c.get("possible_duplicates", [])), set(o.get("possible_duplicates", []))
+                if a - b:
+                    ch.setdefault("possible_duplicates", {})["new"] = sorted(a - b)
+                if b - a:
+                    ch.setdefault("possible_duplicates", {})["gone"] = sorted(b - a)
+                if ch:
+                    entry["changes"].append({"ticker": t, "name": c.get("name", ""),
+                                             "reg_no": c.get("reg_no", ""), **ch})
+        out.append(entry)
+    for d in sorted(before.keys() - {r["dataset"] for r in cur}):
+        out.append({"dataset": d, "now": None, "before": _counts(before[d]), "changes": []})
+    return out
+
+
+def last_validation(g) -> dict | None:
+    rows = g.run("MATCH (v:ValidationSnapshot) RETURN v.at AS at, v.report AS report "
+                 "ORDER BY v.at DESC LIMIT 1")
+    return {"at": rows[0]["at"], "report": json.loads(rows[0]["report"])} if rows else None
+
+
+def save_validation(g, report: list[dict], at: str | None = None) -> str:
+    at = at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    g.run("MERGE (v:ValidationSnapshot {at: $at}) SET v.report = $report",
+          at=at, report=json.dumps(report, ensure_ascii=False, default=str))
+    return at
+
+
+def compare_validation(g, report: list[dict]) -> dict:
+    """Compare `report` with the last saved snapshot, then save it as the new one."""
+    prev = last_validation(g)
+    at = save_validation(g, report)
+    return {"since": prev["at"] if prev else None, "saved": at,
+            "datasets": validation_diff(prev["report"] if prev else None, report)}
 
 
 # ---- group people → their other companies ----------------------------------------

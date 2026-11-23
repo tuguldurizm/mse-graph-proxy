@@ -8,6 +8,8 @@ Graph model
 (:Entity:Person       {key, name, display_name, name_form, full_name, patronymic, given_name, clan_name,
                        name_variants, former_keys})
 (:Entity:Organization {key, name, org_type, register_no?})  -- shareholders outside the company lists
+(:Person)-[:RELATED_TO {basis, source, note, decided_by, decided_at}]->(:Person)  -- confirmed family links
+                       only (relations.py, issue #32), rebuilt from data/overrides/relations.csv and decisions
 
 A company is one legal entity (issue #35): its key is `company:<register_no>`
 (the registry's 7-digit number) when known, else `company:<TICKER>`; unlisted
@@ -114,6 +116,7 @@ from neo4j import GraphDatabase
 
 from . import holdings as hold
 from . import records as rec
+from . import relations as relations_mod
 from .config import settings
 from .models import Dataset
 from .normalize import ORG_TYPES, ORG_TYPES_VERSION, ROLES_VERSION, PersonName, basis_value, clean, entity_key, \
@@ -146,6 +149,8 @@ SCHEMA = [
     "CREATE INDEX record_name_key IF NOT EXISTS FOR (r:Record) ON (r.name_key)",
     # decisions made on the review queue (issue #6, review.py); wipes keep them
     "CREATE CONSTRAINT decision_id IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE",
+    # validate-manual results, for the daily report's "what changed" (manual.py)
+    "CREATE CONSTRAINT validation_snapshot_at IF NOT EXISTS FOR (v:ValidationSnapshot) REQUIRE v.at IS UNIQUE",
     # dated company facts (issue #38)
     "CREATE INDEX fact_name IF NOT EXISTS FOR (f:Fact) ON (f.name, f.source)",
 ]
@@ -369,6 +374,8 @@ class Graph:
         self.overridden = self.apply_overrides(overrides)
         self._derive_sectors()
         self.holdings_typed = self.classify_holdings()
+        # confirmed family links (issue #32): RELATED_TO edges from the relations file and decisions
+        self.related = relations_mod.apply(self)
 
     def migrate_positions(self) -> dict:
         """Give positions their `post` and `role_std`, and undo splits caused by respelt titles.
@@ -1541,6 +1548,7 @@ class Graph:
             changes.update({k: merged[k] for k in ("companies_merged", "organizations_merged")})
         self._refresh_former_names()
         self._derive_sectors()
+        relations_mod.apply(self)               # the people of a confirmed family link may be new
         changes.update({k: v for k, v in fact_changes.items() if v})
         return {**self.stats(), "observed_at": when, "run": run, "changes": changes}
 
@@ -2497,6 +2505,8 @@ class Graph:
         facts = self.company_facts(key) if company else []
         out["facts"] = [f for f in facts if f["current"]]
         out["history"]["facts"] = [f for f in facts if not f["current"]]
+        # confirmed family links only (issue #32); hypotheses are never served here
+        out["relatives"] = relations_mod.relatives(self, key) if out["entity"]["type"] == "Person" else []
         return out
 
     @staticmethod

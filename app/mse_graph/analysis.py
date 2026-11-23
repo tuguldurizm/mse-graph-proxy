@@ -12,12 +12,17 @@ accordingly.
     conflicts         insider_owner   officer who is also a shareholder of the company
                       competitor      person/entity with influence in two companies of one sector
                       related_party   officer of a company who also has influence in its
-                                      shareholder or subsidiary
+                                      shareholder or subsidiary, or whose confirmed relative
+                                      (RELATED_TO, issue #32) has influence in the company itself
+                                      or in its shareholder or subsidiary
     state_ownership   direct and look-through stakes held by state / municipal bodies
     company_flags     all of the above for one company, plus a look-through controller
     position_roles    current positions per standard role, and the titles no rule recognises
     nominees          holders that keep shares for others, stakes by holding type, and
                       holders that may be nominees but aren't marked (issue #39)
+
+Family links count only once a reviewer has confirmed them (RELATED_TO edges, relations.py):
+the possible links from shared patronymics are hypotheses and never reach these checks.
 
 Only stakes that are ownership count (holdings.REAL: `direct` or `unknown`): a custodian
 holding shares for its clients is not an owner, a controller or a related party, and a
@@ -176,13 +181,56 @@ def related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict
     for r in rows:
         r["company"]["roles"] = sorted(r["company"]["roles"])
         r["counterparty"]["roles"] = _roles(r["counterparty"]["roles"])
+        r["relative"] = None
     seen, out = set(), []
     for r in sorted(rows, key=lambda r: r["relation"] != "shareholder"):
         pair = (r["key"], frozenset((r["company"]["key"], r["counterparty"]["key"])))
         if pair not in seen:
             seen.add(pair)
             out.append(r)
-    return sorted(out, key=lambda r: (r["name"], _co(r["company"]), _co(r["counterparty"])))
+    out += family_related_parties(g, min_stake)
+    return sorted(out, key=lambda r: (r["name"], _co(r["company"]), _co(r["counterparty"]),
+                                      (r["relative"] or {}).get("name") or ""))
+
+
+def family_related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
+    """Officers of a company whose confirmed relative (RELATED_TO, issue #32) has a post or a
+    stake >= min_stake in the same company (`same_company`) or in a company that owns it or
+    that it owns. Only confirmed links are edges, so hypotheses never show here."""
+    rows = g.run(
+        """
+        MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)
+        MATCH (p)-[fam:RELATED_TO]-(q:Person) WHERE q <> p
+        MATCH (q)-[r:OWNS|HOLDS_POSITION {current: true}]->(s:Company)
+        WHERE type(r) = 'HOLDS_POSITION' OR (coalesce(r.percent, 0) >= $min AND REAL_R)
+        WITH p, c, q, fam, s, collect(DISTINCT h.title) AS titles_c,
+             collect(DISTINCT {rel: type(r), title: r.title, percent: r.percent}) AS roles_s
+        OPTIONAL MATCH (c)-[link:OWNS {current: true}]-(s) WHERE s <> c AND REAL_LINK
+        WITH p, c, q, fam, s, titles_c, roles_s, head(collect(link)) AS link
+        WHERE s = c OR link IS NOT NULL
+        RETURN 'related_party' AS kind, p.key AS key, p.name AS name,
+               {key: c.key, ticker: c.ticker, name: c.name, roles: titles_c} AS company,
+               {key: s.key, ticker: s.ticker, name: s.name, roles: roles_s} AS counterparty,
+               CASE WHEN s = c THEN 'same_company' WHEN startNode(link) = s THEN 'shareholder'
+                    ELSE 'subsidiary' END AS relation,
+               link.percent AS percent,
+               {key: q.key, name: q.name, basis: fam.basis, source: fam.source} AS relative
+        """.replace("REAL_R", _REAL_R).replace("REAL_LINK", real("link")),
+        min=min_stake,
+    )
+    seen, out = set(), []
+    for r in sorted(rows, key=lambda r: ({"same_company": 0, "shareholder": 1}.get(r["relation"], 2), r["name"])):
+        r["company"]["roles"] = sorted(r["company"]["roles"])
+        r["counterparty"]["roles"] = _roles(r["counterparty"]["roles"])
+        # one row per family pair and pair of companies (both relatives may be officers)
+        k = (frozenset((r["key"], r["relative"]["key"])), frozenset((r["company"]["key"], r["counterparty"]["key"])))
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return out
+
+
+BASIS_MN = {"sibling": "ах дүү", "parent_child": "эцэг эх / хүүхэд", "spouse": "эхнэр нөхөр", "relative": "төрөл"}
 
 
 def conflicts(g: Graph, kind: str | None = None, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
@@ -394,7 +442,17 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
 
     for r in related_parties(g, min_stake):
         sides = {r["company"]["key"], r["counterparty"]["key"]}
-        if me in sides:
+        if me in sides and r["relative"]:
+            q = r["relative"]
+            basis = BASIS_MN.get(q["basis"], q["basis"] or "төрөл")
+            where = ("мөн энэ компанид" if r["relation"] == "same_company" else
+                     f"түүний {'хувьцаа эзэмшигч' if r['relation'] == 'shareholder' else 'охин компани'} "
+                     f"{_co(r['counterparty'])}-д")
+            add("related_party", "info",
+                f"{r['name']} ({_co(r['company'])}: {', '.join(r['company']['roles'])}) — {basis} {q['name']} "
+                f"{where} ({', '.join(r['counterparty']['roles'])}); баталгаажсан холбоо, эх сурвалж: {q['source']}",
+                [r["key"], q["key"], r["counterparty"]["key"], r["company"]["key"]])
+        elif me in sides:
             rel = "хувьцаа эзэмшигч" if r["relation"] == "shareholder" else "охин компани"
             add("related_party", "info",
                 f"{r['name']}: {_co(r['company'])} ({', '.join(r['company']['roles'])}) болон түүний {rel} "
