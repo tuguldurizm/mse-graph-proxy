@@ -250,6 +250,9 @@ def main(argv=None):
                             "through each opendatalab.mn route (one request per route, 11 s apart)")
     p.add_argument("--reg", default="2008572", help="registration number of the page to fetch (default %(default)s)")
 
+    p = sub.add_parser("ask", help="ask the graph a question in plain Mongolian or English (#10); answered by a "
+                                   "fixed set of read-only queries")
+    p.add_argument("question", nargs="+")
     p = sub.add_parser("frc-probe",
                        help="describe FRC's data API (frc.mn, port 5001): the menu and the disclosure-like listings, "
                             "as 'FRC layout' lines; needs open egress (not a cloud session)")
@@ -517,6 +520,9 @@ def main(argv=None):
             _trends_cmd(g, args)
         elif args.cmd == "market":
             _market_cmd(g, args)
+        elif args.cmd == "ask":
+            from . import ask
+            print(json.dumps(ask.answer(g, " ".join(args.question)), ensure_ascii=False, indent=2, default=str))
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":

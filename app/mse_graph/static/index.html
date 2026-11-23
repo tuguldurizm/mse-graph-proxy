@@ -96,6 +96,10 @@
   <input id="q" placeholder="Компани, тикер, хүний нэр…" autocomplete="off">
   <ul id="results"></ul>
 
+  <h2>Асуух / Ask</h2>
+  <form id="askForm" class="row" style="flex-wrap:nowrap"><input id="ask" placeholder="Жишээ: Хэн АПУ-г эзэмшдэг вэ?" autocomplete="off"><button>Асуух</button></form>
+  <ul id="askResult"></ul>
+
   <h2>Харах / View</h2>
   <div class="row">
     <button id="btnOverview">Зах зээлийн тойм</button>
@@ -716,6 +720,80 @@ document.getElementById('q').addEventListener('input', ev => {
   }, 200);
 });
 document.getElementById('results').addEventListener('click', ev => {
+  const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
+});
+
+// ---- ask the graph (issue #10, ask.py) ----------------------------------------------------
+// The server matches the question to one of a fixed set of read-only queries; the page lays out
+// the answer, says what it understood, and offers the graph view where there is one.
+const ASK_TITLE = { owners: tr('Хувьцаа эзэмшигчид'), ultimate_owners: tr('Эцсийн өмчлөгчид (look-through)'),
+  officers: tr('Удирдлага / ТУЗ'), holdings: tr('Эзэмшдэг компаниуд'), positions: tr('Албан тушаал'),
+  related: tr('Холбоотой компаниуд'), flags: tr('Анхаарах зүйлс'), changes: tr('Өөрчлөлтүүд'), path: tr('Холбоос'),
+  interlocks: tr('Олон компанид ажилладаг хүмүүс'), state: tr('Төрийн оролцоо'), largest: tr('Хамгийн том компаниуд'),
+  summary: tr('Графт буй мэдээлэл') };
+const ASK_PART = { owners: tr('хувьцаа эзэмшигч'), officers: tr('удирдлага / ТУЗ'), holdings: tr('эзэмшдэг компани'),
+  positions: tr('албан тушаал'), beneficial_owners: tr('эцсийн өмчлөгч') };
+const askName = x => x.ticker && !x.ticker.startsWith('~') ? `${esc(x.ticker)} <span class="meta">${esc(dn(x))}</span>` : esc(dn(x));
+function askRow(a, r) {
+  const li = (body, right = '') => `<li${r.key ? ` data-key="${esc(r.key)}"` : ''}><span>${body}</span>${right ? `<span class="meta">${right}</span>` : ''}</li>`;
+  switch (a.intent) {
+    case 'officers': case 'positions': return li(askName(r), esc(roleTitle(r)));
+    case 'related': return li(askName(r), (r.via || []).map(n => esc(dnS(n))).join(', '));
+    case 'flags': return `<li class="rf ${r.level}"${r.key ? ` data-key="${esc(r.key)}"` : ''}>${esc(r.text)}</li>`;
+    case 'interlocks': return li(esc(dn(r)), L`${r.count} компани: ${(r.via || []).map(esc).join(', ')}`);
+    case 'largest': return li(askName(r), fmtMNT(r.market_cap) + (r.percent != null ? ` (${r.percent}%)` : ''));
+    case 'state': return li(askName(r), `${fmtPct(r.percent)}${r.direct ? L` (шууд ${fmtPct(r.direct)})` : ''}`);
+    case 'summary': return `<li style="cursor:default"><span>${ASK_PART[r.name] || esc(r.name)}</span><span>${r.count}</span></li>`;
+    default: return li(askName(r), r.percent != null ? fmtPct(r.percent) + (r.holding_type && r.holding_type !== 'direct' ? ` ${HOLD_TAG[r.holding_type] || ''}` : '') : '');
+  }
+}
+async function ask(q) {
+  const ul = document.getElementById('askResult');
+  if (!q.trim()) { ul.innerHTML = ''; return; }
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
+  let a;
+  try { a = await api(`/api/ask?q=${encodeURIComponent(q)}`); }
+  catch { ul.innerHTML = tr('<li class="meta">Асуултыг шалгаж чадсангүй</li>'); return; }
+  const examples = () => `<li class="meta" style="cursor:default">${tr('Жишээ:')}</li>` +
+    a.examples.map(x => `<li data-q="${esc(x)}"><span class="meta">${esc(x)}</span></li>`).join('');
+  let html = '';
+  if (a.entities.length)
+    html += `<li class="meta" style="cursor:default; display:block">${tr('Ойлгосон:')} ${a.entities.map(e => askName(e)).join(' · ')}` +
+      (a.intent ? ` · ${ASK_TITLE[a.intent] || esc(a.intent)}` : '') +
+      (a.alternatives.some(x => x.length) ? `<br>${tr('Эсвэл:')} ${a.alternatives.flat().slice(0, 4).map(x =>
+        `<a href="#" data-open="${esc(x.key)}">${esc(x.ticker && !x.ticker.startsWith('~') ? x.ticker : dn(x))}</a>`).join(', ')}` : '') + '</li>';
+  if (!a.intent) {
+    html += tr('<li class="meta" style="cursor:default">Асуултыг ойлгосонгүй. Компани, хүний нэр эсвэл тикер, мөн юу мэдэхийг бичнэ үү.</li>') + examples();
+  } else if (a.missing) {
+    html += (a.missing === 'two' ? tr('<li class="meta" style="cursor:default">Хоёр компани эсвэл хүний нэр хэрэгтэй.</li>')
+      : a.missing === 'company' ? tr('<li class="meta" style="cursor:default">Энэ асуулт компанийн тухай байх ёстой.</li>')
+      : tr('<li class="meta" style="cursor:default">Асуултад нэрлэсэн компани, хүнийг графаас олсонгүй.</li>')) + examples();
+  } else {
+    html += `<li class="group">${ASK_TITLE[a.intent] || esc(a.intent)}</li>`;
+    if (a.intent === 'changes') html += changeItems(a.rows, !a.entities.length);
+    else if (a.intent === 'path') html += a.found
+      ? `<li style="cursor:default; display:block">${a.rows.map(r => `<a href="#" data-open="${esc(r.key)}">${esc(r.ticker && !r.ticker.startsWith('~') ? r.ticker : dn(r))}</a>`).join(' → ')}</li>`
+      : tr('<li class="meta" style="cursor:default">Одоогийн холбоогоор холбогдоогүй.</li>');
+    else html += a.rows.map(r => askRow(a, r)).join('');
+    if (!a.rows.length && a.intent !== 'path') html += tr('<li class="meta" style="cursor:default">Үр дүн алга</li>');
+    const acts = [];
+    if (a.view && (a.view.focus || a.view.a)) acts.push(`<button data-askview="1">${tr('Графаар харах')}</button>`);
+    if (a.dossier) acts.push(`<a class="dossier" href="/dossier/${encodeURIComponent(a.dossier)}${EN_ON ? '?lang=en' : ''}" target="_blank" rel="noopener">${tr('Компанийн досье (хэвлэх)')}</a>`);
+    if (acts.length) html += `<li class="acts" style="cursor:default">${acts.join('')}</li>`;
+  }
+  ul.innerHTML = html;
+  ul.dataset.view = JSON.stringify(a.view || {});
+}
+document.getElementById('askForm').addEventListener('submit', ev => { ev.preventDefault(); ask(document.getElementById('ask').value); });
+document.getElementById('askResult').addEventListener('click', ev => {
+  const ex = ev.target.closest('[data-q]');
+  if (ex) { document.getElementById('ask').value = ex.dataset.q; return ask(ex.dataset.q); }
+  const o = ev.target.closest('[data-open]');
+  if (o) { ev.preventDefault(); return open(o.dataset.open); }
+  if (ev.target.closest('[data-askview]')) {
+    const v = JSON.parse(ev.currentTarget.dataset.view || '{}');
+    return v.a ? showPath(v.a, v.b) : v.focus ? open(v.focus) : null;
+  }
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 
