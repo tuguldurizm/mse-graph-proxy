@@ -321,7 +321,9 @@ def company_issues(r: dict, today: date | None = None) -> list[dict]:
 
     def add(code: str, detail: str = "", **extra):
         level, text = ISSUES[code]
-        out.append({"code": code, "level": level, "text": text + (f": {detail}" if detail else ""), **extra})
+        # `detail` apart too, so the English UI can put it after its own text (issue #10)
+        out.append({"code": code, "level": level, "text": text + (f": {detail}" if detail else ""),
+                    "detail": detail, **extra})
 
     stakes, pct = r["stakes"], r["with_percent"]
     if not stakes:

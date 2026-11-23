@@ -215,9 +215,9 @@ _TYPE = "[l IN labels({0}) WHERE l IN ['Company', 'Person', 'Organization']][0]"
 # What the graph views (neighbourhood, overview, path, detected group) return for a node `n` and
 # an edge `r`. Besides the centrality scores (#29) and market cap (#31) for the node size, a node
 # carries its sector and detected group (#28) with that group's label (its anchor's ticker or
-# name), so the UI can colour and filter by them (issue #10); an edge carries `role_std` for the
-# "board ties only" filter.
-VIEW_NODE = ("n {.key, .name, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, "
+# name), so the UI can colour and filter by them, and `name_en` for the English UI (issue #10); an
+# edge carries `role_std` for the "board ties only" filter and the English title.
+VIEW_NODE = ("n {.key, .name, .name_en, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, "
              ".market_cap, .sector, .sector_std, .group_id, listed: CASE WHEN 'Company' IN labels(n) THEN coalesce(n.listed, true) END, "
              "group_label: CASE WHEN n.group_id IS NULL THEN null ELSE head(COLLECT { MATCH (a:Entity {key: substring(n.group_id, 4)}) "
              "RETURN CASE WHEN a.ticker IS NOT NULL AND NOT a.ticker STARTS WITH '~' THEN a.ticker ELSE a.name END }) END, "
@@ -2445,7 +2445,7 @@ class Graph:
             MATCH (e:Entity)
             WHERE toLower(e.name) CONTAINS $q OR toLower(coalesce(e.name_en,'')) CONTAINS $q
                OR toLower(coalesce(e.ticker,'')) = $q
-            RETURN e.key AS key, e.name AS name, e.ticker AS ticker,
+            RETURN e.key AS key, e.name AS name, e.name_en AS name_en, e.ticker AS ticker,
                    [l IN labels(e) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
                    COUNT { (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]-() } AS degree
             ORDER BY (toLower(coalesce(e.ticker,'')) = $q) DESC, degree DESC, name
@@ -2470,14 +2470,14 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (h:Entity)-[r:OWNS]->(e)
                 RETURN collect(CASE WHEN h IS NULL THEN NULL ELSE
-                    {{key: h.key, name: h.name, type: {_TYPE.format("h")},
+                    {{key: h.key, name: h.name, name_en: h.name_en, type: {_TYPE.format("h")},
                       percent: r.percent, shares: r.shares, as_of: r.as_of, holding_type: r.holding_type,
                       share_class: r.share_class, basis: r.basis, nominee_kind: h.nominee_kind, {period}}} END) AS owners
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:OWNS]->(t:Company)
                 RETURN collect(CASE WHEN t IS NULL THEN NULL ELSE
-                    {{key: t.key, name: t.name, ticker: t.ticker, holding_type: r.holding_type,
+                    {{key: t.key, name: t.name, name_en: t.name_en, ticker: t.ticker, holding_type: r.holding_type,
                       share_class: r.share_class, basis: r.basis, market_cap: t.market_cap,
                       price_date: t.price_date, price_stale: t.price_stale,
                       percent: r.percent, shares: r.shares, as_of: r.as_of, {period}}} END) AS holdings
@@ -2491,17 +2491,17 @@ class Graph:
             CALL (e) {{
                 OPTIONAL MATCH (b:Entity)-[r:BENEFICIAL_OWNER]->(e)
                 RETURN collect(CASE WHEN b IS NULL THEN NULL ELSE
-                    {{key: b.key, name: b.name, type: {_TYPE.format("b")}, {period}}} END) AS beneficial_owners
+                    {{key: b.key, name: b.name, name_en: b.name_en, type: {_TYPE.format("b")}, {period}}} END) AS beneficial_owners
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:BENEFICIAL_OWNER]->(t:Company)
                 RETURN collect(CASE WHEN t IS NULL THEN NULL ELSE
-                    {{key: t.key, name: t.name, ticker: t.ticker, since: r.since, {period}}} END) AS beneficially_owns
+                    {{key: t.key, name: t.name, name_en: t.name_en, ticker: t.ticker, since: r.since, {period}}} END) AS beneficially_owns
             }}
             CALL (e) {{
                 OPTIONAL MATCH (e)-[r:HOLDS_POSITION]->(c:Company)
                 RETURN collect(CASE WHEN c IS NULL THEN NULL ELSE
-                    {{key: c.key, name: c.name, ticker: c.ticker, title: r.title, titles: r.titles, role: r.role,
+                    {{key: c.key, name: c.name, name_en: c.name_en, ticker: c.ticker, title: r.title, titles: r.titles, role: r.role,
                       role_std: r.role_std, {period}}} END) AS positions
             }}
             RETURN e {{.*, type: {_TYPE.format("e")}}} AS entity, owners, holdings, people, positions,
