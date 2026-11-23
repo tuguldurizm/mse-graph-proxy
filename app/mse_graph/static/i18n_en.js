@@ -372,5 +372,16 @@ const EN = {
  "ТУЗ-ийн нарийн бичгийн дарга": "Board secretary",
  "Гүйцэтгэх захирлын орлогч": "Deputy CEO",
  "ТУЗ-ийн дэд дарга": "Vice chair of the board",
- "Ерөнхий нягтлан бодогч": "Chief accountant"
+ "Ерөнхий нягтлан бодогч": "Chief accountant",
+ "Gephi-д нээх граф файл": "A graph file to open in Gephi",
+ "MSE холбоосын граф ·": "MSE connections graph ·",
+ "· эх сурвалж:": "· sources:",
+ "Графыг зураг болгон татах": "Download the graph as an image",
+ "Илрүүлсэн бүлэг:": "Detected group:",
+ "Харагдаж буй холбоосуудыг хүснэгтээр татах": "Download the links shown as a table",
+ "Холбоос хуулагдлаа": "Link copied",
+ "Холбоос хуулах": "Copy link",
+ "Холбоос:": "Link:",
+ "Хяналтын бүлэг:": "Control group:",
+ "Энэ харагдацын холбоосыг хуулах: харагдац, гүн, өнгө, шүүлтүүр нь хадгалагдана": "Copy a link to this view: the view, depth, colour and filters are kept"
 };

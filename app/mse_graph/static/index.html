@@ -7,6 +7,7 @@
 <script src="/static/vendor/vis-network.min.js"></script>
 <script src="/static/i18n_en.js"></script>
 <script src="/static/i18n.js"></script>
+<script src="/static/export.js"></script>
 <style>
   :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc;
           --company:#2f6fb2; --person:#c46a1c; --org:#5b8a3a; --accent:#2f6fb2;
@@ -98,6 +99,13 @@
     <button id="btnOverview">Зах зээлийн тойм</button>
     <select id="depth"><option value="1">1 алхам</option><option value="2" selected>2 алхам</option><option value="3">3 алхам</option></select>
   </div>
+  <div class="row">
+    <button id="btnShare" title="Энэ харагдацын холбоосыг хуулах: харагдац, гүн, өнгө, шүүлтүүр нь хадгалагдана">Холбоос хуулах</button>
+    <button id="btnPng" title="Графыг зураг болгон татах">PNG</button>
+    <button id="btnCsv" title="Харагдаж буй холбоосуудыг хүснэгтээр татах">CSV</button>
+    <button id="btnGexf" title="Gephi-д нээх граф файл">GEXF</button>
+    <span id="shareNote" class="meta" style="align-self:center"></span>
+  </div>
 
   <h2>Өнгө, шүүлтүүр / Encode &amp; filter</h2>
   <div class="row">
@@ -182,6 +190,8 @@ const network = new vis.Network(document.getElementById('net'), { nodes, edges }
   nodes: { font: { color: css('--ink'), size: 13 } },
 });
 let selected = null, pathA = null, pathB = null, lastDraw = null, view = null;   // view: 'overview' or null
+// what the graph shows (export.js: the address bar keeps it), and the nodes and links drawn after the filters
+let shown = { kind: 'overview' }, lastVisible = { nodes: [], edges: [] };
 // node size by a centrality score (issue #29): 12 px, up to 12 + 36 px for the largest score in view
 const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree',
                     market_cap: 'market_cap' };   // market cap (issue #31): companies without one stay small
@@ -298,6 +308,8 @@ function render() {
              opacity: .7 },
   })));
   showLegend(cats, mode, [...ns.values()]);
+  lastVisible = { nodes: visN, edges: vis };
+  syncUrl();
   document.getElementById('filterNote').textContent = active
     ? L`Шүүлтүүр: ${visN.length} / ${ns.size} зангилаа, ${vis.length} / ${es.size} холбоо харагдаж байна.` : '';
 }
@@ -327,6 +339,7 @@ async function open(key) {
   ]);
   // an old link (company:APU, company:~2702673) resolves to the node's current key
   key = selected = (d && d.entity && d.entity.key) || key;
+  shown = { kind: 'focus', key };
   draw(g, { focus: key });
   network.selectNodes([key]);
   showDetails(d);
@@ -705,19 +718,26 @@ document.getElementById('results').addEventListener('click', ev => {
 network.on('click', p => { if (p.nodes.length) open(p.nodes[0]); });
 async function showOverview() {
   const sector = val('sector');
-  draw(await api('/api/graph/overview' + (sector ? `?sector=${encodeURIComponent(sector)}` : '')));
+  const g = await api('/api/graph/overview' + (sector ? `?sector=${encodeURIComponent(sector)}` : ''));
+  shown = { kind: 'overview' };
+  draw(g);
   view = 'overview';
 }
 document.getElementById('btnOverview').onclick = showOverview;
-document.getElementById('setA').onclick = () => { if (!selected) return; pathA = selected;
-  document.getElementById('pathFrom').textContent = 'A: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
-document.getElementById('setB').onclick = () => { if (!selected) return; pathB = selected;
-  document.getElementById('pathTo').textContent = 'B: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
-document.getElementById('findPath').onclick = async () => {
-  if (!pathA || !pathB) return alert(tr('A болон B зангилааг сонгоно уу.'));
-  const p = await api(`/api/graph/path?a=${encodeURIComponent(pathA)}&b=${encodeURIComponent(pathB)}`);
+const pathLabel = (side, key) => document.getElementById(side === 'A' ? 'pathFrom' : 'pathTo').textContent =
+  `${side}: ` + (nodes.get(key)?.label || key).replace('\n', ' ');
+document.getElementById('setA').onclick = () => { if (!selected) return; pathA = selected; pathLabel('A', pathA); };
+document.getElementById('setB').onclick = () => { if (!selected) return; pathB = selected; pathLabel('B', pathB); };
+async function showPath(a, b) {
+  const p = await api(`/api/graph/path?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
   if (!p.nodes.length) return alert(tr('Холбоос олдсонгүй.'));
+  shown = { kind: 'path', a, b };
   draw(p);
+  pathA = a; pathB = b; pathLabel('A', a); pathLabel('B', b);
+}
+document.getElementById('findPath').onclick = () => {
+  if (!pathA || !pathB) return alert(tr('A болон B зангилааг сонгоно уу.'));
+  return showPath(pathA, pathB);
 };
 
 document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => {
@@ -814,6 +834,7 @@ async function showGroups() {
 }
 async function showGroup(key) {
   const r = await api(`/api/analysis/groups/owner?key=${encodeURIComponent(key)}`), x = r.group;
+  shown = { kind: 'group', key };
   draw(r.graph, { focus: x.key });
   document.getElementById('details').innerHTML =
     `<div><b style="color:var(--ink)">${esc(dn(x))}</b> <span class="tag ${x.type}">${x.type}</span></div>` +
@@ -838,7 +859,9 @@ async function showCommunities() {
   ul.innerHTML = html;
 }
 async function showCommunity(id) {
-  draw(await api(`/api/graph/community?id=${encodeURIComponent(id)}`));
+  const g = await api(`/api/graph/community?id=${encodeURIComponent(id)}`);
+  shown = { kind: 'community', id };
+  draw(g);
 }
 document.getElementById('btnGroups').onclick = showGroups;
 
@@ -1037,33 +1060,97 @@ async function showOfficials(listed = false) {
 }
 document.getElementById('btnOfficials').onclick = () => showOfficials();
 
-// Deep link: /?focus=company:XAG (used by the change feed).
-const focusKey = new URLSearchParams(location.search).get('focus');
+// ---- export and share (issue #10, export.js) ----------------------------------------------
+// The address bar holds the view and the choices (?focus= / ?a=&b= / ?group= / ?community=, depth,
+// color, size, sector, min, ties, lang), so a copied link, the change feed's ?focus= links and
+// the language switch all open the same view.
+const choices = () => Object.fromEntries(Object.values(CHOICES).map(([id]) => [id, val(id)]));
+function syncUrl() {
+  const q = viewQuery(location.search, shown, choices());
+  if (q !== location.search.replace(/^\?/, '')) history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
+}
+let keptSector = '';
+{
+  const { choices: want } = parseView(location.search);
+  for (const [id, v] of Object.entries(want)) {
+    const el = document.getElementById(id);
+    if (id === 'sector') keptSector = v;                 // its choices load later (loadSectors)
+    else if (el && [...el.options].some(o => o.value === v)) el.value = v;
+  }
+}
+function restoreView() {
+  const { shown: s } = parseView(location.search);
+  const fallback = () => showOverview();
+  if (s.kind === 'focus') return open(s.key).catch(fallback);
+  if (s.kind === 'path') return showPath(s.a, s.b).catch(fallback);
+  if (s.kind === 'group') return showGroup(s.key).catch(fallback);
+  if (s.kind === 'community') return showCommunity(s.id).catch(fallback);
+  return fallback();
+}
+const today = () => new Date().toISOString().slice(0, 10);
+const what = () => shown.kind === 'focus' ? shown.key.split(':').pop() : shown.kind === 'path' ? 'path'
+  : shown.kind === 'overview' && val('sector') ? 'overview-' + val('sector') : shown.kind;
+function download(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const note = t => { const n = document.getElementById('shareNote'); n.textContent = t; setTimeout(() => n.textContent = '', 2500); };
+const SOURCES = 'mse.mn, Open Data Lab (opendatalab.mn)';
+// a line saying what is shown, for the image and the GEXF file
+function caption() {
+  const name = k => nodes.get(k)?.label?.replace('\n', ' ') || k;
+  const v = shown.kind === 'focus' ? name(shown.key) : shown.kind === 'path' ? `${name(shown.a)} → ${name(shown.b)}`
+    : shown.kind === 'group' ? L`Хяналтын бүлэг: ${name(shown.key)}` : shown.kind === 'community' ? L`Илрүүлсэн бүлэг: ${name(shown.id.slice(4))}`
+    : tr('Зах зээлийн тойм') + (val('sector') ? ` · ${secName(val('sector'))}` : '');
+  const f = document.getElementById('filterNote').textContent;
+  return L`MSE холбоосын граф · ${v} · ${today()}${f ? ' · ' + f : ''} · эх сурвалж: ${SOURCES}`;
+}
+document.getElementById('btnShare').onclick = async () => {
+  syncUrl();
+  try { await navigator.clipboard.writeText(location.href); note(tr('Холбоос хуулагдлаа')); }
+  catch { prompt(tr('Холбоос:'), location.href); }
+};
+document.getElementById('btnCsv').onclick = () =>
+  download(exportName(what(), today(), 'csv'), new Blob([csvLinks(lastVisible.nodes, lastVisible.edges)], { type: 'text/csv;charset=utf-8' }));
+document.getElementById('btnGexf').onclick = () =>
+  download(exportName(what(), today(), 'gexf'), new Blob([gexf(lastVisible.nodes, lastVisible.edges,
+    { description: caption() + ' · ' + location.href, date: today() })], { type: 'application/xml' }));
+// the graph as drawn, on the page's background, with the legend and a caption under it
+document.getElementById('btnPng').onclick = () => {
+  const src = document.querySelector('#net canvas');
+  if (!src) return;
+  const r = src.width / (src.clientWidth || src.width), pad = 12 * r, line = 18 * r;
+  const items = [...document.querySelectorAll('#legend > span')].map(el =>
+    [getComputedStyle(el).getPropertyValue('--c').trim() || css('--muted'), el.textContent.trim()]);
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height + pad * 2 + line * 2;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(src, 0, 0);
+  ctx.font = `${12 * r}px system-ui, sans-serif`; ctx.textBaseline = 'middle';
+  let x = pad, y = src.height + pad + line / 2;
+  for (const [color, text] of items) {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x + 5 * r, y, 5 * r, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = css('--ink'); ctx.fillText(text, x + 14 * r, y);
+    x += 14 * r + ctx.measureText(text).width + 14 * r;
+  }
+  ctx.fillStyle = css('--muted'); ctx.fillText(caption(), pad, y + line, c.width - pad * 2);
+  c.toBlob(b => download(exportName(what(), today(), 'png'), b), 'image/png');
+};
 
-// Language (issue #10): the page reloads in the other language with the selected node (?focus=)
-// and the colour, size and filter choices (kept for this tab only).
-const KEEP = ['depth', 'colorBy', 'sizeBy', 'sector', 'minPct', 'ties'];
+// Language (issue #10): the page reloads in the other language; the address bar keeps the view.
 const langBtn = document.getElementById('langBtn');
 langBtn.textContent = EN_ON ? mn('Монгол') : 'English';
 langBtn.lang = EN_ON ? 'mn' : 'en';
 langBtn.title = EN_ON ? mn('Монгол хэлээр') : 'Switch to English';
 langBtn.onclick = () => {
-  try { sessionStorage.setItem('viewState', JSON.stringify(Object.fromEntries(KEEP.map(id => [id, val(id)])))); } catch {}
+  syncUrl();
   const u = new URL(location.href);
   u.searchParams.set('lang', EN_ON ? 'mn' : 'en');
-  if (selected) u.searchParams.set('focus', selected); else u.searchParams.delete('focus');
   location.assign(u);
 };
-let keptSector = '';
-try {
-  const st = JSON.parse(sessionStorage.getItem('viewState') || 'null');
-  sessionStorage.removeItem('viewState');
-  if (st) for (const id of KEEP) {
-    const el = document.getElementById(id);
-    if (id === 'sector') keptSector = st[id] || '';       // its choices load later (loadSectors)
-    else if (el && st[id] != null && [...el.options].some(o => o.value === st[id])) el.value = st[id];
-  }
-} catch {}
 function loadStats() {
   return api('/api/stats').then(s => {
     document.getElementById('stats').textContent =
@@ -1071,8 +1158,7 @@ function loadStats() {
       (s.past_positions || s.past_ownerships ? L` · түүх: ${s.past_positions} албан тушаал, ${s.past_ownerships} хувьцаа эзэмшил` : '') +
       (s.first_observed && s.first_observed !== s.last_observed ? ` (${s.first_observed} – ${s.last_observed})` : '');
     if (s.companies) loadSectors();
-    if (focusKey && s.companies) open(focusKey).catch(() => document.getElementById('btnOverview').click());
-    else if (s.companies) document.getElementById('btnOverview').click();
+    if (s.companies) restoreView();      // what the address bar asks for (export.js), else the overview
   }).catch(() => document.getElementById('stats').textContent = tr('Өгөгдлийн сан ачаалж байна…'));
 }
 
