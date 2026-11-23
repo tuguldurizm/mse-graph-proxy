@@ -41,7 +41,7 @@ API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
 # bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
-PROBE_VERSION = 3
+PROBE_VERSION = 4      # 4: the import (step 2) replaces the probe in the pipeline
 
 # The typed lists behind the "org" / "sct" / "decision" pages (the site's lazy chunk 454, read
 # 2026-11-23): GET, no parameters. Custodians and brokers are the nominee list's sources (#39).
@@ -217,3 +217,279 @@ def mark_probe(g, report: dict) -> None:
     g.run("MERGE (m:Meta {key: 'frc'}) SET m.at = $at, m.version = $v, m.requests = $r, m.menus = $n, "
           "m.errors = size($e)", at=datetime.now(timezone.utc).isoformat(), v=PROBE_VERSION, r=report["requests"],
           n=report["menus"], e=report["errors"])
+
+
+# ---- the import (FRC step 2) -------------------------------------------------------------------
+# Every licensed entity FRC lists becomes (or enriches) a company: listed companies are matched by
+# their register number or mse.mn's 10-digit state number, which also fills the register number of
+# the listed ones FRC licenses (banks, insurers, brokers, NBFIs); the others come in as unlisted
+# `~<register no>` companies. Each keeps its licences (`frc_licenses`, `frc_kinds`). Their CEO comes
+# with the list; their shareholders (`tabinfo/stakeholder`) and board (license.frc.mn `token/tuz`)
+# are read for FRC_DETAIL_BUDGET entities a run, listed companies first, then those never read,
+# then the oldest (every FRC_DETAIL_DAYS). FRC is a supplementary source like the registry: its
+# rows add to edges other sources own and never take them over; a detail read closes only FRC's
+# own edges of that company.
+
+SOURCE_BASE = "https://www.frc.mn/#/sct/org-detail/"    # the entity's page on frc.mn (its source)
+LICENSE_API = os.getenv("FRC_LICENSE_API", "https://license.frc.mn/")
+# list call -> kind
+LICENSED = {
+    "securitie/custodian": "custodian", "securitie/secbroker": "broker", "securitie/nominal": "nominal_account",
+    "securitie/underwriter": "underwriter", "securitie/dealer": "dealer", "securitie/homk": "asset_manager",
+    "securitie/hoz": "investment_adviser", "securitie/hiu": "trust_manager", "securitie/zereglel": "rating_agency",
+    "insurance/insurance": "insurer", "insurance/longinsurance": "life_insurer", "insurance/reinsurance": "reinsurer",
+    "insurance/insurancebroker": "insurance_broker",
+}
+# sector lists, read as frc/entity?id=<sector>&otid=<list menu> (the site's "org" pages)
+SECTOR_LISTS = {"nbfi": (12, 275), "savings_coop": (14, 353), "money_lender": (1202, 1286)}
+# kinds whose licence makes a holder a nominee candidate (data/reference/nominees.csv, #39)
+NOMINEE_KINDS = ("custodian", "nominal_account", "broker", "trust_manager")
+CEO_TITLE = "Гүйцэтгэх захирал"
+BOARD_TITLE = "ТУЗ-ийн гишүүн"
+
+
+def _text(v) -> str:
+    import html as html_mod
+    s = html_mod.unescape(str(v or "")).replace('"', " ").replace("“", " ").replace("”", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _date(v) -> str:
+    """'6/24/2015 12:00:00 AM' or '2025-05-29T00:00:00' -> '2015-06-24'."""
+    s = str(v or "").strip()
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+    if m:
+        return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", s)
+    return m.group(1) if m else ""
+
+
+def entity_row(rec: dict, kind: str) -> dict | None:
+    """One licensed entity from a list record (None without a 7-digit register number)."""
+    low = {k.lower(): v for k, v in rec.items()}
+    reg = re.sub(r"\D", "", str(low.get("registration_number") or low.get("register") or low.get("regno") or ""))
+    if not re.fullmatch(r"\d{7}", reg):
+        return None
+    state = re.sub(r"\D", "", str(low.get("state_number") or ""))
+    lic = {"kind": kind, "activity": _text(low.get("industry_names") or low.get("financial_activities_name")),
+           "number": _text(low.get("license_number")), "date": _date(low.get("license_date")),
+           "decision": _text(low.get("decision_number"))}
+    return {"register_no": reg, "state_reg_no": state if re.fullmatch(r"\d{10}", state) else "",
+            "name": _text(low.get("entity_name") or low.get("name")), "ceo": _text(low.get("ceo")),
+            "address": _text(low.get("address")), "licenses": [lic]}
+
+
+def read_lists(fetch) -> tuple[dict[str, dict], dict]:
+    """Every licensed entity, by register number, with all its licences. `fetch(path, **params)`
+    returns parsed JSON or None. Returns the entities and the count per list."""
+    found: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+
+    def add(recs, kind):
+        n = 0
+        for rec in recs:
+            row = entity_row(rec, kind)
+            if not row:
+                continue
+            n += 1
+            have = found.get(row["register_no"])
+            if have is None:
+                found[row["register_no"]] = row
+            else:
+                have["licenses"] += row["licenses"]
+                for k in ("state_reg_no", "name", "ceo", "address"):
+                    have[k] = have[k] or row[k]
+        return n
+
+    for path, kind in LICENSED.items():
+        ans = fetch(path)
+        if ans is not None:
+            counts[path] = add(records(ans), kind)
+    for kind, (sector, menu) in SECTOR_LISTS.items():
+        ans = fetch("frc/entity", id=sector, otid=menu)
+        recs = records(ans) if ans is not None else []
+        if ans is not None and not recs:         # the page may carry the list menu as its own id
+            ans = fetch("frc/entity", id=menu, otid=menu)
+            recs = records(ans) if ans is not None else []
+        if recs and kind not in _described:
+            describe(ans, f"frc/entity {kind}")
+            _described.add(kind)
+        counts[kind] = add(recs, kind)
+    return found, counts
+
+
+_described: set[str] = set()
+
+
+def _person(rec: dict) -> str:
+    low = {k.lower(): v for k, v in rec.items()}
+    last = _text(low.get("last_name") or low.get("lastname") or low.get("ovog") or "")
+    first = _text(low.get("name") or low.get("first_name") or low.get("firstname") or low.get("ner") or "")
+    return f"{last} {first}".strip() if last and first else (first or last)
+
+
+def stakeholders(ans) -> list[dict]:
+    """[{name, percent}] of the active stakeholders in a `tabinfo/stakeholder` answer."""
+    out = []
+    for rec in records(ans):
+        low = {k.lower(): v for k, v in rec.items()}
+        if str(low.get("is_active", "1")).strip() in ("0", "false", "False"):
+            continue
+        name = _person(rec)
+        try:
+            pct = float(str(low.get("stock_percentage") or low.get("percent") or "").replace(",", "."))
+        except ValueError:
+            pct = None
+        if name:
+            out.append({"name": name, "percent": pct})
+    return out
+
+
+def board(ans) -> list[dict]:
+    """[{name, title}] from a license.frc.mn `token/tuz` answer (its fields aren't known yet: the
+    common ones are tried, and an answer without a name is described in the log)."""
+    out = []
+    for rec in records(ans):
+        low = {k.lower(): v for k, v in rec.items()}
+        name = _person(rec)
+        title = _text(low.get("position") or low.get("title") or low.get("albantushaal") or low.get("role")
+                      or low.get("type_name") or low.get("typename") or "")
+        if name:
+            out.append({"name": name, "title": title or BOARD_TITLE})
+    if records(ans) and not out:
+        describe(ans, "license token/tuz (no names found)")
+    return out
+
+
+def _detail_queue(g, entities: dict[str, dict], tickers: dict[str, str], budget: int, days: float) -> list[str]:
+    """Register numbers whose shareholders and board to read this run: listed first, then never
+    read, then the oldest read; none read within `days`."""
+    rows = {r["reg"]: r for r in g.run(
+        "MATCH (c:Company) WHERE c.register_no IN $regs "
+        "RETURN c.register_no AS reg, coalesce(c.listed, true) AS listed, c.frc_detail_at AS at",
+        regs=list(entities))}
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    due = [reg for reg in entities if not (rows.get(reg) or {}).get("at") or rows[reg]["at"] < cutoff]
+    due.sort(key=lambda reg: (not (rows.get(reg) or {}).get("listed", False) or tickers.get(reg, "~").startswith("~"),
+                              bool((rows.get(reg) or {}).get("at")), (rows.get(reg) or {}).get("at") or "", reg))
+    return due[:budget]
+
+
+def build(g, entities: dict[str, dict], details: dict[str, dict], when: str):
+    """The dataset for the graph: companies (new) or facts (known), CEOs, and for the entities in
+    `details` ({reg: {"stakeholders": [...] | None, "board": [...] | None}}) their shareholders and
+    board, each a complete picture (snapshot) when it was read. Returns (dataset, tickers)."""
+    from .models import Company, CompanyFacts, Dataset, Position, Shareholding
+
+    lookup = g.company_lookup()
+    have_reg = {r["t"]: r["reg"] or "" for r in g.run("MATCH (c:Company) RETURN c.ticker AS t, c.register_no AS reg")}
+    ds = Dataset(observed_at=when, supplementary=True)
+    tickers: dict[str, str] = {}
+    for reg, e in entities.items():
+        src = SOURCE_BASE + reg
+        t = lookup.get("reg:" + reg) or (lookup.get("reg:" + e["state_reg_no"]) if e["state_reg_no"] else None)
+        if t is None:
+            t = "~" + reg
+            ds.companies.append(Company(ticker=t, name=e["name"] or reg, listed=False, register_no=reg,
+                                        state_reg_no=e["state_reg_no"], address=e["address"], url=src))
+        elif not have_reg.get(t):
+            # a listed company known by its state number gets its register number (it opens its registry page)
+            ds.facts.append(CompanyFacts(ticker=t, register_no=reg, reg_no=e["state_reg_no"]))
+        tickers[reg] = t
+        if e["ceo"]:
+            ds.positions.append(Position(t, e["ceo"], CEO_TITLE, "executive", source=src))
+        d = details.get(reg) or {}
+        if d.get("stakeholders") is not None:
+            for s in d["stakeholders"]:
+                ds.shareholdings.append(Shareholding(t, s["name"], s["percent"], as_of=when, source=src))
+            ds.mark_snapshot("shareholdings", t, src)
+        if d.get("board") is not None:
+            for b in d["board"]:
+                ds.positions.append(Position(t, b["name"], b["title"], "board", source=src))
+            if e["ceo"] or d["board"]:
+                ds.mark_snapshot("positions", t, src)
+    return ds, tickers
+
+
+def write_licenses(g, entities: dict[str, dict], tickers: dict[str, str], details: dict, when: str) -> int:
+    rows = []
+    for reg, e in entities.items():
+        lic = [" · ".join(x for x in (l["activity"] or l["kind"], l["number"], l["date"]) if x) for l in e["licenses"]]
+        rows.append({"t": tickers[reg], "lic": sorted(set(lic)), "kinds": sorted({l["kind"] for l in e["licenses"]}),
+                     "url": SOURCE_BASE + reg, "detail": reg in details})
+    g.run("""UNWIND $rows AS r MATCH (c:Company {ticker: r.t})
+             SET c.frc_licenses = r.lic, c.frc_kinds = r.kinds, c.frc_url = r.url, c.frc_seen = $when,
+                 c.frc_detail_at = CASE WHEN r.detail THEN $now ELSE c.frc_detail_at END""",
+          rows=rows, when=when, now=datetime.now(timezone.utc).isoformat())
+    # licences that FRC no longer lists
+    gone = g.run("MATCH (c:Company) WHERE c.frc_seen IS NOT NULL AND c.frc_seen < $when "
+                 "SET c.frc_licenses = [], c.frc_kinds = [] RETURN count(c) AS n", when=when)[0]["n"]
+    return gone
+
+
+def step(g, get=None, budget: int | None = None, delay: float | None = None,
+         sleep: Callable[[float], None] = time.sleep, when: str | None = None) -> dict:
+    """Read FRC's lists and this run's details, load them, and return a summary."""
+    from datetime import date
+    get = get or _client_get()
+    delay = _env_float("FRC_DELAY", 5.0) if delay is None else delay
+    budget = int(budget if budget is not None else _env_float("FRC_DETAIL_BUDGET", 20))
+    days = _env_float("FRC_DETAIL_DAYS", 30)
+    when = when or date.today().isoformat()
+    report: dict = {"requests": 0, "errors": [], "lists": {}}
+
+    def fetch(path: str, post: bool = False, base: str | None = None, **params):
+        if report["requests"]:
+            sleep(delay)
+        report["requests"] += 1
+        u = (base.rstrip("/") + "/" + path + ("?" + "&".join(f"{k}={v}" for k, v in params.items()) if params else "")
+             if base else url(path, **params))
+        try:
+            return json.loads(get(u, post=True) if post else get(u))
+        except Exception as exc:
+            report["errors"].append(f"{path}: {type(exc).__name__}: {str(exc)[:160]}")
+            log.warning("FRC %s failed: %s", u, exc)
+            return None
+
+    entities, report["lists"] = read_lists(fetch)
+    report["entities"] = len(entities)
+    # not parsed yet: one decisions page (NBFI sector, this year) and the sanctions list, described
+    # in the log (`FRC layout`) so their parsers can be written from real answers
+    for what, path, params in (("decisions", "frc/decision", {"sctId": 12, "decId": when[:4]}),
+                               ("sanctions", "news", {"menuid": 451, **SITE, "page": 0})):
+        ans = fetch(path, **params)
+        report["lists"][what] = len(records(ans)) if ans is not None else None
+        if ans is not None and records(ans):
+            describe(ans, f"{path} ({what})")
+    if not entities:
+        return report
+    lookup = g.company_lookup()
+    known = {reg: lookup.get("reg:" + reg) or lookup.get("reg:" + e["state_reg_no"]) or "~" + reg
+             for reg, e in entities.items()}
+    details: dict[str, dict] = {}
+    for reg in _detail_queue(g, entities, known, budget, days):
+        sh = fetch("tabinfo/stakeholder", post=True, register=reg)
+        tz = fetch("token/tuz", post=True, base=LICENSE_API, register=reg)
+        if sh is None and tz is None:
+            continue
+        if tz is not None and "tuz" not in _described:
+            describe(tz, f"license token/tuz register={reg}")
+            _described.add("tuz")
+        details[reg] = {"stakeholders": stakeholders(sh) if sh is not None else None,
+                        "board": board(tz) if tz is not None else None}
+    ds, tickers = build(g, entities, details, when)
+    loaded = g.load(ds, observed_at=when)
+    gone = write_licenses(g, entities, tickers, details, when)
+    listed = [t for t in tickers.values() if not t.startswith("~")]
+    report.update(details=len(details), listed_matched=len(set(listed)),
+                  registers_filled=len(ds.facts), new_companies=len(ds.companies),
+                  shareholdings=len(ds.shareholdings), positions=len(ds.positions), licenses_gone=gone,
+                  changes=loaded.get("changes", {}))
+    return report
+
+
+def mark_step(g, report: dict) -> None:
+    g.run("MERGE (m:Meta {key: 'frc'}) SET m.at = $at, m.version = $v, m.requests = $r, m.entities = $n, "
+          "m.errors = size($e)", at=datetime.now(timezone.utc).isoformat(), v=PROBE_VERSION, r=report["requests"],
+          n=report.get("entities", 0), e=report["errors"])

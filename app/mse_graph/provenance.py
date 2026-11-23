@@ -29,6 +29,7 @@ DATASET_PREFIX = "dataset:"               # graph.company_row_source
 KINDS = {
     "mse": "MSE",
     "registry": "Open Data Lab",
+    "frc": "FRC (frc.mn)",
     "registry_file": "Open Data Lab (файл)",
     "dataset": "Гараар цуглуулсан",
     "search": "Хайлтын үр дүн (шалгаагүй)",
@@ -51,6 +52,8 @@ def _kind_of_host(host: str) -> str:
         return "mse"
     if host == "opendatalab.mn" or host.endswith(".opendatalab.mn"):
         return "registry"
+    if host == "frc.mn" or host.endswith(".frc.mn"):
+        return "frc"
     return "dataset"
 
 
@@ -74,7 +77,7 @@ def describe(source: str | None) -> dict | None:
     if _is_url(s):
         host = _host(s)
         kind = _kind_of_host(host)
-        label = KINDS[kind] if kind == "registry" else host     # mse.mn / open.mse.mn / sg.mn ...
+        label = KINDS[kind] if kind in ("registry", "frc") else host     # mse.mn / open.mse.mn / sg.mn ...
         return {"source": s, "label": label, "kind": kind, "url": s}
     if s.startswith(DATASET_PREFIX):
         host = s[len(DATASET_PREFIX):]

@@ -317,21 +317,24 @@ _CANDIDATE_RE = (r"(?i).*(ҮЦК|үнэт цаас|securities|секьюр|се�
 
 
 def nominee_candidates(g: Graph, min_companies: int = 2, limit: int = 100) -> list[dict]:
-    """Holders not marked as nominees whose name suggests a broker, bank or investment firm
-    and that hold stakes in `min_companies`+ companies: the rows to check before adding them
-    to data/reference/nominees.csv (a firm's own investments are direct stakes)."""
+    """Holders not marked as nominees whose name suggests a broker, bank or investment firm, or
+    that FRC licenses to hold for clients (custodian, broker, nominee account, trust: `licensed`,
+    frc.py), and that hold stakes in `min_companies`+ companies: the rows to check before adding
+    them to data/reference/nominees.csv (a firm's own investments are direct stakes)."""
+    from .frc import NOMINEE_KINDS
     return g.run(
         f"""
         MATCH (h:Entity)-[o:OWNS {{current: true}}]->(c:Company)
         WHERE NOT h:Person AND NOT coalesce(h.nominee, false) AND h <> c AND {real("o")}
-          AND h.name =~ $rx
+          AND (h.name =~ $rx OR any(k IN coalesce(h.frc_kinds, []) WHERE k IN $kinds))
         WITH h, collect({{ticker: c.ticker, name: c.name, key: c.key, percent: o.percent}}) AS stakes
         WHERE size(stakes) >= $min
         RETURN h.key AS key, h.name AS name, h.register_no AS register_no,
                [l IN labels(h) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
+               [k IN coalesce(h.frc_kinds, []) WHERE k IN $kinds] AS licensed,
                size(stakes) AS companies, stakes
-        ORDER BY companies DESC, name LIMIT $limit
-        """, rx=_CANDIDATE_RE, min=min_companies, limit=limit)
+        ORDER BY size(licensed) > 0 DESC, companies DESC, name LIMIT $limit
+        """, rx=_CANDIDATE_RE, kinds=list(NOMINEE_KINDS), min=min_companies, limit=limit)
 
 
 def nominees(g: Graph) -> dict:
