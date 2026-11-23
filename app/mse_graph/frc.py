@@ -41,7 +41,7 @@ API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
 # bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
-PROBE_VERSION = 6      # 4: the import (step 2); 5: no FRC shareholders for listed companies, BOM fix; 6: decisions
+PROBE_VERSION = 7      # 4: the import (step 2); 5: no FRC shareholders for listed companies, BOM fix; 6: decisions; 7: name matching
 
 # The typed lists behind the "org" / "sct" / "decision" pages (the site's lazy chunk 454, read
 # 2026-11-23): GET, no parameters. Custodians and brokers are the nominee list's sources (#39).
@@ -502,11 +502,15 @@ def step(g, get=None, budget: int | None = None, delay: float | None = None,
     loaded = g.load(ds, observed_at=when)
     gone = write_licenses(g, entities, tickers, details, when)
     # the commission's decisions, linked to the companies they name (FRC's names first)
-    from .normalize import entity_key
-    names = {}
+    names: dict[str, str] = {}
+    clash: set[str] = set()
     for reg, e in entities.items():
-        for k in (entity_key(e["name"]), entity_key(e["name"], "organization")):
-            names.setdefault(k, tickers[reg])
+        c = core_name(e["name"])
+        if c in names and names[c] != tickers[reg]:
+            clash.add(c)
+        names.setdefault(c, tickers[reg])
+    for c in clash:                    # a core name two licensed entities share links neither
+        names.pop(c, None)
     decisions, report["decision_lists"] = read_decisions(g, fetch, int(when[:4]))
     report["decisions"] = write_decisions(g, decisions, names, when)
     listed = [t for t in tickers.values() if not t.startswith("~")]
@@ -551,16 +555,40 @@ def decision_kind(name: str) -> tuple[str, bool]:
     return next(((k, adv) for rx, k, adv in DECISION_KINDS if re.search(rx, low)), ("other", False))
 
 
+_MARK = r"ХХК|ХК|ТӨХК|ТӨҮГ|ББСБ|ХЗХ|ҮЦК|ТЗК|ХААБ|LLC|JSC|ХХН"
+# a name with a legal form at the start of the decision: "Өндөрхаан инвест ҮЦК ХХК-ийн ... тухай"
+_LEADING = re.compile(rf"^\s*(.{{2,100}}?(?:{_MARK}))\s*-?\s*(?:ийн|ын|ий|ны|ний|н|д|т|ийг|ыг)\b")
+
+
 def named_companies(name: str) -> list[str]:
-    """The company names a decision gives in brackets, quotes dropped: '("МТ финанс ББСБ" ХХК)' ->
-    ['МТ финанс ББСБ ХХК']; several in one bracket are split on commas and 'болон'."""
+    """The companies a decision names: in brackets ('("МТ финанс ББСБ" ХХК)'; several split on commas
+    and 'болон'), only parts that look like a name (quoted, or with a legal form or licence tag, so not
+    "(брокер)"); else a name with a legal form at the start ("Масдак ҮЦК ХХК-ийн ..."). Quotes dropped."""
+    import html as html_mod
+    raw = html_mod.unescape(str(name or ""))
     out = []
-    for inner in re.findall(r"\(([^()]{3,200})\)", _text(name)):
+    for inner in re.findall(r"\(([^()]{3,200})\)?", raw):
         for part in re.split(r",|;|\sболон\s", inner):
-            part = _text(part)
-            if len(part) >= 3 and not re.fullmatch(r"[\d\s./№-]+", part):
-                out.append(part)
+            if re.search(rf"[\"“”«»]|(?<!\w)(?:{_MARK})(?!\w)", part):
+                part = _text(part)
+                if len(part) >= 3 and part not in out:
+                    out.append(part)
+    if not out:
+        m = _LEADING.match(_text(raw))
+        if m:
+            out.append(_text(m.group(1)))
     return out
+
+
+_FORMS_RE = re.compile(rf"(?<!\w)(?:{_MARK.lower()}|ltd|inc)(?!\w)")
+
+
+def core_name(name: str) -> str:
+    """A name without legal forms, licence tags, quotes, punctuation or spaces, for matching a decision's
+    "Гэрэлфинанс ББСБ ХХК" to FRC's "Гэрэл финанс": 'гэрэлфинанс'."""
+    n = _text(name).casefold()
+    n = _FORMS_RE.sub(" ", n)
+    return re.sub(r"[\W_]+", "", n)
 
 
 def decision_row(rec: dict, sector: int) -> dict | None:
@@ -573,7 +601,7 @@ def decision_row(rec: dict, sector: int) -> dict | None:
     f = str(low.get("file_url") or "").strip()
     return {"key": f"frc:{sector}:{number or name[:40]}:{date}", "sector": DECISION_SECTORS.get(sector, str(sector)),
             "name": name, "number": number, "date": date, "type": _text(low.get("decision_type_name")),
-            "kind": kind, "adverse": adverse, "companies": named_companies(name),
+            "kind": kind, "adverse": adverse, "companies": named_companies(low.get("decision_name")),   # raw: quotes count
             "url": (LICENSE_API.rstrip("/") + "/" + f.lstrip("/")) if f and not f.startswith("http") else (f or None)}
 
 
@@ -600,16 +628,22 @@ def read_decisions(g, fetch, year: int) -> tuple[list[dict], dict]:
 
 
 def write_decisions(g, decisions: list[dict], names: dict[str, str], when: str) -> dict:
-    """Store the decisions and link each to the companies it names. `names` maps entity_key(name) ->
-    ticker (FRC's licensed entities of this run); the graph's company aliases are tried after them."""
-    from .normalize import entity_key
-    lookup = {k: v for k, v in g.company_lookup().items() if not k.startswith("reg:")}
+    """Store the decisions and link each to the companies it names, by core name (`core_name`): FRC's
+    licensed entities of this run first (`names`: core -> ticker), then the graph's companies. A core
+    name that fits several companies links none."""
+    graph_cores: dict[str, set] = {}
+    for r in g.run("MATCH (c:Company) RETURN c.ticker AS t, [c.name, c.registry_name] AS ns"):
+        for n in r["ns"]:
+            if n:
+                graph_cores.setdefault(core_name(n), set()).add(r["t"])
     rows = []
     for d in decisions:
         tickers = []
         for n in d["companies"]:
-            keys = [entity_key(n), entity_key(n, "organization")]
-            t = next((names[k] for k in keys if k in names), None) or next((lookup[k] for k in keys if k in lookup), None)
+            c = core_name(n)
+            t = names.get(c)
+            if t is None and len(graph_cores.get(c, ())) == 1:
+                t = next(iter(graph_cores[c]))
             if t and t not in tickers:
                 tickers.append(t)
         rows.append({**{k: v for k, v in d.items() if k != "companies"}, "company_names": d["companies"],
@@ -621,12 +655,16 @@ def write_decisions(g, decisions: list[dict], names: dict[str, str], when: str) 
                  d.kind = r.kind, d.adverse = r.adverse, d.url = r.url, d.company_names = r.company_names,
                  d.last_seen = $when
              WITH d, r
+             OPTIONAL MATCH (d)-[old:CONCERNS]->(x:Company) WHERE NOT x.ticker IN r.tickers
+             DELETE old
+             WITH DISTINCT d, r
              UNWIND r.tickers AS t
              MATCH (c:Company {ticker: t})
              MERGE (d)-[:CONCERNS]->(c)""", rows=rows, when=when)
     linked = sum(1 for r in rows if r["tickers"])
     return {"decisions": len(rows), "linked": linked, "adverse": sum(1 for r in rows if r["adverse"]),
-            "adverse_linked": sum(1 for r in rows if r["adverse"] and r["tickers"])}
+            "adverse_linked": sum(1 for r in rows if r["adverse"] and r["tickers"]),
+            "named": sum(1 for r in rows if r["company_names"])}
 
 
 def company_decisions(g, key: str, limit: int = 50) -> list[dict]:
