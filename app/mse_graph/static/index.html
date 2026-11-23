@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MSE Connections</title>
 <script src="/static/vendor/vis-network.min.js"></script>
+<script src="/static/i18n_en.js"></script>
+<script src="/static/i18n.js"></script>
 <style>
   :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc;
           --company:#2f6fb2; --person:#c46a1c; --org:#5b8a3a; --accent:#2f6fb2;
@@ -21,6 +23,8 @@
   main { position:relative; }
   #net { position:absolute; inset:0; }
   h1 { font-size:17px; margin:0 0 4px; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+  #langBtn { font-size:12px; padding:2px 8px; flex-shrink:0; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:18px 0 6px; }
   .stats { color:var(--muted); font-size:12px; }
   input, select, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line);
@@ -81,7 +85,7 @@
 </head>
 <body>
 <aside>
-  <h1>MSE холбоосын граф</h1>
+  <div class="top"><h1>MSE холбоосын граф</h1><button id="langBtn"></button></div>
   <div class="stats" id="stats">…</div>
   <div class="stats" id="pipeline"></div>
 
@@ -97,7 +101,7 @@
 
   <h2>Өнгө, шүүлтүүр / Encode &amp; filter</h2>
   <div class="row">
-    <select id="colorBy" title="Зангилааны өнгө (issue #10): салбар = компанийн салбар, бүлэг = илрүүлсэн бүлэг (#28)"><option value="">Өнгө: төрөл</option><option value="sector">Өнгө: салбар</option><option value="group">Өнгө: илрүүлсэн бүлэг</option></select>
+    <select id="colorBy" title="Зангилааны өнгө (issue #10): салбар нь компанийн салбар, бүлэг нь илрүүлсэн бүлэг (#28)"><option value="">Өнгө: төрөл</option><option value="sector">Өнгө: салбар</option><option value="group">Өнгө: илрүүлсэн бүлэг</option></select>
     <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option><option value="market_cap">Хэмжээ: зах зээлийн үнэлгээ</option></select>
   </div>
   <div class="row">
@@ -109,7 +113,7 @@
   <div class="meta" id="filterNote"></div>
 
   <h2>Холбоос олох / Path</h2>
-  <div id="pathFrom" class="meta">A: — (сонгоод "A" дарна)</div>
+  <div id="pathFrom" class="meta">A: — (сонгоод «A болгох» дарна)</div>
   <div id="pathTo" class="meta">B: —</div>
   <div class="row"><button id="setA">A болгох</button><button id="setB">B болгох</button><button id="findPath">Зам олох</button></div>
 
@@ -159,9 +163,10 @@
   </div>
 </main>
 <script>
+translateStatic(document.body);   // English: the static HTML (i18n.js)
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 // holding types other than direct (issue #39): nominee = held for clients, treasury = own shares
-const HOLD_TAG = { nominee: 'номини', treasury: 'өөрийн хувьцаа', unknown: 'төрөл тодорхойгүй' };
+const HOLD_TAG = { nominee: tr('номини'), treasury: tr('өөрийн хувьцаа'), unknown: tr('төрөл тодорхойгүй') };
 const holdTag = x => HOLD_TAG[x.holding_type] ? ` <span class="meta">${HOLD_TAG[x.holding_type]}</span>` : '';
 const COLORS = () => ({ Company: css('--company'), Person: css('--person'), Organization: css('--org') });
 const api = (p) => fetch(p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
@@ -181,8 +186,8 @@ let selected = null, pathA = null, pathB = null, lastDraw = null, view = null;  
 const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree',
                     market_cap: 'market_cap' };   // market cap (issue #31): companies without one stay small
 // MNT amounts as people say them: 1.23 тэрбум ₮ (issue #31)
-const fmtMNT = v => v == null ? '—' : Math.abs(v) >= 1e12 ? `${(v / 1e12).toFixed(2)} их наяд ₮` : Math.abs(v) >= 1e9 ? `${(v / 1e9).toFixed(2)} тэрбум ₮`
-  : Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(1)} сая ₮` : `${Math.round(v).toLocaleString('en-US')} ₮`;
+const fmtMNT = v => v == null ? '—' : Math.abs(v) >= 1e12 ? L`${(v / 1e12).toFixed(2)} их наяд ₮` : Math.abs(v) >= 1e9 ? L`${(v / 1e9).toFixed(2)} тэрбум ₮`
+  : Math.abs(v) >= 1e6 ? L`${(v / 1e6).toFixed(1)} сая ₮` : `${Math.round(v).toLocaleString('en-US')} ₮`;
 function nodeSizes(list) {
   const f = CEN_FIELD[document.getElementById('sizeBy').value];
   if (!f) return null;
@@ -216,7 +221,7 @@ function category(n, mode) {
   if (mode === 'sector') return n.type === 'Company' ? (n.sector || null) : undefined;
   if (mode === 'group') return n.group_id || null;
 }
-const catLabel = (n, mode) => mode === 'group' ? (n.group_label || n.group_id) : n.sector;
+const catLabel = (n, mode) => mode === 'group' ? dnS(n.group_label || n.group_id) : secName(n.sector, n.sector_std);
 function categories(all, mode) {
   const count = new Map(), label = new Map();
   for (const n of all) {
@@ -270,22 +275,22 @@ function render() {
     return c === undefined ? muted : cats.color.get(c) || none;
   };
   const sz = nodeSizes([...ns.values()]), cen = n => n.centrality_degree == null ? '' :
-    `\nкомпани ${n.centrality_degree} · зуучлал ${(100 * n.centrality_betweenness).toFixed(1)}% · PageRank ${(+n.centrality_pagerank).toFixed(2)}`;
+    L`\nкомпани ${n.centrality_degree} · зуучлал ${(100 * n.centrality_betweenness).toFixed(1)}% · PageRank ${(+n.centrality_pagerank).toFixed(2)}`;
   const keepN = new Set(visN.map(n => n.key)), keepE = new Set(vis.map(edgeId));
   nodes.remove(nodes.getIds().filter(id => !keepN.has(id)));
   edges.remove(edges.getIds().filter(id => !keepE.has(id)));
   nodes.update(visN.map(n => { const bg = fill(n); return {
-    id: n.key, label: n.ticker && !n.ticker.startsWith('~') ? `${n.ticker}\n${n.name}` : n.name, type: n.type,
+    id: n.key, label: n.ticker && !n.ticker.startsWith('~') ? `${n.ticker}\n${dn(n)}` : dn(n), type: n.type,
     shape: n.type === 'Company' ? 'box' : 'dot', size: sz ? sz(n) : 12,
     font: n.type === 'Company' ? { color: inkOn(bg), size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
     color: { background: bg, border: bg, highlight: { background: bg, border: css('--ink') } },
-    title: `${n.type}: ${n.name}${n.sector ? `\nсалбар: ${n.sector}` : ''}${n.group_id ? `\nбүлэг: ${n.group_label || n.group_id}` : ''}` +
-           `${cen(n)}${n.market_cap != null ? `\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
+    title: `${n.type}: ${dn(n)}${EN_ON && dn(n) !== n.name ? ` (${n.name})` : ''}${n.sector ? L`\nсалбар: ${secName(n.sector, n.sector_std)}` : ''}${n.group_id ? L`\nбүлэг: ${dnS(n.group_label || n.group_id)}` : ''}` +
+           `${cen(n)}${n.market_cap != null ? L`\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
   }; }));
   edges.update(vis.map(e => ({
     id: edgeId(e), from: e.source, to: e.target,
-    label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : 'эзэмшил') + (HOLD_TAG[e.holding_type] ? ` (${HOLD_TAG[e.holding_type]})` : '')
-         : e.type === 'BENEFICIAL_OWNER' ? 'эцсийн өмчлөгч' : (e.title || ''),
+    label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : tr('эзэмшил')) + (HOLD_TAG[e.holding_type] ? ` (${HOLD_TAG[e.holding_type]})` : '')
+         : e.type === 'BENEFICIAL_OWNER' ? tr('эцсийн өмчлөгч') : roleTitle(e),
     dashes: e.type === 'HOLDS_POSITION' ? true : e.type === 'BENEFICIAL_OWNER' ? [2, 4]
           : HOLD_TAG[e.holding_type] ? [6, 3] : false,   // held for clients / own shares: not ownership
     width: e.type === 'OWNS' ? 1 + Math.min(6, (e.percent || 0) / 10) : 1,
@@ -294,23 +299,23 @@ function render() {
   })));
   showLegend(cats, mode, [...ns.values()]);
   document.getElementById('filterNote').textContent = active
-    ? `Шүүлтүүр: ${visN.length} / ${ns.size} зангилаа, ${vis.length} / ${es.size} холбоо харагдаж байна.` : '';
+    ? L`Шүүлтүүр: ${visN.length} / ${ns.size} зангилаа, ${vis.length} / ${es.size} холбоо харагдаж байна.` : '';
 }
 
 function showLegend(cats, mode, all) {
   const box = document.getElementById('legend'), item = (c, t, n) =>
     `<span style="--c:${c}">${esc(t)}${n != null ? ` <span class="n">${n}</span>` : ''}</span>`;
   if (!cats) {
-    box.innerHTML = item('var(--company)', 'Компани') + item('var(--person)', 'Хувь хүн') + item('var(--org)', 'Байгууллага');
+    box.innerHTML = item('var(--company)', tr('Компани')) + item('var(--person)', tr('Хувь хүн')) + item('var(--org)', tr('Байгууллага'));
     return;
   }
   let html = cats.order.slice(0, cats.slots).map(c => item(cats.color.get(c), cats.label.get(c), cats.count.get(c))).join('');
   const rest = cats.order.slice(cats.slots).reduce((a, c) => a + cats.count.get(c), 0);
   const nil = all.filter(n => category(n, mode) === null).length;
-  if (rest) html += item('var(--none)', `Бусад ${cats.order.length - cats.slots} ${mode === 'group' ? 'бүлэг' : 'салбар'}`, rest);
-  if (nil) html += item('var(--none)', mode === 'group' ? 'Бүлэггүй' : 'Салбар тодорхойгүй', nil);
-  if (mode === 'sector' && all.some(n => n.type !== 'Company')) html += item('var(--muted)', 'Хүн, байгууллага');
-  box.innerHTML = html || item('var(--none)', 'Ангилал алга');
+  if (rest) html += item('var(--none)', L`Бусад ${cats.order.length - cats.slots} ${mode === 'group' ? tr('бүлэг') : tr('салбар')}`, rest);
+  if (nil) html += item('var(--none)', mode === 'group' ? tr('Бүлэггүй') : tr('Салбар тодорхойгүй'), nil);
+  if (mode === 'sector' && all.some(n => n.type !== 'Company')) html += item('var(--muted)', tr('Хүн, байгууллага'));
+  box.innerHTML = html || item('var(--none)', tr('Ангилал алга'));
 }
 
 async function open(key) {
@@ -329,18 +334,22 @@ async function open(key) {
 
 // where a link comes from (issue #10): each source (the one that owns the link first) with a link
 // to its page, the date the source gives (a stake's as_of) and when a run last saw it
+// a source's label (provenance.KINDS, with the host or file after a colon) in the UI's language
+const SRC_EN = [[mn('Хайлтын үр дүн (шалгаагүй)'), 'Search result (unverified)'], [mn('Гараар цуглуулсан'), 'Hand-collected'],
+                [mn('Жишээ (зохиомол)'), 'Example (fictional)'], [mn('Open Data Lab (файл)'), 'Open Data Lab (file)'], [mn('Бусад'), 'Other']];
+const srcLabel = l => !EN_ON || !l ? l : SRC_EN.reduce((s, [mn, en]) => s.startsWith(mn) ? en + s.slice(mn.length) : s, l);
 function src(x) {
   const ps = x.provenance || [];
   if (!ps.length) return '';
   const one = p => {
-    const t = esc(p.label), cls = p.kind === 'search' ? ' class="unv"' : '';
+    const t = esc(srcLabel(p.label)), cls = p.kind === 'search' ? ' class="unv"' : '';
     return p.url && /^https?:/.test(p.url)
       ? `<a href="${esc(p.url)}" target="_blank" rel="noopener"${cls} title="${esc(p.source)}">${t}</a>`
       : `<span${cls} title="${esc(p.source)}">${t}</span>`;
   };
-  const parts = [`эх сурвалж: ${ps.map(one).join(', ')}`];
-  if (x.as_of) parts.push(`мэдээллийн огноо ${esc(x.as_of)}`);
-  if (x.current && x.last_seen) parts.push(`сүүлд шалгасан ${esc(x.last_seen)}`);
+  const parts = [L`эх сурвалж: ${ps.map(one).join(', ')}`];
+  if (x.as_of) parts.push(L`мэдээллийн огноо ${esc(x.as_of)}`);
+  if (x.current && x.last_seen) parts.push(L`сүүлд шалгасан ${esc(x.last_seen)}`);
   return `<span class="src">${parts.join(' · ')}</span>`;
 }
 
@@ -349,8 +358,8 @@ function list(title, items, fmt) {
   return `<h2>${title}</h2><ul>${items.map(i => `<li${i.key ? ` data-key="${esc(i.key)}"` : ''}>${fmt(i)}</li>`).join('')}</ul>`;
 }
 // company facts (issue #38), as the panel and the change list name them
-const FACT_LABELS = {name: 'Нэр', name_en: 'Англи нэр', address: 'Хаяг', legal_form: 'Хэлбэр',
-                     sector: 'Салбар', activity_codes: 'Үйл ажиллагааны код'};
+const FACT_LABELS = {name: tr('Нэр'), name_en: tr('Англи нэр'), address: tr('Хаяг'), legal_form: tr('Хэлбэр'),
+                     sector: tr('Салбар'), activity_codes: tr('Үйл ажиллагааны код')};
 
 async function showDetails(d) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
@@ -365,17 +374,18 @@ async function showDetails(d) {
     api(`/api/companies/${t}/market`).catch(() => null),
   ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null, null, null]);
 
-  let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
-  for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['register_no','Регистр'],
-                            ['legal_form','Хэлбэр'],['founded','Үүсгэн байгуулагдсан'],['address','Хаяг']])
-    if (e[k]) html += `<div>${label}: ${esc(e[k])}</div>`;
+  let html = `<div><b style="color:var(--ink)">${esc(dn(e))}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
+  if (EN_ON && dn(e) !== e.name) html += `<div class="meta">${esc(e.name)}</div>`;   // the name as the sources give it
+  for (const [k, label] of [['ticker',tr('Тикер')],['name_en','English'],['sector',tr('Салбар')],['register_no',tr('Регистр')],
+                            ['legal_form',tr('Хэлбэр')],['founded',tr('Үүсгэн байгуулагдсан')],['address',tr('Хаяг')]])
+    if (e[k]) html += `<div>${label}: ${esc(k === 'sector' ? secName(e[k], e.sector_std) : e[k])}</div>`;
   // standard sector from the registry's main activity code (ISIC section), when it differs from the text
   if (e.sector_std && e.sector_std_name !== e.sector)
-    html += `<div>Стандарт салбар: ${esc(e.sector_std)} · ${esc(e.sector_std_name)}</div>`;
+    html += L`<div>Стандарт салбар: ${esc(e.sector_std)} · ${esc(e.sector_std_name)}</div>`;
   if (e.activities && e.activities.length)
-    html += `<div>Үйл ажиллагаа: <span class="meta">${e.activities.map(esc).join('; ')}</span></div>`;
+    html += L`<div>Үйл ажиллагаа: <span class="meta">${e.activities.map(esc).join('; ')}</span></div>`;
   if (e.former_names && e.former_names.length)
-    html += `<div>Хуучин нэр: ${e.former_names.map(esc).join(', ')}</div>`;
+    html += L`<div>Хуучин нэр: ${e.former_names.map(esc).join(', ')}</div>`;
   const links = [];
   // the company's own page: mse.mn for listed companies, a group's site for a data/manual one
   if (e.url && /^https?:/.test(e.url))
@@ -385,78 +395,79 @@ async function showDetails(d) {
                (e.registry_updated ? ` <span class="meta">(${esc(e.registry_updated)})</span>` : ''));
   if (links.length) html += `<div>${links.join(' · ')}</div>`;
   html += marketBlock(mk);
-  if (flags.length) html += `<h2>Анхаарах зүйлс</h2><ul>${flags.map(f =>
+  // the server writes these sentences in Mongolian (analysis.company_flags); say so in English
+  if (flags.length) html += L`<h2>Анхаарах зүйлс</h2>${EN_ON ? '<div class="meta">(in Mongolian: the checks write their findings in Mongolian)</div>' : ''}<ul>${flags.map(f =>
     `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`;
   const pct = p => p != null ? `${p}%` : '';
   // a stake's MNT value (issue #31): percent × the market cap of the company it is in
-  const val = x => x.value_mnt != null ? ` <span class="meta" title="эзэмшлийн хувь × зах зээлийн үнэлгээ">≈ ${fmtMNT(x.value_mnt)}</span>` : '';
+  const val = x => x.value_mnt != null ? L` <span class="meta" title="эзэмшлийн хувь × зах зээлийн үнэлгээ">≈ ${fmtMNT(x.value_mnt)}</span>` : '';
   // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
-  const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
-  const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
-  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}${val(o)}</span>${src(o)}`);
+  const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : dn(x);
+  const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? tr('<span class="meta">бүртгэл</span>') : '';
+  html += list(tr('Хувьцаа эзэмшигчид'), d.owners, o => `<span>${esc(dn(o))}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}${val(o)}</span>${src(o)}`);
   const own = d.ownership;
   if (own && (own.nominee.holders || own.treasury.holders))
-    html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
-            (own.treasury.holders ? ` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
+    html += L`<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
+            (own.treasury.holders ? L` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
   html += concBlock(conc);
   html += turnoverBlock(turn);
   html += officialsBlock(e, d);
-  html += list('Эцсийн өмчлөгч (бүртгэл)', d.beneficial_owners,
-               b => `<span>${esc(b.name)}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
-  html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
+  html += list(tr('Эцсийн өмчлөгч (бүртгэл)'), d.beneficial_owners,
+               b => `<span>${esc(dn(b))}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
+  html += list(tr('Эцсийн өмчлөгч болох компаниуд'), d.beneficially_owns,
                b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
-  html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>${src(p)}`);
-  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}${val(h)}</span>${src(h)}`);
+  html += list(tr('Удирдлага / ТУЗ'), d.people, p => `<span>${esc(dn(p))}</span><span class="meta">${esc(roleTitle(p))}</span>${src(p)}`);
+  html += list(tr('Эзэмшдэг компаниуд'), d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}${val(h)}</span>${src(h)}`);
   if (d.holdings_value_mnt != null)
-    html += `<div class="meta">Эзэмшлийн нийт үнэлгээ ≈ ${fmtMNT(d.holdings_value_mnt)} (${d.holdings_valued} компани, зах зээлийн үнэлгээгээр; шууд эзэмшил)</div>`;
-  html += list('Албан тушаал', d.positions, p => `<span>${esc(co(p))}</span><span class="meta">${esc(p.title)}</span>${src(p)}`);
-  html += list('Ураг төрлийн холбоо (баталгаажсан)', d.relatives,
-               r => `<span>${esc(r.name)} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
+    html += L`<div class="meta">Эзэмшлийн нийт үнэлгээ ≈ ${fmtMNT(d.holdings_value_mnt)} (${d.holdings_valued} компани, зах зээлийн үнэлгээгээр; шууд эзэмшил)</div>`;
+  html += list(tr('Албан тушаал'), d.positions, p => `<span>${esc(co(p))}</span><span class="meta">${esc(roleTitle(p))}</span>${src(p)}`);
+  html += list(tr('Ураг төрлийн холбоо (баталгаажсан)'), d.relatives,
+               r => `<span>${esc(dn(r))} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
   const period = i => `<span class="meta" style="white-space:nowrap">${esc(i.since || i.first_seen || '?')} – ${esc(i.until || '?')}</span>`;
-  html += list('Өмнөх удирдлага / ТУЗ', h.people,
-               p => `<span>${esc(p.name)} <span class="meta">${esc(p.title)}</span></span>${period(p)}${src(p)}`);
-  html += list('Өмнөх хувьцаа эзэмшигчид', h.owners,
-               o => `<span>${esc(o.name)} ${pct(o.percent)}</span>${period(o)}${src(o)}`);
-  html += list('Өмнө эзэмшиж байсан', h.holdings,
+  html += list(tr('Өмнөх удирдлага / ТУЗ'), h.people,
+               p => `<span>${esc(dn(p))} <span class="meta">${esc(roleTitle(p))}</span></span>${period(p)}${src(p)}`);
+  html += list(tr('Өмнөх хувьцаа эзэмшигчид'), h.owners,
+               o => `<span>${esc(dn(o))} ${pct(o.percent)}</span>${period(o)}${src(o)}`);
+  html += list(tr('Өмнө эзэмшиж байсан'), h.holdings,
                x => `<span>${esc(co(x))} ${pct(x.percent)}</span>${period(x)}${src(x)}`);
-  html += list('Өмнөх эцсийн өмчлөгч (бүртгэл)', h.beneficial_owners,
-               b => `<span>${esc(b.name)}</span>${period(b)}${src(b)}`);
-  html += list('Өмнөх мэдээлэл (нэр, хаяг, ...)', h.facts,
-               f => `<span>${esc(FACT_LABELS[f.name] || f.name)}: ${esc(f.value)}</span>` +
+  html += list(tr('Өмнөх эцсийн өмчлөгч (бүртгэл)'), h.beneficial_owners,
+               b => `<span>${esc(dn(b))}</span>${period(b)}${src(b)}`);
+  html += list(tr('Өмнөх мэдээлэл (нэр, хаяг, ...)'), h.facts,
+               f => `<span>${esc(FACT_LABELS[f.name] || dn(f))}: ${esc(f.value)}</span>` +
                     `<span class="meta" style="white-space:nowrap">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</span>${src(f)}`);
-  html += list('Өмнөх албан тушаал', h.positions,
-               p => `<span>${esc(co(p))} <span class="meta">${esc(p.title)}</span></span>${period(p)}${src(p)}`);
-  html += list('Холбоотой компаниуд', d.related_companies,
-               r => `<span>${esc(r.ticker)} ${esc(r.name)}</span><span class="meta">${[...new Set(r.links.map(l => l.name))].map(esc).join(', ')}</span>`);
-  html += list('Эцсийн өмчлөгчид (look-through)', uo,
-               u => `<span>${esc(u.name)}</span><span>${u.effective_percent}%</span>`);
+  html += list(tr('Өмнөх албан тушаал'), h.positions,
+               p => `<span>${esc(co(p))} <span class="meta">${esc(roleTitle(p))}</span></span>${period(p)}${src(p)}`);
+  html += list(tr('Холбоотой компаниуд'), d.related_companies,
+               r => `<span>${esc(r.ticker)} ${esc(dn(r))}</span><span class="meta">${[...new Set(r.links.map(l => l.name))].map(n => esc(dnS(n))).join(', ')}</span>`);
+  html += list(tr('Эцсийн өмчлөгчид (look-through)'), uo,
+               u => `<span>${esc(dn(u))}</span><span>${u.effective_percent}%</span>`);
   html += historyTable(hist);
-  html += changeList('Өөрчлөлтүүд', chg, !isCo);
+  html += changeList(tr('Өөрчлөлтүүд'), chg, !isCo);
   document.getElementById('details').innerHTML = html;
 }
 
 // ---- change history ----------------------------------------------------------
 const fmtPct = v => v == null ? '?' : `${+v.toFixed(3)}%`;
 function describe(c) {
-  const who = esc(c.entity || ''), flag = (c.crossed || []).map(t => `<span class="flag">${t}%</span>`).join('');
+  const who = esc(dnS(c.entity || '')), flag = (c.crossed || []).map(t => `<span class="flag">${t}%</span>`).join('');
   const d = c.delta != null ? ` <span class="${c.delta > 0 ? 'up' : 'down'}">(${c.delta > 0 ? '+' : ''}${+c.delta.toFixed(3)})</span>` : '';
   switch (c.kind) {
     case 'stake_changed':    return `${who}: ${fmtPct(c.old)} → ${fmtPct(c.new)}${d}${flag}`;
-    case 'holder_added':     return `Шинэ эзэмшигч: ${who} ${fmtPct(c.new)}${flag}`;
-    case 'holder_removed':   return `Жагсаалтаас гарсан: ${who} (өмнө ${fmtPct(c.old)})${flag}`;
-    case 'position_added':   return `Томилогдсон: ${who} — ${esc(c.new)}`;
-    case 'position_removed': return `Албан тушаалаас гарсан: ${who} — ${esc(c.old)}`;
+    case 'holder_added':     return L`Шинэ эзэмшигч: ${who} ${fmtPct(c.new)}${flag}`;
+    case 'holder_removed':   return L`Жагсаалтаас гарсан: ${who} (өмнө ${fmtPct(c.old)})${flag}`;
+    case 'position_added':   return L`Томилогдсон: ${who} — ${esc(c.new)}`;
+    case 'position_removed': return L`Албан тушаалаас гарсан: ${who} — ${esc(c.old)}`;
     case 'position_changed': return `${who}: ${esc(c.old)} → ${esc(c.new)}`;
     case 'stake_accumulation':
-      return `Хуримтлуулж байна: ${who} ${fmtPct(c.old)} → ${fmtPct(c.new)}${d} · ${c.steps} алхам, ${esc(c.since || '')}-аас${flag}` +
-             (c.approaching != null ? ` <span class="meta">${c.approaching}%-д ойртож байна</span>` : '');
-    case 'company_added':    return 'Жагсаалтад шинээр нэмэгдсэн';
-    case 'company_removed':  return 'Жагсаалтаас хасагдсан';
-    case 'company_renamed':  return `Нэр өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
+      return L`Хуримтлуулж байна: ${who} ${fmtPct(c.old)} → ${fmtPct(c.new)}${d} · ${c.steps} алхам, ${esc(c.since || '')}-аас${flag}` +
+             (c.approaching != null ? L` <span class="meta">${c.approaching}%-д ойртож байна</span>` : '');
+    case 'company_added':    return tr('Жагсаалтад шинээр нэмэгдсэн');
+    case 'company_removed':  return tr('Жагсаалтаас хасагдсан');
+    case 'company_renamed':  return L`Нэр өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
     case 'company_fact_changed':
-      return `${esc(FACT_LABELS[c.field] || c.field)} өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
+      return L`${esc(FACT_LABELS[c.field] || c.field)} өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
     default:                 return esc(c.kind);
   }
 }
@@ -468,7 +479,7 @@ const changeList = (title, rs, showTicker) =>
 function historyTable(h) {
   if (!h || h.points.length < 2) return '';
   const pts = h.points.slice(-6), off = h.points.length - pts.length;
-  const head = pts.map(p => `<th title="${p.as_of ? 'эх сурвалжийн огноо: ' + esc(p.as_of) : ''}">${esc(p.taken_at.slice(0, 10))}</th>`).join('');
+  const head = pts.map(p => `<th title="${p.as_of ? tr('эх сурвалжийн огноо: ') + esc(p.as_of) : ''}">${esc(p.taken_at.slice(0, 10))}</th>`).join('');
   const rows = h.holders.slice(0, 15).map(r => {
     const vs = r.values.slice(off);
     const cells = vs.map((v, i) => {
@@ -476,58 +487,60 @@ function historyTable(h) {
       const cls = v != null && prev != null && Math.abs(v - prev) >= 0.01 ? (v > prev ? 'up' : 'down') : '';  // same noise floor as the diff
       return `<td class="${cls}">${v == null ? '—' : fmtPct(v)}</td>`;
     }).join('');
-    return `<tr><td>${esc(r.name)}</td>${cells}</tr>`;
+    return `<tr><td>${esc(dn(r))}</td>${cells}</tr>`;
   }).join('');
-  return `<h2>Эзэмшлийн түүх</h2><div class="scroll"><table class="hist"><tr><th></th>${head}</tr>${rows}</table></div>`;
+  return L`<h2>Эзэмшлийн түүх</h2><div class="scroll"><table class="hist"><tr><th></th>${head}</tr>${rows}</table></div>`;
 }
 // ---- governance checks -------------------------------------------------------------
-const roleStr = rs => rs.map(esc).join(', ');
+const roleStr = rs => rs.map(r => esc(titleS(r))).join(', ');
 const group = t => `<li class="group">${t}</li>`;
 // what an analysis rests on (issue #27): "158/160 компанид үндэслэсэн; бүртгэлийн эзэмшигч 2/160"
-const covText = c => !c || !c.parts ? '' : `${c.parts[0].companies}/${c.of} компанид үндэслэсэн (${esc(c.parts[0].label)})` +
-  c.parts.slice(1).map(p => `; ${esc(p.label)}: ${p.companies}/${p.of}`).join('');
+// a coverage part's label: quality.PARTS gives both languages (`basis` is the English one)
+const covLabel = p => EN_ON ? p.basis || p.label : p.label;
+const covText = c => !c || !c.parts ? '' : L`${c.parts[0].companies}/${c.of} компанид үндэслэсэн (${esc(covLabel(c.parts[0]))})` +
+  c.parts.slice(1).map(p => `; ${esc(covLabel(p))}: ${p.companies}/${p.of}`).join('');
 const covLine = c => c && c.parts ? `<li class="cov" title="${esc(c.text)}">${covText(c)}</li>` : '';
 const GOV = {
   structure: async () => {
     const [cycR, crossR] = await Promise.all([api('/api/analysis/cycles'), api('/api/analysis/cross-holdings')]);
     const cyc = cycR.items, cross = crossR.items;
-    return covLine(cycR.coverage) + group('Тойрог эзэмшил') + (cyc.map(c => {
-      const ring = c.companies.map(n => esc(n.ticker || n.name));
+    return covLine(cycR.coverage) + group(tr('Тойрог эзэмшил')) + (cyc.map(c => {
+      const ring = c.companies.map(n => esc(n.ticker || dn(n)));
       return `<li data-key="${esc(c.companies[0].key)}"><span>${ring.join(' → ')} → ${ring[0]}</span>
         <span class="meta">${c.loop_percent != null ? fmtPct(c.loop_percent) : ''}</span></li>`;
-    }).join('') || '<li class="meta">Олдсонгүй</li>')
-    + group('Бүртгэлтэй компаниуд хоорондын эзэмшил') + (cross.map(x =>
-      `<li data-key="${esc(x.company_key)}"><span>${esc(x.holder)} → ${esc(x.company)}${x.reverse_percent != null ? ' ⇄' : ''}</span>
-       <span class="meta">${fmtPct(x.percent)}</span></li>`).join('') || '<li class="meta">Олдсонгүй</li>');
+    }).join('') || tr('<li class="meta">Олдсонгүй</li>'))
+    + group(tr('Бүртгэлтэй компаниуд хоорондын эзэмшил')) + (cross.map(x =>
+      `<li data-key="${esc(x.company_key)}"><span>${esc(dnS(x.holder))} → ${esc(dnS(x.company))}${x.reverse_percent != null ? ' ⇄' : ''}</span>
+       <span class="meta">${fmtPct(x.percent)}</span></li>`).join('') || tr('<li class="meta">Олдсонгүй</li>'));
   },
   conflicts: async () => {
     const res = await api('/api/analysis/conflicts'), rs = res.items;
     const by = k => rs.filter(r => r.kind === k);
-    return covLine(res.coverage) + group('Ижил салбарын компаниудад оролцоотой') + (by('competitor').map(r =>
-      `<li class="rf warn" data-key="${esc(r.key)}"><b>${esc(r.name)}</b> · ${esc(r.sector)}<br>
-       <span class="meta">${r.companies.map(c => `${esc(c.ticker || c.name)}: ${roleStr(c.roles)}`).join(' · ')}</span></li>`).join('')
-       || '<li class="meta">Олдсонгүй</li>')
-    + group('Холбоотой этгээд (хоёр талд албан тушаалтай)') + (by('related_party').filter(r => !r.relative).map(r =>
-      `<li class="rf" data-key="${esc(r.key)}"><b>${esc(r.name)}</b><br><span class="meta">
-       ${esc(r.company.ticker)} (${roleStr(r.company.roles)}) ← ${fmtPct(r.percent)} ← ${esc(r.counterparty.ticker || r.counterparty.name)} (${roleStr(r.counterparty.roles)})</span></li>`).join('')
-       || '<li class="meta">Олдсонгүй</li>')
-    + group('Ураг төрлийн холбоотой этгээд (баталгаажсан, #32)') + (by('related_party').filter(r => r.relative).map(r =>
-      `<li class="rf" data-key="${esc(r.key)}"><b>${esc(r.name)}</b> · ${esc(BASIS_MN[r.relative.basis] || r.relative.basis)} ${esc(r.relative.name)}<br><span class="meta">
-       ${esc(r.company.ticker || r.company.name)} (${roleStr(r.company.roles)})${r.relation === 'same_company' ? '' : ` ${r.relation === 'shareholder' ? '←' : '→'} ${fmtPct(r.percent)} ${r.relation === 'shareholder' ? '←' : '→'} ${esc(r.counterparty.ticker || r.counterparty.name)}`}: ${esc(r.relative.name)} (${roleStr(r.counterparty.roles)}) · эх сурвалж: ${esc(r.relative.source || '')}</span></li>`).join('')
-       || '<li class="meta">Олдсонгүй</li>')
-    + group('Өөрийн компанийн хувьцаа эзэмшигч удирдлага') + (by('insider_owner').map(r => {
+    return covLine(res.coverage) + group(tr('Ижил салбарын компаниудад оролцоотой')) + (by('competitor').map(r =>
+      `<li class="rf warn" data-key="${esc(r.key)}"><b>${esc(dn(r))}</b> · ${esc(secName(r.sector))}<br>
+       <span class="meta">${r.companies.map(c => `${esc(c.ticker || dn(c))}: ${roleStr(c.roles)}`).join(' · ')}</span></li>`).join('')
+       || tr('<li class="meta">Олдсонгүй</li>'))
+    + group(tr('Холбоотой этгээд (хоёр талд албан тушаалтай)')) + (by('related_party').filter(r => !r.relative).map(r =>
+      `<li class="rf" data-key="${esc(r.key)}"><b>${esc(dn(r))}</b><br><span class="meta">
+       ${esc(r.company.ticker)} (${roleStr(r.company.roles)}) ← ${fmtPct(r.percent)} ← ${esc(r.counterparty.ticker || dn(r.counterparty))} (${roleStr(r.counterparty.roles)})</span></li>`).join('')
+       || tr('<li class="meta">Олдсонгүй</li>'))
+    + group(tr('Ураг төрлийн холбоотой этгээд (баталгаажсан, #32)')) + (by('related_party').filter(r => r.relative).map(r =>
+      L`<li class="rf" data-key="${esc(r.key)}"><b>${esc(dn(r))}</b> · ${esc(BASIS_MN[r.relative.basis] || r.relative.basis)} ${esc(dn(r.relative))}<br><span class="meta">
+       ${esc(r.company.ticker || dn(r.company))} (${roleStr(r.company.roles)})${r.relation === 'same_company' ? '' : ` ${r.relation === 'shareholder' ? '←' : '→'} ${fmtPct(r.percent)} ${r.relation === 'shareholder' ? '←' : '→'} ${esc(r.counterparty.ticker || dn(r.counterparty))}`}: ${esc(dn(r.relative))} (${roleStr(r.counterparty.roles)}) · эх сурвалж: ${esc(r.relative.source || '')}</span></li>`).join('')
+       || tr('<li class="meta">Олдсонгүй</li>'))
+    + group(tr('Өөрийн компанийн хувьцаа эзэмшигч удирдлага')) + (by('insider_owner').map(r => {
       const c = r.companies[0];
-      return `<li data-key="${esc(r.key)}"><span>${esc(r.name)} <span class="meta">${esc(c.ticker)} · ${roleStr(c.titles)}</span></span>
+      return `<li data-key="${esc(r.key)}"><span>${esc(dn(r))} <span class="meta">${esc(c.ticker)} · ${roleStr(c.titles)}</span></span>
         <span>${fmtPct(c.percent)}</span></li>`;
-    }).join('') || '<li class="meta">Олдсонгүй</li>');
+    }).join('') || tr('<li class="meta">Олдсонгүй</li>'));
   },
   state: async () => {
     const res = await api('/api/analysis/state-ownership'), rs = res.items, sm = res.summary || {};
-    return covLine(res.coverage) + (sm.valued ? `<li class="meta" style="cursor:default">Төрийн эзэмшлийн үнэлгээ (${sm.valued}/${sm.companies} компани, зах зээлийн үнэлгээгээр): шууд ≈ ${fmtMNT(sm.direct_value_mnt)} · look-through ≈ ${fmtMNT(sm.lookthrough_value_mnt)}</li>` : '')
-      + group('Шууд / look-through') + (rs.map(s =>
-      `<li data-key="${esc(s.key)}"><span>${esc(s.ticker || s.name)} <span class="meta">${esc(s.name)}</span></span>
-       <span>${s.direct_percent ? fmtPct(s.direct_percent) : '—'} / ${fmtPct(s.lookthrough_percent)}${s.lookthrough_value_mnt != null ? ` <span class="meta">≈ ${fmtMNT(s.lookthrough_value_mnt)}${s.price_stale ? ' (хуучин ханш)' : ''}</span>` : ''}</span></li>`).join('')
-       || '<li class="meta">Олдсонгүй</li>');
+    return covLine(res.coverage) + (sm.valued ? L`<li class="meta" style="cursor:default">Төрийн эзэмшлийн үнэлгээ (${sm.valued}/${sm.companies} компани, зах зээлийн үнэлгээгээр): шууд ≈ ${fmtMNT(sm.direct_value_mnt)} · look-through ≈ ${fmtMNT(sm.lookthrough_value_mnt)}</li>` : '')
+      + group(tr('Шууд / look-through')) + (rs.map(s =>
+      `<li data-key="${esc(s.key)}"><span>${esc(s.ticker || dn(s))} <span class="meta">${esc(dn(s))}</span></span>
+       <span>${s.direct_percent ? fmtPct(s.direct_percent) : '—'} / ${fmtPct(s.lookthrough_percent)}${s.lookthrough_value_mnt != null ? ` <span class="meta">≈ ${fmtMNT(s.lookthrough_value_mnt)}${s.price_stale ? tr(' (хуучин ханш)') : ''}</span>` : ''}</span></li>`).join('')
+       || tr('<li class="meta">Олдсонгүй</li>'));
   },
 };
 document.querySelectorAll('button[data-g]').forEach(b => b.onclick = async () => {
@@ -537,67 +550,67 @@ document.querySelectorAll('button[data-g]').forEach(b => b.onclick = async () =>
 document.getElementById('btnChanges').onclick = async () => {
   const rs = await api('/api/changes?limit=100'), ul = document.getElementById('analysis');
   ul.innerHTML = rs.length ? changeItems(rs, true)
-    : '<li class="meta">Өөрчлөлт бүртгэгдээгүй байна (2+ snapshot хэрэгтэй)</li>';
+    : tr('<li class="meta">Өөрчлөлт бүртгэгдээгүй байна (2+ snapshot хэрэгтэй)</li>');
 };
 
 // ---- entity-resolution review queue (issue #6) -----------------------------------
 // Decisions need the review password (REVIEW_PASSWORD on the server); it is kept for this tab only.
 const RV_REASON = {
-  several_at_company: 'нэг компанид тохирох хэд хэдэн бүтэн нэр', no_shared_company: 'бүтэн нэр нь өөр компанид',
-  many_companies: 'олон компанид албан тушаалтай', many_sectors: 'олон салбарт', different_full_names: 'өөр өөр бүтэн нэр',
-  one_letter: 'нэг үсгээр зөрүүтэй', transliteration: 'латин / кирилл, ижил төстэй үсэг', missing_initial: 'эцгийн нэрийн үсэггүй',
+  several_at_company: tr('нэг компанид тохирох хэд хэдэн бүтэн нэр'), no_shared_company: tr('бүтэн нэр нь өөр компанид'),
+  many_companies: tr('олон компанид албан тушаалтай'), many_sectors: tr('олон салбарт'), different_full_names: tr('өөр өөр бүтэн нэр'),
+  one_letter: tr('нэг үсгээр зөрүүтэй'), transliteration: tr('латин / кирилл, ижил төстэй үсэг'), missing_initial: tr('эцгийн нэрийн үсэггүй'),
 };
-const BASIS_MN = {sibling: 'ах дүү', parent_child: 'эцэг эх / хүүхэд', spouse: 'эхнэр нөхөр', relative: 'төрөл', none: 'холбоогүй'};
-const REL_EVIDENCE = {shared_companies: 'нэг компанид', linked_companies: 'компаниуд нь бие биенээ эзэмшдэг',
-                      same_group: 'нэг бүлэгт', same_clan: 'ижил ургийн овог'};
+const BASIS_MN = {sibling: tr('ах дүү'), parent_child: tr('эцэг эх / хүүхэд'), spouse: tr('эхнэр нөхөр'), relative: tr('төрөл'), none: tr('холбоогүй')};
+const REL_EVIDENCE = {shared_companies: tr('нэг компанид'), linked_companies: tr('компаниуд нь бие биенээ эзэмшдэг'),
+                      same_group: tr('нэг бүлэгт'), same_clan: tr('ижил ургийн овог')};
 const reviewPw = (ask = true) => {
   let pw = null;
   try { pw = sessionStorage.getItem('reviewPassword'); } catch {}
-  if (!pw && ask) pw = prompt('Хяналтын нууц үг (REVIEW_PASSWORD):');
+  if (!pw && ask) pw = prompt(tr('Хяналтын нууц үг (REVIEW_PASSWORD):'));
   return pw || null;
 };
-const nameLink = (key, name) => `<span class="name" data-open="${esc(key)}">${esc(name || key)}</span>`;
+const nameLink = (key, name) => `<span class="name" data-open="${esc(key)}">${esc(dnS(name) || key)}</span>`;
 const act = (label, payload) => `<button data-act="${esc(JSON.stringify(payload))}">${esc(label)}</button>`;
 let rvStatus = null;
 async function showReview() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const [q, st, ds] = await Promise.all([api('/api/analysis/resolution'), api('/api/review/status'),
                                          api('/api/review/decisions')]);
   rvStatus = st;
-  let html = covLine(q.coverage) + (st.writable ? '' : '<li class="meta">Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.</li>');
+  let html = covLine(q.coverage) + (st.writable ? '' : tr('<li class="meta">Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.</li>'));
   const pend = st.pending_export || {};
   if (pend.identity || pend.reviewed)
-    html += `<li class="meta">Git-д ороогүй шийдвэр: ${pend.identity + pend.reviewed} (review-export)</li>`;
-  html += group(`Эргэлзээтэй эцгийн нэрийн үсэгтэй хүмүүс (${q.ambiguous_people.length})`);
+    html += L`<li class="meta">Git-д ороогүй шийдвэр: ${pend.identity + pend.reviewed} (review-export)</li>`;
+  html += group(L`Эргэлзээтэй эцгийн нэрийн үсэгтэй хүмүүс (${q.ambiguous_people.length})`);
   html += q.ambiguous_people.map(p => `<li class="rv">${nameLink(p.key, p.name)}
       <span class="meta">${p.companies.map(esc).join(', ')} · ${esc(RV_REASON[p.reason] || p.reason)}</span>
       ${p.candidates.map(c => `<div class="meta">≈ ${nameLink(c.key, c.name)} (${c.companies.map(esc).join(', ')})</div>`).join('')}
       <div class="acts">${p.candidates.map(c => act(`= ${c.name}`, {action: 'merge', key: p.key, into: c.key})).join('')}
-        ${act('Тусдаа хүн', {action: 'keep_apart', key: p.key})}</div></li>`).join('') || '<li class="meta">Алга</li>';
-  html += group(`Нэг хүн мөн эсэх нь сэжигтэй (${q.suspicious_people.length})`);
+        ${act(tr('Тусдаа хүн'), {action: 'keep_apart', key: p.key})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
+  html += group(L`Нэг хүн мөн эсэх нь сэжигтэй (${q.suspicious_people.length})`);
   html += q.suspicious_people.map(p => `<li class="rv">${nameLink(p.key, p.name)}
-      <span class="meta">${p.reasons.map(r => esc(RV_REASON[r] || r)).join(' · ')}${p.full_names.length ? ' · ' + p.full_names.map(esc).join(', ') : ''}</span>
-      <div class="meta">${p.companies.map(c => `${esc(c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name)}${c.sector ? ' (' + esc(c.sector) + ')' : ''}`).join(', ')}</div>
-      <div class="acts">${p.companies.map(c => act(`${c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name}: өөр хүн`,
+      <span class="meta">${p.reasons.map(r => esc(RV_REASON[r] || r)).join(' · ')}${p.full_names.length ? ' · ' + p.full_names.map(n => esc(dnS(n))).join(', ') : ''}</span>
+      <div class="meta">${p.companies.map(c => `${esc(coName(c))}${c.sector ? ' (' + esc(secName(c.sector)) + ')' : ''}`).join(', ')}</div>
+      <div class="acts">${p.companies.map(c => act(L`${coName(c)}: өөр хүн`,
           {action: 'split', key: p.key, companies: [c.ticker]})).join('')}
-        ${act('Нэг хүн, зөв', {action: 'dismiss', item: p.item})}</div></li>`).join('') || '<li class="meta">Алга</li>';
-  html += group(`Давхардсан байж магадгүй (${q.possible_duplicates.length})`);
+        ${act(tr('Нэг хүн, зөв'), {action: 'dismiss', item: p.item})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
+  html += group(L`Давхардсан байж магадгүй (${q.possible_duplicates.length})`);
   html += q.possible_duplicates.map(p => `<li class="rv">${nameLink(p.a.key, p.a.name)} ↔ ${nameLink(p.b.key, p.b.name)}
-      <span class="meta">${esc(RV_REASON[p.reason] || p.reason)}${p.shared.length ? ' · хамтын: ' + p.shared.map(esc).join(', ') : ''}</span>
+      <span class="meta">${esc(RV_REASON[p.reason] || p.reason)}${p.shared.length ? tr(' · хамтын: ') + p.shared.map(esc).join(', ') : ''}</span>
       <div class="meta">${esc(p.a.companies.join(', '))} | ${esc(p.b.companies.join(', '))}</div>
-      <div class="acts">${act('Нэгтгэх', {action: 'merge', key: p.suggest.merge, into: p.suggest.into})}
-        ${act('Өөр', {action: 'dismiss', item: p.item})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+      <div class="acts">${act(tr('Нэгтгэх'), {action: 'merge', key: p.suggest.merge, into: p.suggest.into})}
+        ${act(tr('Өөр'), {action: 'dismiss', item: p.item})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
   // possible family links (issue #32): private hypotheses, only with the review password
-  html += group('Ураг төрлийн байж болох холбоо (таамаг, #32)');
+  html += group(tr('Ураг төрлийн байж болох холбоо (таамаг, #32)'));
   html += st.writable
-    ? '<li id="relBox" class="meta">Хувийн мэдээлэл: зөвхөн нууц үгээр. <button data-rel-load="1">Нууц үгээр харах</button></li>'
-    : '<li class="meta">REVIEW_PASSWORD тохируулаагүй тул харуулахгүй (хувийн мэдээлэл).</li>';
+    ? tr('<li id="relBox" class="meta">Хувийн мэдээлэл: зөвхөн нууц үгээр. <button data-rel-load="1">Нууц үгээр харах</button></li>')
+    : tr('<li class="meta">REVIEW_PASSWORD тохируулаагүй тул харуулахгүй (хувийн мэдээлэл).</li>');
   const groups = [...new Map(ds.map(d => [d.group, d])).values()].slice(0, 30);
-  html += group(`Шийдвэрүүд (${groups.length})`);
+  html += group(L`Шийдвэрүүд (${groups.length})`);
   html += groups.map(d => `<li class="rv"><span>${esc(d.action)} · ${esc(d.type === 'identity' ? `${d.before || ''} → ${d.target}` : d.item)}</span>
       <span class="meta">${esc(d.decided_by)} · ${esc(d.decided_at)}${d.note ? ' · ' + esc(d.note) : ''}</span>
-      <div class="acts">${act('Буцаах', {action: 'revoke', id: d.group})}</div></li>`).join('') || '<li class="meta">Алга</li>';
+      <div class="acts">${act(tr('Буцаах'), {action: 'revoke', id: d.group})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
   ul.innerHTML = html;
   if (st.writable && reviewPw(false)) await showRelations(false);
 }
@@ -605,50 +618,50 @@ async function showRelations(ask = true) {
   const box = document.getElementById('relBox'); if (!box) return;
   const pw = reviewPw(ask); if (!pw) return;
   const r = await fetch('/api/review/relations', {headers: {'X-Review-Password': pw}});
-  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} box.innerHTML = 'Нууц үг буруу.'; return; }
-  if (!r.ok) { box.innerHTML = `Алдаа: ${r.status}`; return; }
+  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} box.innerHTML = tr('Нууц үг буруу.'); return; }
+  if (!r.ok) { box.innerHTML = L`Алдаа: ${r.status}`; return; }
   try { sessionStorage.setItem('reviewPassword', pw); } catch {}
   const d = await r.json();
   const groupOf = Object.fromEntries(d.decisions.map(x => [x.item, x.group]));
-  let html = '<li class="meta">Таамаг: эцгийн нэр давхцах нь сул нотолгоо. Баталгаажуулах хүртэл граф, анхааруулгад харагдахгүй.</li>';
-  html += d.candidates.map(c => `<li class="rv">${nameLink(c.a.key, c.a.name)} ↔ ${nameLink(c.b.key, c.b.name)}
+  let html = tr('<li class="meta">Таамаг: эцгийн нэр давхцах нь сул нотолгоо. Баталгаажуулах хүртэл граф, анхааруулгад харагдахгүй.</li>');
+  html += d.candidates.map(c => L`<li class="rv">${nameLink(c.a.key, c.a.name)} ↔ ${nameLink(c.b.key, c.b.name)}
       <span class="meta">оноо ${c.score} · «${esc(c.patronymic)}» ${c.people_with_patronymic} хүн · ${c.evidence.map(e => esc(REL_EVIDENCE[e] || e)).join(', ')}</span>
-      <div class="meta">${esc(c.a.companies.join(', '))} | ${esc(c.b.companies.join(', '))}${c.shared_companies.length ? ' · хамтын: ' + c.shared_companies.map(esc).join(', ') : ''}${c.linked_companies.length ? ' · ' + c.linked_companies.map(p => esc(p.join(' — '))).join(', ') : ''}</div>
-      <div class="acts">${act('Холбоотой (батлах)', {action: 'relate', key: c.a.key, into: c.b.key})}
-        ${act('Холбоогүй', {action: 'dismiss', item: c.item})}</div></li>`).join('') || '<li class="meta">Таамаг алга</li>';
-  html += `<li class="meta">Баталгаажсан (${d.confirmed.length}):</li>`;
+      <div class="meta">${esc(c.a.companies.join(', '))} | ${esc(c.b.companies.join(', '))}${c.shared_companies.length ? tr(' · хамтын: ') + c.shared_companies.map(esc).join(', ') : ''}${c.linked_companies.length ? ' · ' + c.linked_companies.map(p => esc(p.join(' — '))).join(', ') : ''}</div>
+      <div class="acts">${act(tr('Холбоотой (батлах)'), {action: 'relate', key: c.a.key, into: c.b.key})}
+        ${act(tr('Холбоогүй'), {action: 'dismiss', item: c.item})}</div></li>`).join('') || tr('<li class="meta">Таамаг алга</li>');
+  html += L`<li class="meta">Баталгаажсан (${d.confirmed.length}):</li>`;
   html += d.confirmed.map(c => `<li class="rv">${nameLink(c.a, c.a_name)} ↔ ${nameLink(c.b, c.b_name)}
       <span class="meta">${esc(BASIS_MN[c.basis] || c.basis)} · ${esc(c.source)} · ${esc(c.decided_by)} ${esc(c.decided_at)}${c.from === 'file' ? ' · relations.csv' : ''}</span>
-      <div class="acts">${c.from === 'review' && groupOf[c.item] ? act('Буцаах', {action: 'revoke', id: groupOf[c.item]})
-        : act('Холбоогүй гэж тэмдэглэх', {action: 'relate', key: c.a, into: c.b, basis: 'none'})}</div></li>`).join('');
+      <div class="acts">${c.from === 'review' && groupOf[c.item] ? act(tr('Буцаах'), {action: 'revoke', id: groupOf[c.item]})
+        : act(tr('Холбоогүй гэж тэмдэглэх'), {action: 'relate', key: c.a, into: c.b, basis: 'none'})}</div></li>`).join('');
   box.outerHTML = html;
 }
 async function decide(payload) {
-  if (rvStatus && !rvStatus.writable) return alert('Шийдвэр гаргах боломжгүй: серверт REVIEW_PASSWORD тохируулаагүй.');
+  if (rvStatus && !rvStatus.writable) return alert(tr('Шийдвэр гаргах боломжгүй: серверт REVIEW_PASSWORD тохируулаагүй.'));
   const pw = reviewPw(); if (!pw) return;
   if (payload.action === 'relate') {
     payload = {...payload};
     if (!payload.basis) {
-      payload.basis = (prompt('Холбоо: sibling (ах дүү) / parent_child / spouse / relative', 'sibling') || '').trim();
+      payload.basis = (prompt(tr('Холбоо: sibling (ах дүү) / parent_child / spouse / relative'), 'sibling') || '').trim();
       if (!payload.basis) return;
     }
     if (payload.basis !== 'none') {
-      payload.source = (prompt('Эх сурвалж (заавал): холбоог баримтжуулсан нийтийн эх сурвалж. ' +
-                               'data/overrides/relations.csv-д орж нийтэд ил болно.') || '').trim();
+      payload.source = (prompt(tr('Эх сурвалж (заавал): холбоог баримтжуулсан нийтийн эх сурвалж. ') +
+                               tr('data/overrides/relations.csv-д орж нийтэд ил болно.')) || '').trim();
       if (!payload.source) return;
     }
   }
   if (payload.action !== 'dismiss' && payload.action !== 'keep_apart') {
     const what = payload.action === 'merge' ? `${payload.key} → ${payload.into}`
-               : payload.action === 'split' ? `${payload.key}: ${payload.companies.join(', ')} тусдаа`
+               : payload.action === 'split' ? L`${payload.key}: ${payload.companies.join(', ')} тусдаа`
                : payload.action === 'relate' ? `${payload.key} ↔ ${payload.into}: ${BASIS_MN[payload.basis] || payload.basis}` : payload.id;
     if (!confirm(`${payload.action}: ${what}?`)) return;
   }
-  const note = payload.action === 'revoke' ? '' : (prompt('Тайлбар (заавал биш):') || '');
+  const note = payload.action === 'revoke' ? '' : (prompt(tr('Тайлбар (заавал биш):')) || '');
   const r = await fetch('/api/review/decide', {method: 'POST',
     headers: {'Content-Type': 'application/json', 'X-Review-Password': pw}, body: JSON.stringify({...payload, note})});
-  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} return alert('Нууц үг буруу.'); }
-  if (!r.ok) return alert(`Алдаа: ${(await r.json().catch(() => ({}))).detail || r.status}`);
+  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} return alert(tr('Нууц үг буруу.')); }
+  if (!r.ok) return alert(L`Алдаа: ${(await r.json().catch(() => ({}))).detail || r.status}`);
   try { sessionStorage.setItem('reviewPassword', pw); } catch {}
   await showReview();
 }
@@ -681,8 +694,8 @@ document.getElementById('q').addEventListener('input', ev => {
   t = setTimeout(async () => {
     const rs = await api(`/api/search?q=${encodeURIComponent(q)}`);
     const ul = document.getElementById('results');
-    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.ticker && !r.ticker.startsWith('~') ? r.ticker + ' · ' : '')}${esc(r.name)}</span>
-      <span class="tag ${r.type}">${r.type}</span></li>`).join('') || '<li class="meta">Олдсонгүй</li>';
+    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.ticker && !r.ticker.startsWith('~') ? r.ticker + ' · ' : '')}${esc(dn(r))}</span>
+      <span class="tag ${r.type}">${r.type}</span></li>`).join('') || tr('<li class="meta">Олдсонгүй</li>');
   }, 200);
 });
 document.getElementById('results').addEventListener('click', ev => {
@@ -701,9 +714,9 @@ document.getElementById('setA').onclick = () => { if (!selected) return; pathA =
 document.getElementById('setB').onclick = () => { if (!selected) return; pathB = selected;
   document.getElementById('pathTo').textContent = 'B: ' + (nodes.get(selected)?.label || selected).replace('\n', ' '); };
 document.getElementById('findPath').onclick = async () => {
-  if (!pathA || !pathB) return alert('A болон B зангилааг сонгоно уу.');
+  if (!pathA || !pathB) return alert(tr('A болон B зангилааг сонгоно уу.'));
   const p = await api(`/api/graph/path?a=${encodeURIComponent(pathA)}&b=${encodeURIComponent(pathB)}`);
-  if (!p.nodes.length) return alert('Холбоос олдсонгүй.');
+  if (!p.nodes.length) return alert(tr('Холбоос олдсонгүй.'));
   draw(p);
 };
 
@@ -711,117 +724,117 @@ document.querySelectorAll('button[data-a]').forEach(b => b.onclick = async () =>
   const kind = b.dataset.a, res = await api(`/api/analysis/${kind}`), rs = res.items, ul = document.getElementById('analysis');
   if (kind === 'board-overlap') {
     ul.innerHTML = rs.map(r => `<li data-key="company:${esc(r.company_a)}"><span>${esc(r.company_a)} ↔ ${esc(r.company_b)}</span>
-      <span class="meta">${r.shared_people.map(esc).join(', ')}</span></li>`).join('');
+      <span class="meta">${r.shared_people.map(n => esc(dnS(n))).join(', ')}</span></li>`).join('');
   } else if (kind === 'moves') {
-    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(dn(r))}</span>
       <span class="meta">${r.past.map(x => esc(x.from)).join(', ')} → ${r.now.map(x => esc(x.to)).join(', ')}</span></li>`).join('');
   } else {
-    ul.innerHTML = rs.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+    ul.innerHTML = rs.map(r => L`<li data-key="${esc(r.key)}"><span>${esc(dn(r))}</span>
       <span class="meta">${r.companies} компани</span></li>`).join('');
     if (kind === 'common-owners') {   // custodians hold for clients: listed apart (issue #39)
       const n = await api('/api/analysis/nominees');
-      if (n.nominees.length) ul.innerHTML += group('Номини / кастодиан (харилцагчдын нэрийн өмнөөс)') +
-        n.nominees.map(r => `<li data-key="${esc(r.key)}"><span>${esc(r.name)}</span>
+      if (n.nominees.length) ul.innerHTML += group(tr('Номини / кастодиан (харилцагчдын нэрийн өмнөөс)')) +
+        n.nominees.map(r => L`<li data-key="${esc(r.key)}"><span>${esc(dn(r))}</span>
           <span class="meta">${r.companies} компани</span></li>`).join('');
       if (!rs.length && n.nominees.length) { ul.innerHTML = covLine(res.coverage) + ul.innerHTML; return; }
     }
   }
-  if (!rs.length) ul.innerHTML = '<li class="meta">Үр дүн алга</li>';
+  if (!rs.length) ul.innerHTML = tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = covLine(res.coverage) + ul.innerHTML;
 });
 
 // ---- ownership concentration (issue #7) -------------------------------------------
-const CONC_SORT = { hhi: 'HHI', top1: 'Top-1', top3: 'Top-3', free_float: 'Чөлөөт хувьцаа' };
-const OWNER_KIND = { state: 'төр', listed_company: 'бүртгэлтэй компани', organization: 'бусад байгууллага',
-                     individual: 'хувь хүн', nominee: 'номини' };
+const CONC_SORT = { hhi: 'HHI', top1: 'Top-1', top3: 'Top-3', free_float: tr('Чөлөөт хувьцаа') };
+const OWNER_KIND = { state: tr('төр'), listed_company: tr('бүртгэлтэй компани'), organization: tr('бусад байгууллага'),
+                     individual: tr('хувь хүн'), nominee: tr('номини') };
 const mixText = m => Object.entries(m || {}).filter(([, v]) => v > 0)
   .map(([k, v]) => `${OWNER_KIND[k] || k} ${fmtPct(v)}`).join(', ');
 async function showConcentration(sort = 'hhi') {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api(`/api/analysis/concentration?sort=${sort}`), s = r.summary;
   let html = covLine(r.coverage);
   html += `<li class="sorts">${Object.entries(CONC_SORT).map(([k, l]) =>
     `<button data-sort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
-  html += `<li class="meta" style="cursor:default">${s.companies} компани · хяналттай (look-through ≥ 50%): ${s.controlled}` +
-          (s.median_hhi != null ? ` · медиан HHI ${s.median_hhi} · медиан top-1 ${fmtPct(s.median_top1)} · медиан чөлөөт ~${fmtPct(s.median_free_float)}` : '') +
-          (s.weighted_hhi != null ? ` · зах зээлийн үнэлгээгээр жигнэсэн HHI ${s.weighted_hhi} (${s.weighted_companies} компани)` : '') + '</li>';
-  html += r.items.map(c => `<li class="rv${c.plausible ? '' : ' rf error'}" data-key="${esc(c.key)}">
-      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
-      <div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · чөлөөт ~${fmtPct(c.free_float_estimate)}${c.plausible ? '' : ` · нийлбэр ${fmtPct(c.total_percent)}!`}</div>
-      <div class="meta">${c.largest ? `Том эзэмшигч: ${esc(c.largest.name)} ${fmtPct(c.largest.percent)}` : ''}${c.largest_lookthrough && (!c.largest || c.largest_lookthrough.key !== c.largest.key) ? ` · look-through: ${esc(c.largest_lookthrough.name)} ${fmtPct(c.largest_lookthrough.percent)}` : ''}</div>
-      <div class="meta">${mixText(c.owner_mix)}</div></li>`).join('') || '<li class="meta">Үр дүн алга</li>';
+  html += L`<li class="meta" style="cursor:default">${s.companies} компани · хяналттай (look-through ≥ 50%): ${s.controlled}` +
+          (s.median_hhi != null ? L` · медиан HHI ${s.median_hhi} · медиан top-1 ${fmtPct(s.median_top1)} · медиан чөлөөт ~${fmtPct(s.median_free_float)}` : '') +
+          (s.weighted_hhi != null ? L` · зах зээлийн үнэлгээгээр жигнэсэн HHI ${s.weighted_hhi} (${s.weighted_companies} компани)` : '') + '</li>';
+  html += r.items.map(c => L`<li class="rv${c.plausible ? '' : ' rf error'}" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(dn(c))}</span></span>
+      <div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · чөлөөт ~${fmtPct(c.free_float_estimate)}${c.plausible ? '' : L` · нийлбэр ${fmtPct(c.total_percent)}!`}</div>
+      <div class="meta">${c.largest ? L`Том эзэмшигч: ${esc(dn(c.largest))} ${fmtPct(c.largest.percent)}` : ''}${c.largest_lookthrough && (!c.largest || c.largest_lookthrough.key !== c.largest.key) ? ` · look-through: ${esc(dn(c.largest_lookthrough))} ${fmtPct(c.largest_lookthrough.percent)}` : ''}</div>
+      <div class="meta">${mixText(c.owner_mix)}</div></li>`).join('') || tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = html;
 }
 document.getElementById('btnConc').onclick = () => showConcentration();
 function concBlock(r) {
   const c = r && r.concentration;
   if (!c) return '';
-  return `<h2>Эзэмшлийн төвлөрөл</h2><div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · ` +
-    `чөлөөт хувьцаа ~${fmtPct(c.free_float_estimate)} (тооцоо)${c.plausible ? '' : ` · нийлбэр ${fmtPct(c.total_percent)} — 100%-иас их!`}</div>` +
-    (c.largest_lookthrough ? `<div class="meta">Look-through хамгийн том: ${esc(c.largest_lookthrough.name)} ${fmtPct(c.largest_lookthrough.percent)}</div>` : '') +
+  return L`<h2>Эзэмшлийн төвлөрөл</h2><div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · ` +
+    L`чөлөөт хувьцаа ~${fmtPct(c.free_float_estimate)} (тооцоо)${c.plausible ? '' : L` · нийлбэр ${fmtPct(c.total_percent)} — 100%-иас их!`}</div>` +
+    (c.largest_lookthrough ? L`<div class="meta">Look-through хамгийн том: ${esc(dn(c.largest_lookthrough))} ${fmtPct(c.largest_lookthrough.percent)}</div>` : '') +
     `<div class="meta">${mixText(c.owner_mix)}</div>` +
     (r.coverage ? `<div class="meta" style="font-size:11px">${covText(r.coverage)}</div>` : '');
 }
 
 // ---- data-quality report (issue #8) --------------------------------------------------
-const LEVEL_MN = { error: 'алдаа', warn: 'анхааруулга', info: 'тэмдэглэл' };
+const LEVEL_MN = { error: tr('алдаа'), warn: tr('анхааруулга'), info: tr('тэмдэглэл') };
 async function showQuality() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api('/api/quality');
   let html = covLine(r.coverage);
-  html += `<li class="meta" style="cursor:default">${r.of} компани: алдаатай ${r.levels.error}, анхааруулгатай ${r.levels.warn}, тэмдэглэлтэй ${r.levels.info}, асуудалгүй ${r.clean}</li>`;
-  html += group('Асуудал бүрээр');
+  html += L`<li class="meta" style="cursor:default">${r.of} компани: алдаатай ${r.levels.error}, анхааруулгатай ${r.levels.warn}, тэмдэглэлтэй ${r.levels.info}, асуудалгүй ${r.clean}</li>`;
+  html += group(tr('Асуудал бүрээр'));
   html += Object.entries(r.summary).filter(([, v]) => v.companies).sort((a, b) => b[1].companies - a[1].companies)
-    .map(([, v]) => `<li class="rf ${v.level}" style="cursor:default"><span>${esc(v.text)}</span><span class="meta">${v.companies}</span></li>`).join('');
-  html += group('Компаниуд (ноцтой нь эхэндээ)');
+    .map(([code, v]) => `<li class="rf ${v.level}" style="cursor:default"><span>${esc(issueText({ code, text: v.text }))}</span><span class="meta">${v.companies}</span></li>`).join('');
+  html += group(tr('Компаниуд (ноцтой нь эхэндээ)'));
   html += r.companies.slice(0, 200).map(c => `<li class="rv rf ${c.level}" data-key="${esc(c.key)}">
-      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
-      ${c.issues.map(i => `<div class="meta">${esc(LEVEL_MN[i.level])}: ${esc(i.text)}</div>`).join('')}</li>`).join('')
-      || '<li class="meta">Асуудал олдсонгүй</li>';
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(dn(c))}</span></span>
+      ${c.issues.map(i => `<div class="meta">${esc(LEVEL_MN[i.level])}: ${esc(issueText(i))}</div>`).join('')}</li>`).join('')
+      || tr('<li class="meta">Асуудал олдсонгүй</li>');
   ul.innerHTML = html;
 }
 document.getElementById('btnQuality').onclick = showQuality;
 
 // ---- groups and control (issue #28) -------------------------------------------------
 // control: > 50% through majority chains; influence: the largest block and >= 20%
-const CTL_MN = { control: 'хяналт', influence: 'нөлөө' };
-const coName = c => c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.name;
+const CTL_MN = { control: tr('хяналт'), influence: tr('нөлөө') };
+const coName = c => c.ticker && !c.ticker.startsWith('~') ? c.ticker : dn(c);
 async function showGroups() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api('/api/analysis/groups');
-  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Эзэмшигч бүрийн хяналт (&gt; 50%, хяналттай компаниудаар дамжуулан) ба нөлөө (хамгийн том багц, ≥ 20%). Хувьгүй бүртгэлийн мөр тооцогдохгүй.</li>`;
-  html += r.items.slice(0, 200).map(x => `<li class="rv" data-group="${esc(x.key)}">
-      <span class="name">${esc(x.name)} <span class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}${x.lookthrough_value_mnt != null ? ` · ≈ ${fmtMNT(x.lookthrough_value_mnt)}` : ''}</span></span>
+  let html = covLine(r.coverage) + L`<li class="meta" style="cursor:default">Эзэмшигч бүрийн хяналт (&gt; 50%, хяналттай компаниудаар дамжуулан) ба нөлөө (хамгийн том багц, ≥ 20%). Хувьгүй бүртгэлийн мөр тооцогдохгүй.</li>`;
+  html += r.items.slice(0, 200).map(x => L`<li class="rv" data-group="${esc(x.key)}">
+      <span class="name">${esc(dn(x))} <span class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}${x.lookthrough_value_mnt != null ? ` · ≈ ${fmtMNT(x.lookthrough_value_mnt)}` : ''}</span></span>
       <div class="meta">${x.companies.slice(0, 6).map(c => `${esc(coName(c))} ${CTL_MN[c.level]} ${fmtPct(c.block_percent)}`).join(' · ')}${x.companies.length > 6 ? ' …' : ''}</div></li>`).join('')
-    || '<li class="meta">Үр дүн алга</li>';
+    || tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = html;
 }
 async function showGroup(key) {
   const r = await api(`/api/analysis/groups/owner?key=${encodeURIComponent(key)}`), x = r.group;
   draw(r.graph, { focus: x.key });
   document.getElementById('details').innerHTML =
-    `<div><b style="color:var(--ink)">${esc(x.name)}</b> <span class="tag ${x.type}">${x.type}</span></div>` +
-    `<div class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</div>` +
-    (x.valued_companies ? `<div class="meta">Хяналттай компаниудын зах зээлийн үнэлгээ ${fmtMNT(x.controlled_market_cap)} · look-through хувиар ≈ ${fmtMNT(x.lookthrough_value_mnt)} (${x.valued_companies} компани үнэлгээтэй)</div>` : '') +
-    list('Компаниуд', x.companies, c => `<span>${esc(coName(c))} <span class="meta">${CTL_MN[c.level]} · ` +
-      `${c.chain.map(esc).join(' → ')}</span></span><span class="meta">${fmtPct(c.block_percent)} / look-through ${fmtPct(c.lookthrough_percent)}${c.lookthrough_value_mnt != null ? ` ≈ ${fmtMNT(c.lookthrough_value_mnt)}` : ''}</span>`) +
+    `<div><b style="color:var(--ink)">${esc(dn(x))}</b> <span class="tag ${x.type}">${x.type}</span></div>` +
+    L`<div class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</div>` +
+    (x.valued_companies ? L`<div class="meta">Хяналттай компаниудын зах зээлийн үнэлгээ ${fmtMNT(x.controlled_market_cap)} · look-through хувиар ≈ ${fmtMNT(x.lookthrough_value_mnt)} (${x.valued_companies} компани үнэлгээтэй)</div>` : '') +
+    list(tr('Компаниуд'), x.companies, c => `<span>${esc(coName(c))} <span class="meta">${CTL_MN[c.level]} · ` +
+      `${c.chain.map(n => esc(dnS(n))).join(' → ')}</span></span><span class="meta">${fmtPct(c.block_percent)} / look-through ${fmtPct(c.lookthrough_percent)}${c.lookthrough_value_mnt != null ? ` ≈ ${fmtMNT(c.lookthrough_value_mnt)}` : ''}</span>`) +
     `<div class="meta" style="font-size:11px">${covText(r.coverage)}</div>`;
 }
 async function showCommunities() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api('/api/analysis/communities');
-  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Эзэмшил, эцсийн өмчлөгч, албан тушаалын холбоосоор автоматаар илрүүлсэн бүлгүүд (Louvain)${r.detected_at ? ' · ' + esc(r.detected_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}.</li>`;
+  let html = covLine(r.coverage) + L`<li class="meta" style="cursor:default">Эзэмшил, эцсийн өмчлөгч, албан тушаалын холбоосоор автоматаар илрүүлсэн бүлгүүд (Louvain)${r.detected_at ? ' · ' + esc(r.detected_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}.</li>`;
   const cur = (r.curated || []).filter(s => s.in_graph);
-  if (cur.length) html += group('Гараар бүрдүүлсэн бүлгүүдтэй тулгалт') + cur.map(s =>
-    `<li class="meta" style="cursor:default">${esc(s.dataset)}: ${s.in_main_group}/${s.in_graph} компани нэг бүлэгт${s.score != null ? ` (${Math.round(s.score * 100)}%)` : ''}</li>`).join('');
-  html += group('Бүлгүүд') + r.communities.slice(0, 200).map(c => `<li class="rv" data-community="${esc(c.id)}">
+  if (cur.length) html += group(tr('Гараар бүрдүүлсэн бүлгүүдтэй тулгалт')) + cur.map(s =>
+    L`<li class="meta" style="cursor:default">${esc(s.dataset)}: ${s.in_main_group}/${s.in_graph} компани нэг бүлэгт${s.score != null ? ` (${Math.round(s.score * 100)}%)` : ''}</li>`).join('');
+  html += group(tr('Бүлгүүд')) + r.communities.slice(0, 200).map(c => L`<li class="rv" data-community="${esc(c.id)}">
       <span class="name">${esc(coName(c.anchor))} <span class="meta">${c.companies} компани (бүртгэлтэй ${c.listed}) · ${c.people} хүн</span></span>
       <div class="meta">${c.members.slice(0, 8).map(m => esc(coName(m))).join(', ')}${c.size > 8 ? ' …' : ''}</div></li>`).join('')
-    || '<li class="meta">Үр дүн алга</li>';
+    || tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = html;
 }
 async function showCommunity(id) {
@@ -830,21 +843,21 @@ async function showCommunity(id) {
 document.getElementById('btnGroups').onclick = showGroups;
 
 // ---- network centrality (issue #29) --------------------------------------------------
-const CEN_BY = { betweenness: 'Зуучлал', pagerank: 'PageRank', degree: 'Компанийн тоо' };
-const CEN_KIND = { all: 'Бүгд', person: 'Хүн', organization: 'Байгууллага', company: 'Компани' };
+const CEN_BY = { betweenness: tr('Зуучлал'), pagerank: 'PageRank', degree: tr('Компанийн тоо') };
+const CEN_KIND = { all: tr('Бүгд'), person: tr('Хүн'), organization: tr('Байгууллага'), company: tr('Компани') };
 let cenState = { by: 'betweenness', kind: 'all' };
 async function showCentrality(change = {}) {
   cenState = { ...cenState, ...change };
   const { by, kind } = cenState, ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api(`/api/analysis/centrality?by=${by}&kind=${kind}&limit=150`);
-  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Зуучлал: компани хоорондын хамгийн богино замуудын хэдэн хувь энэ зангилаагаар дамждаг. PageRank: шууд ба шууд бус эзэмшлээр (1 = дундаж). Тэмдэглэгдсэн хүн хоёр өөр хүний буруу нэгтгэл байж магадгүй (Нэгтгэлийн хяналт).${r.computed_at ? ' · ' + esc(r.computed_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}</li>`;
+  let html = covLine(r.coverage) + L`<li class="meta" style="cursor:default">Зуучлал: компани хоорондын хамгийн богино замуудын хэдэн хувь энэ зангилаагаар дамждаг. PageRank: шууд ба шууд бус эзэмшлээр (1 нь дундаж). Тэмдэглэгдсэн хүн хоёр өөр хүний буруу нэгтгэл байж магадгүй (Нэгтгэлийн хяналт).${r.computed_at ? ' · ' + esc(r.computed_at.slice(0, 16).replace('T', ' ')) + ' UTC' : ''}</li>`;
   html += `<li class="sorts">${Object.entries(CEN_BY).map(([k, l]) => `<button data-cen-by="${k}" class="${k === by ? 'on' : ''}">${l}</button>`).join('')}</li>`;
   html += `<li class="sorts">${Object.entries(CEN_KIND).map(([k, l]) => `<button data-cen-kind="${k}" class="${k === kind ? 'on' : ''}">${l}</button>`).join('')}</li>`;
-  html += r.items.map((x, i) => `<li class="rv" data-key="${esc(x.key)}">
-      <span class="name">${i + 1}. ${esc(coName(x))} <span class="tag ${x.type}">${x.type}</span>${x.review ? ' <span class="flag">хяналт #6</span>' : ''}</span>
+  html += r.items.map((x, i) => L`<li class="rv" data-key="${esc(x.key)}">
+      <span class="name">${i + 1}. ${esc(coName(x))} <span class="tag ${x.type}">${x.type}</span>${x.review ? tr(' <span class="flag">хяналт #6</span>') : ''}</span>
       <div class="meta">компани ${x.degree} · зуучлал ${(100 * x.betweenness).toFixed(2)}% · PageRank ${x.pagerank.toFixed(2)}</div></li>`).join('')
-    || '<li class="meta">Үр дүн алга</li>';
+    || tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = html;
 }
 document.getElementById('btnCentrality').onclick = () => showCentrality();
@@ -864,57 +877,57 @@ document.getElementById('btnCommunities').onclick = showCommunities;
 // Precision is the scrape date: a departure happened between last_seen and the scrape that
 // missed the person. A rate needs a full year of history; '+' marks a tenure counted from
 // the first scrape (a lower bound).
-const yrs = v => v == null ? '—' : `${(+v).toFixed(1)} жил`;
-const ceoText = c => c ? `${esc(c.name)} · ${yrs(c.tenure_years)}${c.tenure_from === 'first_seen' ? '+' : ''}` : '—';
-const histNote = s => `<li class="meta" style="cursor:default">Түүх ${esc(s.history_start || '?')}-аас ${esc(s.as_of || '?')} хүртэл (скрейп эхэлсэн өдрөөс). Огноо скрейпийн нарийвчлалтай: гарсан хүн сүүлд харагдсан өдөр ба дараагийн скрейпийн хооронд гарсан. Солилцооны хувийг бүтэн жилийн түүхтэй компанид л тооцно; «+» = хамгийн багадаа.</li>`;
-const TURN_SORT = { rate: 'Солилцоо', departures: 'Гарсан', tenure: 'Дундаж хугацаа', ceo_tenure: 'Захирлын хугацаа' };
+const yrs = v => v == null ? '—' : L`${(+v).toFixed(1)} жил`;
+const ceoText = c => c ? `${esc(dn(c))} · ${yrs(c.tenure_years)}${c.tenure_from === 'first_seen' ? '+' : ''}` : '—';
+const histNote = s => L`<li class="meta" style="cursor:default">Түүх ${esc(s.history_start || '?')}-аас ${esc(s.as_of || '?')} хүртэл (скрейп эхэлсэн өдрөөс). Огноо скрейпийн нарийвчлалтай: гарсан хүн сүүлд харагдсан өдөр ба дараагийн скрейпийн хооронд гарсан. Солилцооны хувийг бүтэн жилийн түүхтэй компанид л тооцно; «+» нь хамгийн багадаа.</li>`;
+const TURN_SORT = { rate: tr('Солилцоо'), departures: tr('Гарсан'), tenure: tr('Дундаж хугацаа'), ceo_tenure: tr('Захирлын хугацаа') };
 async function showTurnover(sort = 'rate') {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api(`/api/analysis/turnover?sort=${sort}`), s = r.summary;
   let html = covLine(r.coverage) + histNote(s);
   html += `<li class="sorts">${Object.entries(TURN_SORT).map(([k, l]) =>
     `<button data-turn-sort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
-  html += `<li class="meta" style="cursor:default">${s.companies} компани · ирсэн ${s.arrivals} · гарсан ${s.departures}` +
-          (s.median_rate != null ? ` · медиан солилцоо ${s.median_rate}/жил` : ' · солилцооны хувь: бүтэн жилийн түүх хараахан алга') +
-          ` · медиан хугацаа ${yrs(s.median_tenure_years)} · медиан захирлын хугацаа ${yrs(s.median_ceo_tenure_years)}</li>`;
-  html += r.items.map(c => `<li class="rv${c.high ? ' rf warn' : ''}" data-key="${esc(c.key)}">
-      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span>${c.high ? ' <span class="flag">өндөр солилцоо</span>' : ''}</span>
-      <div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}${c.turnover_rate != null ? ` · солилцоо ${c.turnover_rate}/жил` : ''} · дундаж ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>
-      <div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}${c.ceo_changes ? ` · солигдсон ${c.ceo_changes}` : ''}</div></li>`).join('')
-    || '<li class="meta">Үр дүн алга</li>';
+  html += L`<li class="meta" style="cursor:default">${s.companies} компани · ирсэн ${s.arrivals} · гарсан ${s.departures}` +
+          (s.median_rate != null ? L` · медиан солилцоо ${s.median_rate}/жил` : tr(' · солилцооны хувь: бүтэн жилийн түүх хараахан алга')) +
+          L` · медиан хугацаа ${yrs(s.median_tenure_years)} · медиан захирлын хугацаа ${yrs(s.median_ceo_tenure_years)}</li>`;
+  html += r.items.map(c => L`<li class="rv${c.high ? ' rf warn' : ''}" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(dn(c))}</span>${c.high ? tr(' <span class="flag">өндөр солилцоо</span>') : ''}</span>
+      <div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}${c.turnover_rate != null ? L` · солилцоо ${c.turnover_rate}/жил` : ''} · дундаж ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>
+      <div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}${c.ceo_changes ? L` · солигдсон ${c.ceo_changes}` : ''}</div></li>`).join('')
+    || tr('<li class="meta">Үр дүн алга</li>');
   ul.innerHTML = html;
 }
 function turnoverBlock(r) {
   const c = r && r.turnover;
   if (!c) return '';
   const yr = c.by_year.map(y => `${esc(y.year)}: +${y.arrivals} / −${y.departures}`).join(' · ');
-  return `<h2>Удирдлагын солилцоо</h2><div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}` +
-    (c.turnover_rate != null ? ` · солилцоо ${c.turnover_rate}/жил` : ' · солилцоо: бүтэн жилийн түүх алга') +
-    ` · дундаж хугацаа ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>` +
-    `<div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}</div>` + (yr ? `<div class="meta">${yr}</div>` : '') +
-    list('Гарсан', c.left.slice(0, 10), d => `<span>${esc(d.name)} <span class="meta">${esc(d.title)}</span></span>` +
+  return L`<h2>Удирдлагын солилцоо</h2><div class="meta">${c.officers} одоо · ирсэн ${c.arrivals} · гарсан ${c.departures}` +
+    (c.turnover_rate != null ? L` · солилцоо ${c.turnover_rate}/жил` : tr(' · солилцоо: бүтэн жилийн түүх алга')) +
+    L` · дундаж хугацаа ${yrs(c.avg_tenure_years)}${c.tenure_lower_bound ? '+' : ''}</div>` +
+    L`<div class="meta">Гүйцэтгэх захирал: ${ceoText(c.ceo)}</div>` + (yr ? `<div class="meta">${yr}</div>` : '') +
+    list(tr('Гарсан'), c.left.slice(0, 10), d => `<span>${esc(dn(d))} <span class="meta">${esc(roleTitle(d))}</span></span>` +
          `<span class="meta" style="white-space:nowrap">${esc(d.between[0])} … ${esc(d.between[1])}</span>`) +
-    `<div class="meta" style="font-size:11px">Түүх ${esc(c.history_start)}-аас. ${r.coverage ? covText(r.coverage) : ''}</div>`;
+    L`<div class="meta" style="font-size:11px">Түүх ${esc(c.history_start)}-аас. ${r.coverage ? covText(r.coverage) : ''}</div>`;
 }
 
-const ACC_LEVEL = { crossed: 'босго давсан', approaching: 'босгод ойртож байна', rising: 'өсөж байна' };
+const ACC_LEVEL = { crossed: tr('босго давсан'), approaching: tr('босгод ойртож байна'), rising: tr('өсөж байна') };
 async function showAccumulation() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api('/api/analysis/accumulation'), st = r.settings;
-  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Дараалсан ${st.accumulation_min_steps}+ скрейпэд эзэмшлээ нэмсэн, одоо ч эзэмшиж буй эзэмшигчид. Босго ${st.accumulation_thresholds.join(', ')}% нь энэ төслийн анхааруулгын тохиргоо, хуулийн шаардлага биш. Түүх ${esc(r.history_start || '?')}-аас.</li>`;
-  html += r.items.map(a => `<li class="rv${a.level === 'crossed' ? ' rf warn' : ''}" data-key="${esc(a.entity_key)}">
-      <span class="name">${esc(coName({ ticker: a.ticker, name: a.company }))} · ${esc(a.entity)}</span>
+  let html = covLine(r.coverage) + L`<li class="meta" style="cursor:default">Дараалсан ${st.accumulation_min_steps}+ скрейпэд эзэмшлээ нэмсэн, одоо ч эзэмшиж буй эзэмшигчид. Босго ${st.accumulation_thresholds.join(', ')}% нь энэ төслийн анхааруулгын тохиргоо, хуулийн шаардлага биш. Түүх ${esc(r.history_start || '?')}-аас.</li>`;
+  html += r.items.map(a => L`<li class="rv${a.level === 'crossed' ? ' rf warn' : ''}" data-key="${esc(a.entity_key)}">
+      <span class="name">${esc(coName({ ticker: a.ticker, name: a.company }))} · ${esc(dnS(a.entity))}</span>
       <div class="meta">${a.path.map(p => fmtPct(p.percent)).join(' → ')} · ${a.steps} алхам, ${esc(a.since)}-аас · ${ACC_LEVEL[a.level]}${a.crossed.length ? ' ' + a.crossed.map(t => `<span class="flag">${t}%</span>`).join('') : ''}${a.approaching != null ? ` (${a.approaching}%)` : ''}</div></li>`).join('')
-    || '<li class="meta">Одоогоор хуримтлуулж буй эзэмшигч алга</li>';
+    || tr('<li class="meta">Одоогоор хуримтлуулж буй эзэмшигч алга</li>');
   ul.innerHTML = html;
 }
 
 // one small line chart per metric; the date range under each
 function spark(pts, k) {
   const vs = pts.map(p => p[k]).filter(v => v != null);
-  if (!vs.length) return '<div class="meta">өгөгдөл алга</div>';
+  if (!vs.length) return tr('<div class="meta">өгөгдөл алга</div>');
   const W = 260, H = 40, lo = Math.min(...vs), hi = Math.max(...vs), n = pts.length;
   const ts = pts.map(p => Date.parse(p.date)), t0 = ts[0], t1 = ts[n - 1];   // a time axis: scrapes are uneven
   const x = i => n < 2 || t1 === t0 ? W / 2 : 4 + (W - 8) * (ts[i] - t0) / (t1 - t0), y = v => hi === lo ? H / 2 : H - 4 - (H - 8) * (v - lo) / (hi - lo);
@@ -925,14 +938,14 @@ function spark(pts, k) {
     `<polyline points="${line}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/>` +
     `<circle cx="${x(last[0])}" cy="${y(last[1])}" r="3" fill="currentColor"/></svg>`;
 }
-const TREND_MN = { state_companies: 'Төрийн шууд эзэмшилтэй компани', state_mean_percent: 'Төрийн шууд эзэмшлийн дундаж %',
-  interlocks: 'Олон компанитай холбоотой хүн', cross_holdings: 'Бүртгэлтэй компаниудын хөндлөн эзэмшил',
-  median_hhi: 'Медиан HHI (төвлөрөл)', with_holdings: 'Эзэмшлийн мэдээлэлтэй компани', officers: 'Албан тушаал (бүртгэлтэй компани)' };
+const TREND_MN = { state_companies: tr('Төрийн шууд эзэмшилтэй компани'), state_mean_percent: tr('Төрийн шууд эзэмшлийн дундаж %'),
+  interlocks: tr('Олон компанитай холбоотой хүн'), cross_holdings: tr('Бүртгэлтэй компаниудын хөндлөн эзэмшил'),
+  median_hhi: tr('Медиан HHI (төвлөрөл)'), with_holdings: tr('Эзэмшлийн мэдээлэлтэй компани'), officers: tr('Албан тушаал (бүртгэлтэй компани)') };
 async function showTrends() {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api('/api/analysis/trends'), pts = r.points;
-  let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Ирмэгийн хугацаануудаас сэргээсэн цуваа: цэг бүр тухайн өдөр скрейпээр харагдсан граф (${pts.length} цэг, ${{ day: 'өдөр', week: '7 хоног', month: 'сар' }[r.every] || r.every} тутам). Түүх ${esc(r.history_start || '?')}-аас эхэлнэ; дараа нэмэгдсэн компани тоог өсгөнө.</li>`;
+  let html = covLine(r.coverage) + L`<li class="meta" style="cursor:default">Ирмэгийн хугацаануудаас сэргээсэн цуваа: цэг бүр тухайн өдөр скрейпээр харагдсан граф (${pts.length} цэг, ${{ day: tr('өдөр'), week: tr('7 хоног'), month: tr('сар') }[r.every] || r.every} тутам). Түүх ${esc(r.history_start || '?')}-аас эхэлнэ; дараа нэмэгдсэн компани тоог өсгөнө.</li>`;
   const first = pts[0] || {}, last = pts[pts.length - 1] || {};
   html += Object.entries(TREND_MN).map(([k, l]) => `<li style="cursor:default; display:block">
       <span>${l}: <b>${last[k] ?? '—'}</b> <span class="meta">(${esc(first.date || '')}: ${first[k] ?? '—'})</span></span>
@@ -949,27 +962,27 @@ document.getElementById('btnTrends').onclick = showTrends;
 function marketBlock(r) {
   const m = r && r.market;
   if (!m || (m.price == null && m.market_cap == null)) return '';
-  const stale = m.stale ? ` <span class="flag" title="сүүлийн арилжаа ${m.stale_days}+ хоногийн өмнө">хуучин ханш</span>` : '';
-  const basis = m.market_cap_basis === 'price_x_shares' ? ' <span class="meta">(ханш × хувьцааны тоо)</span>' : '';
-  return `<h2>Зах зээл</h2><div>Ханш: <b>${m.price != null ? m.price.toLocaleString('en-US') + ' ₮' : '—'}</b> ` +
-    `<span class="meta">${esc(m.price_date || '')} арилжаа${m.price_as_of && m.price_as_of !== m.price_date ? ` · ${esc(m.price_as_of)}-нд уншсан` : ''}</span>${stale}</div>` +
-    `<div>Зах зээлийн үнэлгээ: <b>${fmtMNT(m.market_cap)}</b>${basis}</div>` +
-    (m.shares_outstanding ? `<div class="meta">Гаргасан хувьцаа: ${m.shares_outstanding.toLocaleString('en-US')}</div>` : '') +
-    (m.series.length > 1 ? spark(m.series, 'close') + `<div class="meta" style="display:flex; justify-content:space-between; font-size:11px"><span>${esc(m.series[0].date)}</span><span>${m.series.length} өдөр</span><span>${esc(m.series[m.series.length - 1].date)}</span></div>` : '');
+  const stale = m.stale ? L` <span class="flag" title="сүүлийн арилжаа ${m.stale_days}+ хоногийн өмнө">хуучин ханш</span>` : '';
+  const basis = m.market_cap_basis === 'price_x_shares' ? tr(' <span class="meta">(ханш × хувьцааны тоо)</span>') : '';
+  return L`<h2>Зах зээл</h2><div>Ханш: <b>${m.price != null ? m.price.toLocaleString('en-US') + ' ₮' : '—'}</b> ` +
+    L`<span class="meta">${esc(m.price_date || '')} арилжаа${m.price_as_of && m.price_as_of !== m.price_date ? L` · ${esc(m.price_as_of)}-нд уншсан` : ''}</span>${stale}</div>` +
+    L`<div>Зах зээлийн үнэлгээ: <b>${fmtMNT(m.market_cap)}</b>${basis}</div>` +
+    (m.shares_outstanding ? L`<div class="meta">Гаргасан хувьцаа: ${m.shares_outstanding.toLocaleString('en-US')}</div>` : '') +
+    (m.series.length > 1 ? spark(m.series, 'close') + L`<div class="meta" style="display:flex; justify-content:space-between; font-size:11px"><span>${esc(m.series[0].date)}</span><span>${m.series.length} өдөр</span><span>${esc(m.series[m.series.length - 1].date)}</span></div>` : '');
 }
 async function showMarket(sort = 'cap') {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api(`/api/analysis/market?sort=${sort}`), s = r.summary;
   let html = covLine(r.coverage);
-  html += `<li class="sorts">${Object.entries({ cap: 'Үнэлгээ', price_date: 'Хуучин ханш эхэнд', ticker: 'Тикер' }).map(([k, l]) =>
+  html += `<li class="sorts">${Object.entries({ cap: tr('Үнэлгээ'), price_date: tr('Хуучин ханш эхэнд'), ticker: tr('Тикер') }).map(([k, l]) =>
     `<button data-msort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
-  html += `<li class="meta" style="cursor:default">${s.priced}/${s.companies} компани ханштай · ${s.with_market_cap} үнэлгээтэй · нийт ${fmtMNT(s.total_market_cap)} · ` +
-          `${s.stale} нь хуучин ханш (сүүлийн арилжаа ${s.stale_days}+ хоногийн өмнө) · уншсан ${esc(s.as_of || 'хараахан үгүй')}. Эх сурвалж: mse.mn.</li>`;
-  html += r.items.filter(c => c.price != null || c.market_cap != null).map(c => `<li class="rv" data-key="${esc(c.key)}">
-      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
-      <div class="meta">${fmtMNT(c.market_cap)}${c.weight_percent != null ? ` (${c.weight_percent}%)` : ''} · ханш ${c.price != null ? c.price.toLocaleString('en-US') : '—'} ₮ · ${esc(c.price_date || '?')}${c.stale ? ' <span class="flag">хуучин</span>' : ''}</div></li>`).join('')
-    || '<li class="meta">Ханшийн мэдээлэл хараахан алга</li>';
+  html += L`<li class="meta" style="cursor:default">${s.priced}/${s.companies} компани ханштай · ${s.with_market_cap} үнэлгээтэй · нийт ${fmtMNT(s.total_market_cap)} · ` +
+          L`${s.stale} нь хуучин ханш (сүүлийн арилжаа ${s.stale_days}+ хоногийн өмнө) · уншсан ${esc(s.as_of || tr('хараахан үгүй'))}. Эх сурвалж: mse.mn.</li>`;
+  html += r.items.filter(c => c.price != null || c.market_cap != null).map(c => L`<li class="rv" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(dn(c))}</span></span>
+      <div class="meta">${fmtMNT(c.market_cap)}${c.weight_percent != null ? ` (${c.weight_percent}%)` : ''} · ханш ${c.price != null ? c.price.toLocaleString('en-US') : '—'} ₮ · ${esc(c.price_date || '?')}${c.stale ? tr(' <span class="flag">хуучин</span>') : ''}</div></li>`).join('')
+    || tr('<li class="meta">Ханшийн мэдээлэл хараахан алга</li>');
   ul.innerHTML = html;
 }
 document.getElementById('btnMarket').onclick = () => showMarket();
@@ -977,65 +990,90 @@ document.getElementById('btnMarket').onclick = () => showMarket();
 // ---- public officials' declared interests, licences, tenders (issue #9) ----------------------
 // From the company's Open Data Lab registry page. A declaration that names a company is a
 // disclosed interest, not a finding. Officials are not people nodes: their names are initials.
-const ODL_NOTE = 'Хөрөнгө, орлогын мэдүүлэгтээ (ХОМ) компанийг дурдсан нь ашиг сонирхлын мэдээлэл болохоос дүгнэлт биш. Эх сурвалж: Open Data Lab (opendatalab.mn).';
+const ODL_NOTE = tr('Хөрөнгө, орлогын мэдүүлэгтээ (ХОМ) компанийг дурдсан нь ашиг сонирхлын мэдээлэл болохоос дүгнэлт биш. Эх сурвалж: Open Data Lab (opendatalab.mn).');
 const safeUrl = u => /^https:\/\/(www\.)?opendatalab\.mn\//.test(u || '') ? u : '';
 function declYears(x) {
   return (x.years || []).map((y, i) => {
     const u = safeUrl((x.reports || [])[i]);
-    return u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(y || 'ХОМ')}</a>` : esc(y);
+    return u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(y || tr('ХОМ'))}</a>` : esc(y);
   }).join(', ');
 }
 function officialRow(o) {
-  return `<li style="cursor:default"><span>${esc(o.name)} <span class="meta">${esc(o.position || '')}</span>` +
-    `${o.iaac ? ' <span class="flag" title="АТГ-т мэдүүлгээ бүртгүүлдэг албан тушаалтан">АТГ</span>' : ''}</span>` +
+  return `<li style="cursor:default"><span>${esc(dn(o))} <span class="meta">${esc(o.position || '')}</span>` +
+    `${o.iaac ? tr(' <span class="flag" title="АТГ-т мэдүүлгээ бүртгүүлдэг албан тушаалтан">АТГ</span>') : ''}</span>` +
     `<span class="meta" style="white-space:nowrap">${declYears(o)}</span></li>`;
 }
 function officialsBlock(e, d) {
   let html = '';
   const di = d.declared_interests || [], ended = (d.history || {}).declared_interests || [];
   if (di.length)
-    html += `<h2>Хамаарал бүхий нийтийн албан тушаалтан (${di.length})</h2><div class="meta">${ODL_NOTE}</div>` +
+    html += L`<h2>Хамаарал бүхий нийтийн албан тушаалтан (${di.length})</h2><div class="meta">${ODL_NOTE}</div>` +
             `<ul>${di.map(officialRow).join('')}</ul>`;
   if (ended.length)
-    html += `<h2>Бүртгэлээс хасагдсан албан тушаалтан</h2><ul>${ended.map(officialRow).join('')}</ul>`;
+    html += L`<h2>Бүртгэлээс хасагдсан албан тушаалтан</h2><ul>${ended.map(officialRow).join('')}</ul>`;
   if (e.licenses && e.licenses.length)
-    html += `<h2>Тусгай зөвшөөрөл (${e.licenses.length})</h2><ul>${e.licenses.map(l =>
+    html += L`<h2>Тусгай зөвшөөрөл (${e.licenses.length})</h2><ul>${e.licenses.map(l =>
       `<li style="cursor:default"><span class="meta">${esc(l)}</span></li>`).join('')}</ul>`;
   if (e.tenders && e.tenders.length)
-    html += `<h2>Оролцсон тендер (${e.tenders.length}, шалгарсан ${e.tenders_won || 0})</h2><ul>${e.tenders.map(t =>
+    html += L`<h2>Оролцсон тендер (${e.tenders.length}, шалгарсан ${e.tenders_won || 0})</h2><ul>${e.tenders.map(t =>
       `<li style="cursor:default"><span class="meta">${esc(t)}</span></li>`).join('')}</ul>`;
   return html;
 }
 async function showOfficials(listed = false) {
   const ul = document.getElementById('analysis');
-  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  ul.innerHTML = tr('<li class="meta">Ачаалж байна…</li>');
   const r = await api(`/api/analysis/officials?limit=300${listed ? '&listed_only=true' : ''}`), s = r.summary;
   let html = covLine(r.coverage);
-  html += `<li class="sorts"><button data-off-listed="0" class="${listed ? '' : 'on'}">Бүх компани</button>` +
-          `<button data-off-listed="1" class="${listed ? 'on' : ''}">Бүртгэлтэй (MSE) компанитай</button></li>`;
-  html += `<li class="meta" style="cursor:default">${s.officials} албан тушаалтан (${s.iaac_officials} нь АТГ-т мэдүүлдэг) · ` +
-          `${s.interests} холбоо · ${s.companies} компани (${s.listed_companies} нь MSE-д бүртгэлтэй) · ${s.in_several_companies} нь 2+ компанитай · ` +
-          `${s.pages_read} компанийн хуудас уншсан. ${ODL_NOTE}</li>`;
+  html += L`<li class="sorts"><button data-off-listed="0" class="${listed ? '' : 'on'}">Бүх компани</button>` +
+          L`<button data-off-listed="1" class="${listed ? 'on' : ''}">Бүртгэлтэй (MSE) компанитай</button></li>`;
+  html += L`<li class="meta" style="cursor:default">${s.officials} албан тушаалтан (${s.iaac_officials} нь АТГ-т мэдүүлдэг) · ` +
+          L`${s.interests} холбоо · ${s.companies} компани (${s.listed_companies} нь MSE-д бүртгэлтэй) · ${s.in_several_companies} нь 2+ компанитай · ` +
+          L`${s.pages_read} компанийн хуудас уншсан. ${ODL_NOTE}</li>`;
   html += r.items.map(o => `<li class="rv" style="cursor:default">
-      <span class="name">${esc(o.name)}${o.iaac ? ' <span class="flag">АТГ</span>' : ''} <span class="meta">${esc(o.position || '')}</span></span>
+      <span class="name">${esc(dn(o))}${o.iaac ? tr(' <span class="flag">АТГ</span>') : ''} <span class="meta">${esc(o.position || '')}</span></span>
       <div class="meta">${o.companies.map(c => `<span data-open="${esc(c.company_key)}" style="cursor:pointer; text-decoration:underline">${esc(c.ticker && !c.ticker.startsWith('~') ? c.ticker : c.company)}</span> (${declYears(c)})`).join(' · ')}</div></li>`).join('')
-    || '<li class="meta">Албан тушаалтны мэдээлэл хараахан алга (компанийн бүртгэлийн хуудсыг уншихад нэмэгдэнэ)</li>';
+    || tr('<li class="meta">Албан тушаалтны мэдээлэл хараахан алга (компанийн бүртгэлийн хуудсыг уншихад нэмэгдэнэ)</li>');
   ul.innerHTML = html;
 }
 document.getElementById('btnOfficials').onclick = () => showOfficials();
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');
+
+// Language (issue #10): the page reloads in the other language with the selected node (?focus=)
+// and the colour, size and filter choices (kept for this tab only).
+const KEEP = ['depth', 'colorBy', 'sizeBy', 'sector', 'minPct', 'ties'];
+const langBtn = document.getElementById('langBtn');
+langBtn.textContent = EN_ON ? mn('Монгол') : 'English';
+langBtn.lang = EN_ON ? 'mn' : 'en';
+langBtn.title = EN_ON ? mn('Монгол хэлээр') : 'Switch to English';
+langBtn.onclick = () => {
+  try { sessionStorage.setItem('viewState', JSON.stringify(Object.fromEntries(KEEP.map(id => [id, val(id)])))); } catch {}
+  const u = new URL(location.href);
+  u.searchParams.set('lang', EN_ON ? 'mn' : 'en');
+  if (selected) u.searchParams.set('focus', selected); else u.searchParams.delete('focus');
+  location.assign(u);
+};
+let keptSector = '';
+try {
+  const st = JSON.parse(sessionStorage.getItem('viewState') || 'null');
+  sessionStorage.removeItem('viewState');
+  if (st) for (const id of KEEP) {
+    const el = document.getElementById(id);
+    if (id === 'sector') keptSector = st[id] || '';       // its choices load later (loadSectors)
+    else if (el && st[id] != null && [...el.options].some(o => o.value === st[id])) el.value = st[id];
+  }
+} catch {}
 function loadStats() {
   return api('/api/stats').then(s => {
     document.getElementById('stats').textContent =
-      `${s.companies} компани${s.unlisted_companies ? ` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал${s.beneficial_owners ? ` · ${s.beneficial_owners} эцсийн өмчлөгч` : ''}` +
-      (s.past_positions || s.past_ownerships ? ` · түүх: ${s.past_positions} албан тушаал, ${s.past_ownerships} эзэмшил` : '') +
+      L`${s.companies} компани${s.unlisted_companies ? L` (+${s.unlisted_companies} бүртгэлгүй)` : ''} · ${s.people} хүн · ${s.organizations} байгууллага · ${s.ownerships} эзэмшил · ${s.positions} албан тушаал${s.beneficial_owners ? L` · ${s.beneficial_owners} эцсийн өмчлөгч` : ''}` +
+      (s.past_positions || s.past_ownerships ? L` · түүх: ${s.past_positions} албан тушаал, ${s.past_ownerships} хувьцаа эзэмшил` : '') +
       (s.first_observed && s.first_observed !== s.last_observed ? ` (${s.first_observed} – ${s.last_observed})` : '');
     if (s.companies) loadSectors();
     if (focusKey && s.companies) open(focusKey).catch(() => document.getElementById('btnOverview').click());
     else if (s.companies) document.getElementById('btnOverview').click();
-  }).catch(() => document.getElementById('stats').textContent = 'Өгөгдлийн сан ачаалж байна…');
+  }).catch(() => document.getElementById('stats').textContent = tr('Өгөгдлийн сан ачаалж байна…'));
 }
 
 // While the data pipeline is running (hosted deployment), show its progress.
@@ -1047,20 +1085,24 @@ async function pollStatus() {
   if (!st || st.state === 'unknown') { box.textContent = ''; return; }
   const last = (st.steps || []).slice(-1)[0];
   box.textContent = st.state === 'done'
-    ? (st.next_run ? `Дараагийн шинэчлэл: ${st.next_run.slice(0, 16).replace('T', ' ')} UTC` : '')
-    : `Өгөгдөл шинэчилж байна: ${last ? last.step : st.state}…`;
+    ? (st.next_run ? L`Дараагийн шинэчлэл: ${st.next_run.slice(0, 16).replace('T', ' ')} UTC` : '')
+    : L`Өгөгдөл шинэчилж байна: ${last ? last.step : st.state}…`;
   if (st.state !== lastState && (st.state === 'done' || lastState === null)) loadStats();
   lastState = st.state;
   if (st.state === 'running' || st.state === 'starting') setTimeout(pollStatus, 5000);
-  else if (st.state === 'failed') box.textContent = 'Өгөгдөл ачаалахад алдаа гарлаа (logs-г шалгана уу).';
+  else if (st.state === 'failed') box.textContent = tr('Өгөгдөл ачаалахад алдаа гарлаа (logs-г шалгана уу).');
   if (st.next_run && st.state !== 'running') setTimeout(pollStatus, 60000);   // scheduled refreshes
 }
 // the sector filter's choices (issue #10): sectors by their number of listed companies
 function loadSectors() {
   api('/api/sectors').then(rows => {
     const sel = document.getElementById('sector');
-    sel.innerHTML = '<option value="">Салбар: бүгд</option>' + rows.map(r =>
-      `<option value="${esc(r.sector)}">${esc(r.sector)} (${r.listed || r.companies})</option>`).join('');
+    sel.innerHTML = tr('<option value="">Салбар: бүгд</option>') + rows.map(r =>
+      `<option value="${esc(r.sector)}">${esc(secName(r.sector, r.sector_std))} (${r.listed || r.companies})</option>`).join('');
+    if (keptSector && rows.some(r => r.sector === keptSector)) {
+      sel.value = keptSector; keptSector = '';
+      view === 'overview' ? showOverview() : render();
+    }
   }).catch(() => {});
 }
 loadStats(); pollStatus();
