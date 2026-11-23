@@ -444,6 +444,16 @@ def officials(min_companies: int = Query(1, ge=1), listed_only: bool = False,
     return _covered("officials", off.report(g(), min_companies, listed_only, limit))
 
 
+@app.get("/api/analysis/frc-decisions")
+def frc_decisions(adverse: bool = True, since: str = Query("", pattern=r"^(\d{4}-\d{2}-\d{2})?$"),
+                  limit: int = Query(500, ge=1, le=5000)):
+    """The Financial Regulatory Commission's decisions (frc.py), newest first, with the companies they
+    name: by default the adverse ones (licence suspension, revocation, penalty, liquidation,
+    temporary administration, restriction, warning). Source: frc.mn."""
+    from . import frc
+    return frc.decisions_report(g(), adverse, since, limit)
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.

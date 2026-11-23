@@ -462,6 +462,16 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
                 f"{_co(r['counterparty'])} ({', '.join(r['counterparty']['roles'])})",
                 [r["key"], r["counterparty"]["key"], r["company"]["key"]])
 
+    # the FRC's adverse decisions about the company (frc.py): suspension, revocation, penalty, ...
+    from datetime import date as _date
+    from .frc import _env_float
+    since = f"{_date.today().year - int(_env_float('FRC_FLAG_YEARS', 3))}-01-01"
+    for d in g.run("""MATCH (d:FrcDecision)-[:CONCERNS]->(c:Company {key: $me}) WHERE d.adverse AND d.date >= $since
+                      RETURN d.date AS date, d.number AS number, d.name AS name ORDER BY d.date DESC LIMIT 10""",
+                   me=me, since=since):
+        add("frc_decision", "warn", f"СЗХ-ны шийдвэр {d['date']}" + (f", №{d['number']}" if d["number"] else "")
+            + f": {d['name']}", [me])
+
     order = {"warn": 0, "info": 1}
     flags.sort(key=lambda f: order[f["level"]])
     return flags

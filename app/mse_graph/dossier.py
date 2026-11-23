@@ -58,6 +58,8 @@ def company_dossier(g, ticker: str, changes_limit: int = MAX_CHANGES) -> dict | 
     grp = groups.group_of(g, key)
     out["controls"] = [c for c in (grp or {}).get("companies", []) if c["key"] != key]
     out["flags"] = analysis.company_flags(g, t)
+    from . import frc
+    out["frc_decisions"] = frc.company_decisions(g, key)
     chg = history.recent_changes(g, ticker=t, significant_only=True, limit=changes_limit + 1)
     out["changes"], out["changes_more"] = chg[:changes_limit], len(chg) > changes_limit
     out["ownership_history"] = history.ownership_timeline(g, t)

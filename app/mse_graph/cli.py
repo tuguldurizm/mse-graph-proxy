@@ -256,6 +256,11 @@ def main(argv=None):
     p = sub.add_parser("frc", help="import FRC's licensed entities (frc.mn port 5001; needs open egress, not a cloud "
                                    "session): lists, licences, CEOs, and the shareholders and board of --budget entities")
     p.add_argument("--budget", type=int, help="entities whose details to read (default FRC_DETAIL_BUDGET or 20)")
+    p = sub.add_parser("frc-decisions", help="the FRC's decisions with the companies they name (adverse only "
+                                             "unless --all)")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--since", default="", help="YYYY-MM-DD")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("frc-probe",
                        help="describe FRC's data API (frc.mn, port 5001): the menu and the disclosure-like listings, "
                             "as 'FRC layout' lines; needs open egress (not a cloud session)")
@@ -529,6 +534,16 @@ def main(argv=None):
             res = frc.step(g, budget=args.budget)
             frc.mark_step(g, res)
             print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        elif args.cmd == "frc-decisions":
+            from . import frc
+            res = frc.decisions_report(g, not args.all, args.since)
+            if args.json:
+                print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+            else:
+                print(json.dumps(res["summary"], ensure_ascii=False))
+                for d in res["items"]:
+                    cos = ", ".join(c["ticker"] if not c["ticker"].startswith("~") else c["name"] for c in d["companies"])
+                    print(f"{d['date']} №{d['number'] or '-':<6} {d['kind']:<14} {cos or '(' + '; '.join(d['named'] or []) + ')'}")
         elif args.cmd == "ask":
             from . import ask
             print(json.dumps(ask.answer(g, " ".join(args.question)), ensure_ascii=False, indent=2, default=str))

@@ -41,7 +41,7 @@ API = os.getenv("FRC_API", "https://www.frc.mn:5001/api/")
 SITE = {"site": "main", "lang": "mn"}
 
 # bump to probe again at the next start, whatever FRC_MIN_INTERVAL_HOURS says
-PROBE_VERSION = 5      # 4: the import (step 2); 5: no FRC shareholders for listed companies, BOM fix
+PROBE_VERSION = 6      # 4: the import (step 2); 5: no FRC shareholders for listed companies, BOM fix; 6: decisions
 
 # The typed lists behind the "org" / "sct" / "decision" pages (the site's lazy chunk 454, read
 # 2026-11-23): GET, no parameters. Custodians and brokers are the nominee list's sources (#39).
@@ -481,14 +481,6 @@ def step(g, get=None, budget: int | None = None, delay: float | None = None,
 
     entities, report["lists"] = read_lists(fetch)
     report["entities"] = len(entities)
-    # not parsed yet: one decisions page (NBFI sector, this year) and the sanctions list, described
-    # in the log (`FRC layout`) so their parsers can be written from real answers
-    for what, path, params in (("decisions", "frc/decision", {"sctId": 12, "decId": when[:4]}),
-                               ("sanctions", "news", {"menuid": 451, **SITE, "page": 0})):
-        ans = fetch(path, **params)
-        report["lists"][what] = len(records(ans)) if ans is not None else None
-        if ans is not None and records(ans):
-            describe(ans, f"{path} ({what})")
     if not entities:
         return report
     lookup = g.company_lookup()
@@ -509,6 +501,14 @@ def step(g, get=None, budget: int | None = None, delay: float | None = None,
     ds, tickers = build(g, entities, details, when)
     loaded = g.load(ds, observed_at=when)
     gone = write_licenses(g, entities, tickers, details, when)
+    # the commission's decisions, linked to the companies they name (FRC's names first)
+    from .normalize import entity_key
+    names = {}
+    for reg, e in entities.items():
+        for k in (entity_key(e["name"]), entity_key(e["name"], "organization")):
+            names.setdefault(k, tickers[reg])
+    decisions, report["decision_lists"] = read_decisions(g, fetch, int(when[:4]))
+    report["decisions"] = write_decisions(g, decisions, names, when)
     listed = [t for t in tickers.values() if not t.startswith("~")]
     report.update(details=len(details), listed_matched=len(set(listed)),
                   registers_filled=len(ds.facts), new_companies=len(ds.companies),
@@ -521,3 +521,134 @@ def mark_step(g, report: dict) -> None:
     g.run("MERGE (m:Meta {key: 'frc'}) SET m.at = $at, m.version = $v, m.requests = $r, m.entities = $n, "
           "m.errors = size($e)", at=datetime.now(timezone.utc).isoformat(), v=PROBE_VERSION, r=report["requests"],
           n=report.get("entities", 0), e=report["errors"])
+
+
+# ---- the commission's decisions (FRC step 3) -----------------------------------------------------
+# `frc/decision?sctId=<sector>&decId=<year>` lists a sector's decisions (тогтоол) of one year: name,
+# number, date, type and a PDF on license.frc.mn. Each becomes a (:FrcDecision) node (not the review
+# queue's (:Decision)) that CONCERNS the companies its name gives in brackets ("... түдгэлзүүлэх тухай
+# ("МТ финанс ББСБ" ХХК)"). Adverse ones (suspension, revocation, penalty, liquidation, temporary
+# administration, restriction, warning) are company flags for FRC_FLAG_YEARS (3). This year's lists
+# are read every run; earlier years back to FRC_DECISION_SINCE (2021), FRC_DECISION_BACKFILL (10) a run.
+
+DECISION_SECTORS = {11: "securities", 12: "nbfi", 13: "insurance", 14: "savings_coop", 1202: "money_lender"}
+# (pattern, kind, adverse): the first that matches the decision's name
+DECISION_KINDS = (
+    (r"түдгэлзүүл", "suspension", True),
+    (r"зөвшөөрл\w*\s+хүчингүй|хүчингүй\s+болго\w*.*зөвшөөр", "revocation", True),
+    (r"торго|шийтгэ|төлбөр\s+ногдуул", "penalty", True),
+    (r"татан\s+буулга|дампуур", "liquidation", True),
+    (r"түр\s+удирд|эрх\s+хязгаарла|хяналтын\s+дэглэм|онцгой\s+дэглэм", "administration", True),
+    (r"хязгаарла", "restriction", True),
+    (r"сануулга|анхааруул", "warning", True),
+    (r"сэргээ", "restoration", False),
+    (r"зөвшөөрөл\s+олго|олгох\s+тухай|бүртгэ", "grant", False),
+)
+
+
+def decision_kind(name: str) -> tuple[str, bool]:
+    low = (name or "").lower()
+    return next(((k, adv) for rx, k, adv in DECISION_KINDS if re.search(rx, low)), ("other", False))
+
+
+def named_companies(name: str) -> list[str]:
+    """The company names a decision gives in brackets, quotes dropped: '("МТ финанс ББСБ" ХХК)' ->
+    ['МТ финанс ББСБ ХХК']; several in one bracket are split on commas and 'болон'."""
+    out = []
+    for inner in re.findall(r"\(([^()]{3,200})\)", _text(name)):
+        for part in re.split(r",|;|\sболон\s", inner):
+            part = _text(part)
+            if len(part) >= 3 and not re.fullmatch(r"[\d\s./№-]+", part):
+                out.append(part)
+    return out
+
+
+def decision_row(rec: dict, sector: int) -> dict | None:
+    low = {k.lower(): v for k, v in rec.items()}
+    name = _text(low.get("decision_name"))
+    if not name:
+        return None
+    date, number = _date(low.get("decision_date")), _text(low.get("decision_number"))
+    kind, adverse = decision_kind(name)
+    f = str(low.get("file_url") or "").strip()
+    return {"key": f"frc:{sector}:{number or name[:40]}:{date}", "sector": DECISION_SECTORS.get(sector, str(sector)),
+            "name": name, "number": number, "date": date, "type": _text(low.get("decision_type_name")),
+            "kind": kind, "adverse": adverse, "companies": named_companies(name),
+            "url": (LICENSE_API.rstrip("/") + "/" + f.lstrip("/")) if f and not f.startswith("http") else (f or None)}
+
+
+def read_decisions(g, fetch, year: int) -> tuple[list[dict], dict]:
+    """This year's decisions of every sector, and up to FRC_DECISION_BACKFILL earlier sector-years not
+    read yet. Returns the decisions and the count per sector-year read."""
+    since = int(_env_float("FRC_DECISION_SINCE", 2021))
+    backfill = int(_env_float("FRC_DECISION_BACKFILL", 10))
+    done = set((g.run("MATCH (m:Meta {key: 'frc_decisions'}) RETURN m.done AS d") or [{"d": []}])[0]["d"] or [])
+    todo = [(s, year) for s in DECISION_SECTORS]
+    todo += [(s, y) for y in range(year - 1, since - 1, -1) for s in DECISION_SECTORS if f"{s}:{y}" not in done][:backfill]
+    out, counts = [], {}
+    for sector, y in todo:
+        ans = fetch("frc/decision", sctId=sector, decId=y)
+        if ans is None:
+            continue
+        rows = [r for r in (decision_row(x, sector) for x in records(ans)) if r]
+        counts[f"{sector}:{y}"] = len(rows)
+        out += rows
+        if y < year:
+            done.add(f"{sector}:{y}")
+    g.run("MERGE (m:Meta {key: 'frc_decisions'}) SET m.done = $d", d=sorted(done))
+    return out, counts
+
+
+def write_decisions(g, decisions: list[dict], names: dict[str, str], when: str) -> dict:
+    """Store the decisions and link each to the companies it names. `names` maps entity_key(name) ->
+    ticker (FRC's licensed entities of this run); the graph's company aliases are tried after them."""
+    from .normalize import entity_key
+    lookup = {k: v for k, v in g.company_lookup().items() if not k.startswith("reg:")}
+    rows = []
+    for d in decisions:
+        tickers = []
+        for n in d["companies"]:
+            keys = [entity_key(n), entity_key(n, "organization")]
+            t = next((names[k] for k in keys if k in names), None) or next((lookup[k] for k in keys if k in lookup), None)
+            if t and t not in tickers:
+                tickers.append(t)
+        rows.append({**{k: v for k, v in d.items() if k != "companies"}, "company_names": d["companies"],
+                     "tickers": tickers})
+    g.run("""UNWIND $rows AS r
+             MERGE (d:FrcDecision {key: r.key})
+             ON CREATE SET d.first_seen = $when
+             SET d.sector = r.sector, d.name = r.name, d.number = r.number, d.date = r.date, d.type = r.type,
+                 d.kind = r.kind, d.adverse = r.adverse, d.url = r.url, d.company_names = r.company_names,
+                 d.last_seen = $when
+             WITH d, r
+             UNWIND r.tickers AS t
+             MATCH (c:Company {ticker: t})
+             MERGE (d)-[:CONCERNS]->(c)""", rows=rows, when=when)
+    linked = sum(1 for r in rows if r["tickers"])
+    return {"decisions": len(rows), "linked": linked, "adverse": sum(1 for r in rows if r["adverse"]),
+            "adverse_linked": sum(1 for r in rows if r["adverse"] and r["tickers"])}
+
+
+def company_decisions(g, key: str, limit: int = 50) -> list[dict]:
+    """The FRC decisions that name a company, newest first."""
+    return g.run("""MATCH (d:FrcDecision)-[:CONCERNS]->(c:Company {key: $key})
+                    RETURN d.date AS date, d.number AS number, d.name AS name, d.kind AS kind, d.adverse AS adverse,
+                           d.sector AS sector, d.url AS url
+                    ORDER BY d.date DESC LIMIT $limit""", key=key, limit=limit)
+
+
+def decisions_report(g, adverse_only: bool = True, since: str = "", limit: int = 500) -> dict:
+    """FRC decisions across the market, newest first, with the companies they name."""
+    rows = g.run("""MATCH (d:FrcDecision) WHERE (NOT $adv OR d.adverse) AND d.date >= $since
+                    OPTIONAL MATCH (d)-[:CONCERNS]->(c:Company)
+                    WITH d, collect({key: c.key, ticker: c.ticker, name: c.name, listed: coalesce(c.listed, true)}) AS cs
+                    RETURN d.date AS date, d.number AS number, d.name AS name, d.kind AS kind, d.adverse AS adverse,
+                           d.sector AS sector, d.url AS url, [x IN cs WHERE x.key IS NOT NULL] AS companies,
+                           d.company_names AS named
+                    ORDER BY d.date DESC, d.number DESC LIMIT $limit""", adv=adverse_only, since=since, limit=limit)
+    kinds: dict[str, int] = {}
+    for r in rows:
+        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    return {"items": rows, "summary": {"decisions": len(rows), "kinds": kinds,
+                                       "linked": sum(1 for r in rows if r["companies"]),
+                                       "listed": sum(1 for r in rows if any(c["listed"] for c in r["companies"]))}}

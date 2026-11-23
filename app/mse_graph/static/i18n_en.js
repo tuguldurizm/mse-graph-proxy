@@ -455,5 +455,9 @@ const EN = {
  "компани:": "companies:",
  "удирдлага / ТУЗ": "officers",
  "хувьцаа эзэмшигч": "shareholders",
- "эзэмшдэг компани": "holdings"
+ "эзэмшдэг компани": "holdings",
+ "СЗХ-ны шийдвэрүүд": "FRC decisions",
+ "Дугаар": "Number",
+ "Шийдвэр": "Decision",
+ "Санхүүгийн зохицуулах хорооны тогтоол (frc.mn), монголоор.": "Resolutions of the Financial Regulatory Commission (frc.mn), in Mongolian."
 };
