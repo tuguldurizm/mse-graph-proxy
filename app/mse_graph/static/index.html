@@ -80,6 +80,8 @@
   .spark { display:block; width:100%; height:44px; color:var(--accent); }
   .spark .axis { stroke:var(--line); }
   .sorts button.on { border-color:var(--accent); color:var(--accent); }
+  a.dossier { font-size:12px; padding:3px 8px; border:1px solid var(--line); border-radius:6px; color:var(--accent); text-decoration:none; }
+  a.dossier:hover { border-color:var(--accent); }
   .flag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--accent); color:var(--accent); margin-left:4px; }
   @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
 </style>
@@ -407,6 +409,8 @@ async function showDetails(d) {
     links.push(`<a href="${esc(e.registry_url)}" target="_blank" rel="noopener">Open Data Lab</a>` +
                (e.registry_updated ? ` <span class="meta">(${esc(e.registry_updated)})</span>` : ''));
   if (links.length) html += `<div>${links.join(' · ')}</div>`;
+  // one printable page with everything about the company (issue #10, dossier.html)
+  if (isCo) html += L`<div class="row"><a class="dossier" href="/dossier/${t}${EN_ON ? '?lang=en' : ''}" target="_blank" rel="noopener" title="Эзэмшигч, удирдлага, анхаарах зүйлс, өөрчлөлтийг нэг хуудсанд: хэвлэх эсвэл PDF болгох">Компанийн досье (хэвлэх)</a></div>`;
   html += marketBlock(mk);
   // the server writes these sentences in Mongolian (analysis.company_flags); say so in English
   if (flags.length) html += L`<h2>Анхаарах зүйлс</h2>${EN_ON ? '<div class="meta">(in Mongolian: the checks write their findings in Mongolian)</div>' : ''}<ul>${flags.map(f =>
