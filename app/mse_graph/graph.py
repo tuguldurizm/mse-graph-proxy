@@ -2192,8 +2192,11 @@ class Graph:
             self.run("UNWIND $regs AS reg MATCH (l:RegistryLead {reg: reg}) DELETE l", regs=ok)
 
     def discovered_tickers(self) -> set[str]:
-        """Companies discovery added (see discovery.weekly_selection)."""
-        return {r["t"] for r in self.run("MATCH (c:Company) WHERE c.discovered_at IS NOT NULL RETURN c.ticker AS t")}
+        """Companies the registry import re-reads a seventh at a time (see discovery.weekly_selection):
+        those discovery added, and every other unlisted company, such as the ~1,400 FRC licenses
+        (frc.py), whose pages are the source of their officers and owners."""
+        return {r["t"] for r in self.run("MATCH (c:Company) WHERE c.discovered_at IS NOT NULL "
+                                         "OR NOT coalesce(c.listed, true) RETURN c.ticker AS t")}
 
     def resting_registry_numbers(self, retry_days: int = 30) -> set[str]:
         """Numbers noted as dead ends (note_registry_checks) within the last `retry_days`."""
