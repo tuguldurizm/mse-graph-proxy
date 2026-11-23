@@ -554,7 +554,8 @@ MAX_CONSECUTIVE_FAILURES = 5
 
 
 def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int | None = None,
-                     max_failures: int = MAX_CONSECUTIVE_FAILURES, progress=None) -> tuple[Dataset, list[dict]]:
+                     max_failures: int = MAX_CONSECUTIVE_FAILURES, progress=None,
+                     retry_failed: bool = True) -> tuple[Dataset, list[dict]]:
     """Fetch the registry page of each (ticker, reg_no) and collect its records.
 
     Returns the combined Dataset and a per-company report whose status is "ok",
@@ -563,7 +564,8 @@ def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int 
     A company without a page gets no records, so nothing of its history is closed.
     Numbers that can't be register numbers (mse.mn's 10-digit state registration
     numbers) are left out: the registry has no page for them. `progress()`, if
-    given, is called after each page (e.g. RegistryLease.keep).
+    given, is called after each page (e.g. RegistryLease.keep). With `retry_failed`, the
+    pages that failed are tried once more at the end, unless the run gave up on an outage.
     """
     fetcher = fetcher or _fetcher()
     out, report = Dataset(), []
@@ -601,6 +603,33 @@ def enrich_companies(companies: list[tuple[str, str]], fetcher=None, limit: int 
                 entry.update(shareholders=len(ds.shareholdings), officers=len(ds.positions),
                              beneficial_owners=len(ds.beneficial_owners))
         log.info("ODL [%d/%d] %s %s: %s", i + 1, len(todo), ticker, reg, entry["status"])
+    # Once more for the pages that failed (a reset connection, a proxy hiccup), at the end
+    # so the route has had time to recover; the crawl delay still applies.
+    # Not after an outage (companies skipped): then the route is down and tomorrow is soon enough.
+    again = [e for e in report if e["status"] == "fetch failed"] if retry_failed else []
+    if again and not any(e["status"] == "skipped" for e in report):
+        log.info("ODL: retrying %d companies that failed", len(again))
+        failures = 0
+        for i, entry in enumerate(again):
+            if failures >= max_failures:
+                break
+            status, page, url = fetch_entity(entry["reg_no"], fetcher)
+            if progress:
+                progress()
+            entry["status"], entry["retried"] = status, True
+            entry.pop("error", None)
+            if status == "fetch failed":
+                failures += 1
+                if getattr(fetcher, "last_error", ""):
+                    entry["error"] = fetcher.last_error
+            else:
+                failures = 0
+                if page is not None:
+                    ds = registry_dataset(page, entry["ticker"], url)
+                    out.extend(ds)
+                    entry.update(shareholders=len(ds.shareholdings), officers=len(ds.positions),
+                                 beneficial_owners=len(ds.beneficial_owners))
+            log.info("ODL retry [%d/%d] %s %s: %s", i + 1, len(again), entry["ticker"], entry["reg_no"], status)
     return out, report
 
 

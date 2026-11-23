@@ -117,6 +117,10 @@ def read_seeds(path: str | Path | None = None) -> list[dict]:
     return out
 
 
+# Pages read between loads into the graph (and marks of what was read).
+LOAD_EVERY = int(os.getenv("DISCOVERY_LOAD_EVERY", "25"))
+
+
 def frontier(g, max_depth: int = DEFAULT_MAX_DEPTH, seeds: list[dict] | None = None,
              retry_days: int = DEFAULT_RETRY_DAYS) -> list[Lead]:
     """The registry numbers discovery would read next, in order (see the module docstring)."""
@@ -221,7 +225,8 @@ def discover(g, fetcher=None, budget: int = DEFAULT_BUDGET, max_depth: int = DEF
     failures = 0
     while report["fetched"] < budget and not report["stopped"]:
         todo = [lead for lead in frontier(g, max_depth, seeds, retry_days) if lead.reg not in tried]
-        todo = todo[: budget - report["fetched"]]
+        # loaded and marked every LOAD_EVERY pages, so a failure loses at most that many
+        todo = todo[: min(budget - report["fetched"], LOAD_EVERY)]
         if not todo:
             break
         batch, notes, marks = Dataset(), [], []

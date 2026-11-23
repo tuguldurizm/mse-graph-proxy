@@ -123,6 +123,11 @@ def main(argv=None):
     p.add_argument("--summary", action="store_true", help="counts only, no per-company details")
     p.add_argument("--compare", action="store_true",
                    help="counts and what changed since the last saved result, then save this one in the graph")
+    p = sub.add_parser("prune-listed-registry-owners",
+                       help="remove stakes that only the registry reports from listed companies with a long "
+                            "registry list (its share register, e.g. Хаан банк's 4,105 small holders); "
+                            "counts only without --apply")
+    p.add_argument("--apply", action="store_true", help="delete them (and records/people left unlinked)")
     p = sub.add_parser("group-people",
                        help="people of the data/manual/ groups and the other companies the graph links them to")
     p.add_argument("root", nargs="?", help="default: $MANUAL_DATA_DIR, else data/manual")
@@ -473,6 +478,8 @@ def main(argv=None):
                 _print(compare_validation(g, rep))
             else:
                 _print([{k: v for k, v in r.items() if k != "details"} for r in rep] if args.summary else rep)
+        elif args.cmd == "prune-listed-registry-owners":
+            _print(g.drop_registry_owners_of_listed(apply=args.apply))
         elif args.cmd == "group-people":
             from .manual import group_people
             rep = group_people(g, args.root, dataset=args.dataset, past=args.past)
