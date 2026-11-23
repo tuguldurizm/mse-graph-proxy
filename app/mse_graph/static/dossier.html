@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="mn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Company dossier</title>
+<script src="/static/i18n_en.js"></script>
+<script src="/static/i18n.js"></script>
+<style>
+  /* The company dossier (issue #10): one printable page per company. On screen a sheet on the
+     page background; printed (or saved as PDF) A4 on white, with the toolbar hidden. */
+  :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc; --accent:#2f6fb2;
+          --warn:#b06a00; --error:#c0392b; --up:#2e8540; --down:#c0392b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --panel:#1f1f1d; --ink:#ecebe6; --muted:#9a9993; --line:#33332f; --accent:#6aa3e0;
+            --warn:#e0a050; --error:#f0776a; --up:#6cc77f; --down:#f0776a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  a { color:var(--accent); }
+  .bar { max-width:900px; margin:0 auto; padding:12px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .bar .sp { flex:1; }
+  button, .btn { font:inherit; font-size:13px; color:inherit; background:var(--panel); border:1px solid var(--line);
+                 border-radius:6px; padding:5px 10px; cursor:pointer; text-decoration:none; }
+  button:hover, .btn:hover { border-color:var(--accent); }
+  article { max-width:900px; margin:0 auto 32px; background:var(--panel); border:1px solid var(--line);
+            border-radius:10px; padding:32px 36px; }
+  h1 { font-size:24px; line-height:1.25; margin:0; }
+  .orig { color:var(--muted); margin-top:2px; }
+  .facts { margin-top:10px; display:flex; flex-wrap:wrap; gap:4px 18px; font-size:13px; }
+  .facts b { font-weight:600; }
+  .facts span { color:var(--muted); }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:28px 0 8px;
+       padding-top:12px; border-top:1px solid var(--line); break-after:avoid; }
+  .meta { color:var(--muted); font-size:12px; }
+  .note { color:var(--muted); font-size:12px; margin:6px 0 0; }
+  .tiles { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:20px; }
+  .tile { border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
+  .tile .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .tile .v { font-size:18px; font-weight:600; margin-top:2px; overflow-wrap:anywhere; }
+  .tile .s { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:5px 8px 5px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:normal; font-size:.92em; }
+  td.n, th.n { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  td.d { white-space:nowrap; color:var(--muted); font-size:.92em; }
+  td.src, .src { color:var(--muted); font-size:.85em; }
+  .src a, td.src a { color:inherit; text-decoration:underline dotted; }
+  .unv { color:var(--warn); }
+  tr { break-inside:avoid; }
+  thead { display:table-header-group; }
+  .tag { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:8px; padding:0 5px; margin-left:4px; white-space:nowrap; }
+  ul.flags { list-style:none; margin:0; padding:0; }
+  ul.flags li { padding:5px 8px 5px 10px; margin:4px 0; border-left:3px solid var(--line); break-inside:avoid; }
+  ul.flags li.warn { border-left-color:var(--warn); }
+  ul.flags li.error { border-left-color:var(--error); }
+  ul.plain { margin:4px 0 0; padding-left:18px; }
+  ul.plain li { margin:2px 0; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .spark { display:block; width:100%; height:48px; color:var(--accent); margin-top:6px; }
+  .spark .axis { stroke:var(--line); }
+  footer { margin-top:28px; padding-top:12px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+  @media (max-width: 640px) {
+    article { padding:20px 16px; border-radius:0; border-left:0; border-right:0; }
+    .tiles { grid-template-columns:repeat(2, 1fr); }
+    h1 { font-size:20px; }
+  }
+  @page { size:A4; margin:14mm 12mm 16mm; }
+  @media print {
+    :root { --bg:#fff; --panel:#fff; --ink:#000; --muted:#555; --line:#ccc; --accent:#1d4f86;
+            --warn:#a35f00; --error:#b0281a; --up:#1f6b30; --down:#b0281a; }
+    body { font-size:11px; background:#fff; }
+    .bar { display:none; }
+    article { max-width:none; margin:0; padding:0; border:0; border-radius:0; }
+    h1 { font-size:20px; }
+    h2 { margin-top:18px; }
+    table { font-size:10.5px; }
+    .tile .v { font-size:15px; }
+    .scroll { overflow:visible; }
+    a { text-decoration:none; }
+  }
+</style>
+</head>
+<body>
+<nav class="bar">
+  <a class="btn" id="back" href="/">← Граф руу буцах</a>
+  <span class="sp"></span>
+  <button id="btnPrint" title="Хэвлэх эсвэл PDF болгон хадгалах">Хэвлэх / PDF</button>
+  <a class="btn" id="json" href="#" title="Энэ хуудасны өгөгдөл (JSON)">JSON</a>
+  <button id="langBtn"></button>
+</nav>
+<article id="doc"><p class="meta">Ачаалж байна…</p></article>
+<script>
+translateStatic(document.body);   // English: the static HTML (i18n.js)
+// The page's own small helpers: the same as the graph page's (index.html), which this page does not load.
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtPct = v => v == null ? '?' : `${+v.toFixed(3)}%`;
+const fmtMNT = v => v == null ? '—' : Math.abs(v) >= 1e12 ? L`${(v / 1e12).toFixed(2)} их наяд ₮` : Math.abs(v) >= 1e9 ? L`${(v / 1e9).toFixed(2)} тэрбум ₮`
+  : Math.abs(v) >= 1e6 ? L`${(v / 1e6).toFixed(1)} сая ₮` : `${Math.round(v).toLocaleString('en-US')} ₮`;
+const num = v => v == null ? '—' : (+v).toLocaleString('en-US');
+const TYPE = { Company: tr('Компани'), Person: tr('Хувь хүн'), Organization: tr('Байгууллага') };
+const HOLD_TAG = { nominee: tr('номини'), treasury: tr('өөрийн хувьцаа'), unknown: tr('төрөл тодорхойгүй') };
+const holdTag = x => HOLD_TAG[x.holding_type] ? `<span class="tag">${HOLD_TAG[x.holding_type]}</span>` : '';
+const co = x => x.ticker && !x.ticker.startsWith('~') ? `${esc(x.ticker)} <span class="meta">${esc(dn(x))}</span>` : esc(dn(x));
+const FACT_LABELS = {name: tr('Нэр'), name_en: tr('Англи нэр'), address: tr('Хаяг'), legal_form: tr('Хэлбэр'),
+                     sector: tr('Салбар'), activity_codes: tr('Үйл ажиллагааны код')};
+const OWNER_KIND = { state: tr('төр'), listed_company: tr('бүртгэлтэй компани'), organization: tr('бусад байгууллага'),
+                     individual: tr('хувь хүн'), nominee: tr('номини') };
+const mixText = m => Object.entries(m || {}).filter(([, v]) => v > 0).map(([k, v]) => `${OWNER_KIND[k] || k} ${fmtPct(v)}`).join(', ');
+const yrs = v => v == null ? '—' : L`${(+v).toFixed(1)} жил`;
+// the board first, then management, then the rest
+const ROLE_ORDER = ['chair', 'vice_chair', 'ceo', 'deputy_ceo', 'cfo', 'board_member', 'independent_director',
+                    'supervisory', 'secretary', 'other_executive', 'unknown'];
+const roleRank = p => { const i = ROLE_ORDER.indexOf(p.role_std); return i < 0 ? ROLE_ORDER.length : i; };
+
+// where a row comes from (issue #10): each source linked, the owning one first
+const SRC_EN = [[mn('Хайлтын үр дүн (шалгаагүй)'), 'Search result (unverified)'], [mn('Гараар цуглуулсан'), 'Hand-collected'],
+                [mn('Жишээ (зохиомол)'), 'Example (fictional)'], [mn('Open Data Lab (файл)'), 'Open Data Lab (file)'], [mn('Бусад'), 'Other']];
+const srcLabel = l => !EN_ON || !l ? l : SRC_EN.reduce((s, [m, en]) => s.startsWith(m) ? en + s.slice(m.length) : s, l);
+const srcOne = p => {
+  const t = esc(srcLabel(p.label)), cls = p.kind === 'search' ? ' class="unv"' : '';
+  return p.url && /^https?:/.test(p.url)
+    ? `<a href="${esc(p.url)}" target="_blank" rel="noopener"${cls} title="${esc(p.source)}">${t}</a>`
+    : `<span${cls} title="${esc(p.source)}">${t}</span>`;
+};
+const srcCell = x => `<td class="src">${(x.provenance || []).map(srcOne).join(', ')}</td>`;
+const since = x => esc(x.since || x.first_seen || '');
+const period = x => `${esc(x.since || x.first_seen || '?')} – ${esc(x.until || '?')}`;
+
+// a table: columns [{h, n (numeric)}], rows already as <td> cells; nothing when there are no rows
+function table(cols, rows, more = 0) {
+  if (!rows.length) return '';
+  const head = cols.map(c => `<th${c.n ? ' class="n"' : ''}>${c.h}</th>`).join('');
+  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${rows.map(r => `<tr>${r}</tr>`).join('')}</tbody></table></div>` +
+         (more > 0 ? L`<p class="note">… бас ${more}</p>` : '');
+}
+const section = (title, body) => body ? `<h2>${title}</h2>${body}` : '';
+const cap = (xs, n) => [xs.slice(0, n), Math.max(0, xs.length - n)];
+
+// a change, as the graph page's change list writes it
+function describe(c) {
+  const who = esc(dnS(c.entity || '')), flag = (c.crossed || []).map(t => `<span class="tag">${t}%</span>`).join('');
+  const d = c.delta != null ? ` <span class="${c.delta > 0 ? 'up' : 'down'}">(${c.delta > 0 ? '+' : ''}${+c.delta.toFixed(3)})</span>` : '';
+  switch (c.kind) {
+    case 'stake_changed':    return `${who}: ${fmtPct(c.old)} → ${fmtPct(c.new)}${d}${flag}`;
+    case 'holder_added':     return L`Шинэ эзэмшигч: ${who} ${fmtPct(c.new)}${flag}`;
+    case 'holder_removed':   return L`Жагсаалтаас гарсан: ${who} (өмнө ${fmtPct(c.old)})${flag}`;
+    case 'position_added':   return L`Томилогдсон: ${who} — ${esc(c.new)}`;
+    case 'position_removed': return L`Албан тушаалаас гарсан: ${who} — ${esc(c.old)}`;
+    case 'position_changed': return `${who}: ${esc(c.old)} → ${esc(c.new)}`;
+    case 'stake_accumulation':
+      return L`Хуримтлуулж байна: ${who} ${fmtPct(c.old)} → ${fmtPct(c.new)}${d} · ${c.steps} алхам, ${esc(c.since || '')}-аас${flag}`;
+    case 'company_added':    return tr('Жагсаалтад шинээр нэмэгдсэн');
+    case 'company_removed':  return tr('Жагсаалтаас хасагдсан');
+    case 'company_renamed':  return L`Нэр өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
+    case 'company_fact_changed':
+      return L`${esc(FACT_LABELS[c.field] || c.field)} өөрчлөгдсөн: ${esc(c.old || '?')} → ${esc(c.new)}`;
+    default:                 return esc(c.kind);
+  }
+}
+
+// the closing price over time, as a small line on a time axis
+function spark(pts) {
+  const ok = pts.filter(p => p.close != null);
+  if (ok.length < 2) return '';
+  const W = 600, H = 48, vs = ok.map(p => p.close), lo = Math.min(...vs), hi = Math.max(...vs);
+  const ts = ok.map(p => Date.parse(p.date)), t0 = ts[0], t1 = ts[ts.length - 1];
+  const x = i => t1 === t0 ? W / 2 : 4 + (W - 8) * (ts[i] - t0) / (t1 - t0), y = v => hi === lo ? H / 2 : H - 4 - (H - 8) * (v - lo) / (hi - lo);
+  const line = ok.map((p, i) => `${x(i).toFixed(1)},${y(p.close).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(tr('Ханшийн түүх'))}">` +
+    `<line class="axis" x1="0" x2="${W}" y1="${H - 1}" y2="${H - 1}"/>` +
+    `<polyline points="${line}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>` +
+    `<div class="meta" style="display:flex; justify-content:space-between"><span>${esc(ok[0].date)} · ${num(lo === vs[0] ? lo : vs[0])} ₮</span>` +
+    L`<span>${ok.length} өдөр · ${num(lo)}–${num(hi)} ₮</span><span>${esc(ok[ok.length - 1].date)} · ${num(vs[vs.length - 1])} ₮</span></div>`;
+}
+
+function header(d) {
+  const e = d.entity, m = d.market || {};
+  let h = `<h1>${esc(dn(e))}</h1>`;
+  if (EN_ON && dn(e) !== e.name) h += `<div class="orig">${esc(e.name)}</div>`;
+  const facts = [[tr('Тикер'), e.ticker && !e.ticker.startsWith('~') ? e.ticker : ''], [tr('Регистр'), e.register_no],
+                 [tr('Улсын бүртгэл'), e.state_reg_no], [tr('Хэлбэр'), e.legal_form],
+                 [tr('Салбар'), e.sector ? secName(e.sector, e.sector_std) : ''], [tr('Үүсгэн байгуулагдсан'), e.founded]];
+  h += `<div class="facts">${facts.filter(([, v]) => v).map(([k, v]) => `<div><span>${k}</span> <b>${esc(v)}</b></div>`).join('')}</div>`;
+  if (e.sector_std && e.sector_std_name && e.sector_std_name !== e.sector)
+    h += L`<div class="meta">Стандарт салбар: ${esc(e.sector_std)} · ${esc(EN_ON ? secName(e.sector_std_name, e.sector_std) : e.sector_std_name)}</div>`;
+  if (e.address) h += L`<div class="meta">Хаяг: ${esc(e.address)}</div>`;
+  if (e.former_names && e.former_names.length) h += L`<div class="meta">Хуучин нэр: ${e.former_names.map(esc).join(', ')}</div>`;
+  const links = [];
+  if (e.url && /^https?:/.test(e.url))
+    links.push(`<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(new URL(e.url).hostname.replace(/^www\./, ''))}</a>`);
+  if (e.registry_url && /^https?:/.test(e.registry_url))
+    links.push(`<a href="${esc(e.registry_url)}" target="_blank" rel="noopener">Open Data Lab</a>` +
+               (e.registry_updated ? ` <span class="meta">(${esc(e.registry_updated)})</span>` : ''));
+  if (links.length) h += `<div class="meta">${links.join(' · ')}</div>`;
+
+  // key figures
+  const uo = (d.ultimate_owners || [])[0], warn = d.flags.filter(f => f.level === 'warn').length;
+  const tiles = [
+    [tr('Зах зээлийн үнэлгээ'), fmtMNT(m.market_cap), m.price != null ? L`ханш ${num(m.price)} ₮ · ${esc(m.price_date || '?')}${m.stale ? tr(' (хуучин)') : ''}` : ''],
+    [tr('Хувьцаа эзэмшигчид'), String(d.owners.length), d.concentration ? `top-1 ${fmtPct(d.concentration.top1)} · HHI ${d.concentration.hhi}` : ''],
+    [tr('Удирдлага / ТУЗ'), String(d.people.length), d.turnover && d.turnover.ceo ? L`захирал: ${esc(dn(d.turnover.ceo))}` : ''],
+    [tr('Анхаарах зүйлс'), String(d.flags.length), warn ? L`анхааруулга: ${warn}` : ''],
+  ];
+  h += `<div class="tiles">${tiles.map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`).join('')}</div>`;
+  if (uo) h += L`<p class="note">Look-through хамгийн том эзэмшигч: <b>${esc(dn(uo))}</b> ${fmtPct(uo.effective_percent)}</p>`;
+  return h;
+}
+
+function render(d) {
+  const e = d.entity, hist = d.history || {};
+  document.title = `${e.ticker && !e.ticker.startsWith('~') ? e.ticker + ' · ' : ''}${dn(e)} · ${tr('Компанийн досье')}`;
+  let h = header(d);
+
+  // governance checks: the server writes them in Mongolian (analysis.company_flags)
+  h += section(tr('Анхаарах зүйлс'), d.flags.length ? (EN_ON ? '<p class="note">(in Mongolian: the checks write their findings in Mongolian)</p>' : '') +
+    `<ul class="flags">${d.flags.map(f => `<li class="${f.level}">${esc(f.text)}</li>`).join('')}</ul>` +
+    tr('<p class="note">Анхааруулга нь нягталж харах зүйл, дүгнэлт биш.</p>') : '');
+
+  // shareholders
+  // the MNT value column only when some row has one (issue #31)
+  const valued = xs => xs.some(x => x.value_mnt != null);
+  const valCol = xs => valued(xs) ? [{ h: tr('≈ Үнэлгээ'), n: 1 }] : [];
+  const val = (x, xs) => valued(xs) ? `<td class="n">${x.value_mnt != null ? fmtMNT(x.value_mnt) : ''}</td>` : '';
+  let own = table([{ h: tr('Эзэмшигч') }, { h: tr('Төрөл') }, { h: tr('Хувь'), n: 1 }, ...valCol(d.owners), { h: tr('Огноо') }, { h: tr('Эх сурвалж') }],
+    d.owners.map(o => `<td>${esc(dn(o))}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? `<span class="tag">${esc(o.share_class)}</span>` : ''}</td>` +
+      `<td class="d">${TYPE[o.type] || ''}</td><td class="n">${o.percent != null ? fmtPct(o.percent) : tr('<span class="meta">бүртгэл</span>')}</td>` +
+      `${val(o, d.owners)}<td class="d">${esc(o.as_of || '')}</td>${srcCell(o)}`));
+  const ow = d.ownership;
+  if (ow && (ow.nominee.holders || ow.treasury.holders))
+    own += L`<p class="note">Номини эзэмшил: ${ow.nominee.holders} (${ow.nominee.percent != null ? fmtPct(ow.nominee.percent) : '?'})` +
+           (ow.treasury.holders ? L` · өөрийн хувьцаа: ${ow.treasury.percent != null ? fmtPct(ow.treasury.percent) : '?'}` : '') + '</p>';
+  const c = d.concentration;
+  if (c) own += L`<p class="note">Төвлөрөл: HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · чөлөөт хувьцаа ~${fmtPct(c.free_float_estimate)} (тооцоо)` +
+                (c.plausible ? '' : L` · нийлбэр ${fmtPct(c.total_percent)} — 100%-иас их!`) + (mixText(c.owner_mix) ? ` · ${mixText(c.owner_mix)}` : '') + '</p>';
+  if (d.owners.some(o => o.value_mnt != null))
+    own += tr('<p class="note">Үнэлгээ = эзэмшлийн хувь × зах зээлийн үнэлгээ: бага арилжаатай хувьцаанд баримжаа л болно.</p>');
+  h += section(tr('Хувьцаа эзэмшигчид'), own || tr('<p class="meta">Эзэмшигчийн мэдээлэл алга</p>'));
+
+  // look-through owners
+  const chainTxt = u => (u.chains || []).slice(0, 2).map(ch => ch.map(x => esc(dnS(x))).join(' → ')).join('<br>');
+  h += section(tr('Эцсийн өмчлөгчид (look-through)'), table([{ h: tr('Эзэмшигч') }, { h: tr('Төрөл') }, { h: tr('Хувь'), n: 1 }, { h: tr('Гинж') }],
+    (d.ultimate_owners || []).map(u => `<td>${esc(dn(u))}</td><td class="d">${TYPE[u.type] || ''}</td><td class="n">${fmtPct(u.effective_percent)}</td>` +
+      `<td class="meta">${chainTxt(u)}</td>`)) +
+    ((d.ultimate_owners || []).length ? tr('<p class="note">Одоогийн хувьтай эзэмшлийн гинжээр үржүүлсэн хувь (номини, өөрийн хувьцааг тооцохгүй), 1%-иас дээш.</p>') : ''));
+
+  // beneficial owners from the registry
+  h += section(tr('Эцсийн өмчлөгч (бүртгэл)'), table([{ h: tr('Нэр') }, { h: tr('Хэзээнээс') }, { h: tr('Эх сурвалж') }],
+    d.beneficial_owners.map(b => `<td>${esc(dn(b))}</td><td class="d">${since(b)}</td>${srcCell(b)}`)));
+
+  // board and management, with turnover
+  const people = [...d.people].sort((a, b) => roleRank(a) - roleRank(b) || String(a.name).localeCompare(String(b.name)));
+  let ppl = table([{ h: tr('Нэр') }, { h: tr('Албан тушаал') }, { h: tr('Хэзээнээс') }, { h: tr('Эх сурвалж') }],
+    people.map(p => `<td>${esc(dn(p))}</td><td>${esc(roleTitle(p))}</td><td class="d">${since(p)}</td>${srcCell(p)}`));
+  const t = d.turnover;
+  if (t) ppl += L`<p class="note">Солилцоо: ирсэн ${t.arrivals} · гарсан ${t.departures}` +
+    (t.turnover_rate != null ? L` · ${t.turnover_rate}/жил` : tr(' · бүтэн жилийн түүх алга')) +
+    L` · дундаж хугацаа ${yrs(t.avg_tenure_years)}${t.tenure_lower_bound ? '+' : ''} · түүх ${esc(t.history_start)}-аас</p>`;
+  h += section(tr('Удирдлага / ТУЗ'), ppl || tr('<p class="meta">Удирдлагын мэдээлэл алга</p>'));
+
+  // what the company owns and controls
+  h += section(tr('Эзэмшдэг компаниуд'), table([{ h: tr('Компани') }, { h: tr('Хувь'), n: 1 }, ...valCol(d.holdings), { h: tr('Огноо') }, { h: tr('Эх сурвалж') }],
+    d.holdings.map(x => `<td>${co(x)}${holdTag(x)}</td><td class="n">${x.percent != null ? fmtPct(x.percent) : ''}</td>${val(x, d.holdings)}` +
+      `<td class="d">${esc(x.as_of || '')}</td>${srcCell(x)}`)));
+  const LEVEL = { control: tr('хяналт'), influence: tr('нөлөө') };
+  h += section(tr('Хяналт, нөлөөнд буй компаниуд'), table([{ h: tr('Компани') }, { h: tr('Түвшин') }, { h: tr('Look-through'), n: 1 }, { h: tr('Гинж') }],
+    (d.controls || []).map(x => `<td>${co(x)}</td><td class="d">${LEVEL[x.level] || esc(x.level)}</td><td class="n">${fmtPct(x.lookthrough_percent)}</td>` +
+      `<td class="meta">${x.chain.map(n => esc(dnS(n))).join(' → ')}</td>`)) +
+    ((d.controls || []).length ? tr('<p class="note">Хяналт: 50%-иас дээш эзэмшлийн гинж; нөлөө: хамгийн том блок, 20%-иас дээш.</p>') : ''));
+  h += section(tr('Холбоотой компаниуд'), table([{ h: tr('Компани') }, { h: tr('Холбоо') }],
+    d.related_companies.map(r => `<td>${co(r)}</td><td class="meta">${[...new Set(r.links.map(l => l.name))].map(n => esc(dnS(n))).join(', ')}</td>`)));
+
+  // market
+  const m = d.market;
+  if (m && (m.price != null || m.market_cap != null))
+    h += section(tr('Зах зээл'), L`<div>Ханш: <b>${m.price != null ? num(m.price) + ' ₮' : '—'}</b> <span class="meta">${esc(m.price_date || '')} арилжаа</span>` +
+      (m.stale ? L` <span class="tag" title="сүүлийн арилжаа ${m.stale_days}+ хоногийн өмнө">хуучин ханш</span>` : '') + '</div>' +
+      L`<div>Зах зээлийн үнэлгээ: <b>${fmtMNT(m.market_cap)}</b>${m.market_cap_basis === 'price_x_shares' ? tr(' <span class="meta">(ханш × хувьцааны тоо)</span>') : ''}</div>` +
+      (m.shares_outstanding ? L`<div class="meta">Гаргасан хувьцаа: ${num(m.shares_outstanding)}</div>` : '') + spark(m.series || []));
+
+  // officials' declared interests, licences, tenders (issue #9)
+  const di = d.declared_interests || [];
+  if (di.length)
+    h += section(L`Хамаарал бүхий нийтийн албан тушаалтан (${di.length})`,
+      table([{ h: tr('Нэр') }, { h: tr('Албан тушаал') }, { h: tr('Мэдүүлэг') }],
+        di.map(o => `<td>${esc(dn(o))}${o.iaac ? '<span class="tag">IAAC</span>' : ''}</td><td>${esc(o.position || '')}</td><td class="d">${(o.years || []).map(esc).join(', ')}</td>`)) +
+      tr('<p class="note">Хөрөнгө, орлогын мэдүүлэгтээ (ХОМ) компанийг дурдсан нь ашиг сонирхлын мэдээлэл болохоос дүгнэлт биш. Эх сурвалж: Open Data Lab (opendatalab.mn).</p>'));
+  if (e.licenses && e.licenses.length)
+    h += section(L`Тусгай зөвшөөрөл (${e.licenses.length})`, `<ul class="plain">${e.licenses.map(l => `<li class="meta">${esc(l)}</li>`).join('')}</ul>`);
+  if (e.tenders && e.tenders.length)
+    h += section(L`Оролцсон тендер (${e.tenders.length}, шалгарсан ${e.tenders_won || 0})`, `<ul class="plain">${e.tenders.map(x => `<li class="meta">${esc(x)}</li>`).join('')}</ul>`);
+
+  // the shareholder table over time
+  const oh = d.ownership_history;
+  if (oh && oh.points.length >= 2) {
+    const pts = oh.points.slice(-8), off = oh.points.length - pts.length;
+    const rows = oh.holders.slice(0, 15).map(r => {
+      const vs = r.values.slice(off);
+      return `<td>${esc(dn(r))}</td>` + vs.map((v, i) => {
+        const prev = i ? vs[i - 1] : (off ? r.values[off - 1] : v);
+        const cls = v != null && prev != null && Math.abs(v - prev) >= 0.01 ? (v > prev ? ' up' : ' down') : '';
+        return `<td class="n${cls}">${v == null ? '—' : fmtPct(v)}</td>`;
+      }).join('');
+    });
+    h += section(tr('Эзэмшлийн түүх'), table([{ h: '' }, ...pts.map(p => ({ h: esc(p.taken_at.slice(0, 10)), n: 1 }))], rows,
+                                             oh.holders.length - 15));
+  }
+
+  // changes
+  h += section(tr('Өөрчлөлтүүд'), table([{ h: tr('Огноо') }, { h: tr('Өөрчлөлт') }],
+    d.changes.map(x => `<td class="d">${esc((x.detected_at || '').slice(0, 10))}</td><td>${describe(x)}${x.source && x.source !== 'mse' ? ` <span class="meta">· ${esc(x.source)}</span>` : ''}</td>`)) +
+    (d.changes_more ? tr('<p class="note">Өмнөх өөрчлөлтүүд графын хуудсанд.</p>') : ''));
+
+  // what ended
+  const [pp, ppMore] = cap(hist.people || [], 25), [po, poMore] = cap(hist.owners || [], 25);
+  h += section(tr('Өмнөх удирдлага / ТУЗ'), table([{ h: tr('Нэр') }, { h: tr('Албан тушаал') }, { h: tr('Хугацаа') }, { h: tr('Эх сурвалж') }],
+    pp.map(p => `<td>${esc(dn(p))}</td><td>${esc(roleTitle(p))}</td><td class="d">${period(p)}</td>${srcCell(p)}`), ppMore));
+  h += section(tr('Өмнөх хувьцаа эзэмшигчид'), table([{ h: tr('Эзэмшигч') }, { h: tr('Хувь'), n: 1 }, { h: tr('Хугацаа') }, { h: tr('Эх сурвалж') }],
+    po.map(o => `<td>${esc(dn(o))}</td><td class="n">${o.percent != null ? fmtPct(o.percent) : ''}</td><td class="d">${period(o)}</td>${srcCell(o)}`), poMore));
+  h += section(tr('Өмнөх мэдээлэл (нэр, хаяг, ...)'), table([{ h: tr('Мэдээлэл') }, { h: tr('Утга') }, { h: tr('Хугацаа') }, { h: tr('Эх сурвалж') }],
+    (hist.facts || []).map(f => `<td>${esc(FACT_LABELS[f.name] || f.name)}</td><td>${esc(f.value)}</td>` +
+      `<td class="d">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</td>${srcCell(f)}`)));
+
+  // data quality
+  const LEVEL_Q = { error: tr('алдаа'), warn: tr('анхааруулга'), info: tr('тэмдэглэл') };
+  h += section(tr('Өгөгдлийн чанар'), d.quality.length ? `<ul class="flags">${d.quality.map(i =>
+    `<li class="${i.level}"><span class="meta">${LEVEL_Q[i.level] || i.level}:</span> ${esc(issueText(i))}</li>`).join('')}</ul>` : '');
+
+  // sources and notes
+  const cov = d.coverage;
+  h += section(tr('Эх сурвалж'), `<ul class="plain">${d.sources.map(s => `<li>${srcOne(s)} <span class="meta">${L`${s.rows} мөр`}</span></li>`).join('')}</ul>` +
+    L`<p class="note">Өгөгдөл: Монголын хөрөнгийн бирж (mse.mn), Open Data Lab-ийн хуулийн этгээдийн бүртгэлийн толь (opendatalab.mn), гараар цуглуулсан мэдээлэл. Мөр бүрийн эх сурвалж хүснэгтэд бий.</p>` +
+    (cov && cov.parts ? L`<p class="note">Графын хамрах хүрээ: ${cov.parts.map(p => `${esc(EN_ON ? p.basis || p.label : p.label)} ${p.companies}/${p.of}`).join('; ')}.</p>` : ''));
+
+  h += L`<footer>MSE холбоосын граф · ${esc(d.generated_at.slice(0, 10))} · ${esc(location.origin + location.pathname)}</footer>`;
+  document.getElementById('doc').innerHTML = h;
+}
+
+// the ticker is the last part of the path: /dossier/<ticker>
+const ticker = decodeURIComponent(location.pathname.replace(/\/+$/, '').split('/').pop() || '');
+const apiUrl = `/api/companies/${encodeURIComponent(ticker)}/dossier`;
+document.getElementById('json').href = apiUrl;
+document.getElementById('back').href = '/?focus=' + encodeURIComponent('company:' + ticker) + (EN_ON ? '&lang=en' : '');
+document.getElementById('btnPrint').onclick = () => window.print();
+const langBtn = document.getElementById('langBtn');
+langBtn.textContent = EN_ON ? mn('Монгол') : 'English';
+langBtn.onclick = () => { const u = new URL(location.href); u.searchParams.set('lang', EN_ON ? 'mn' : 'en'); location.assign(u); };
+fetch(apiUrl).then(r => {
+  if (r.status === 404) throw new Error(tr('Ийм компани олдсонгүй'));
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}).then(render).catch(err => {
+  document.getElementById('doc').innerHTML = L`<p>Досье ачаалж чадсангүй: ${esc(err.message)}</p>`;
+});
+</script>
+</body>
+</html>

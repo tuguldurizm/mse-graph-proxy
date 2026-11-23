@@ -82,6 +82,13 @@ def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/dossier/{ticker}", include_in_schema=False)
+def dossier_page(ticker: str):
+    """One printable page per company (issue #10): static/dossier.html reads the ticker from the
+    path and loads /api/companies/<ticker>/dossier."""
+    return FileResponse(STATIC / "dossier.html")
+
+
 @app.get("/api/stats")
 def stats():
     return g().stats()
@@ -120,6 +127,19 @@ def sectors():
 @app.get("/api/graph/path")
 def path(a: str, b: str, max_hops: int = 8):
     return g().shortest_path(a, b, max_hops)
+
+
+@app.get("/api/companies/{ticker}/dossier")
+def company_dossier(ticker: str):
+    """Everything about one company for its printable page (issue #10, dossier.py): the entity with
+    its owners, officers and history, look-through owners, the companies it controls, flags,
+    changes, the ownership table over time, concentration, turnover, market data, data-quality
+    notes and the sources behind it all."""
+    from . import dossier
+    d = dossier.company_dossier(g(), ticker)
+    if d is None:
+        raise HTTPException(404, f"unknown company {ticker}")
+    return d
 
 
 @app.get("/api/companies/{ticker}/ultimate-owners")
