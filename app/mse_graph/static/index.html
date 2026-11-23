@@ -83,7 +83,7 @@
   <div class="row">
     <button id="btnOverview">Зах зээлийн тойм</button>
     <select id="depth"><option value="1">1 алхам</option><option value="2" selected>2 алхам</option><option value="3">3 алхам</option></select>
-    <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option></select>
+    <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option><option value="market_cap">Хэмжээ: зах зээлийн үнэлгээ</option></select>
   </div>
 
   <h2>Холбоос олох / Path</h2>
@@ -122,6 +122,9 @@
     <button id="btnAccum">Хувьцаа хуримтлуулалт</button>
     <button id="btnTrends">Зах зээлийн чиг хандлага</button>
   </div>
+  <div class="row">
+    <button id="btnMarket">Ханш, зах зээлийн үнэлгээ</button>
+  </div>
   <ul id="analysis"></ul>
 </aside>
 <main>
@@ -152,7 +155,11 @@ const network = new vis.Network(document.getElementById('net'), { nodes, edges }
 });
 let selected = null, pathA = null, pathB = null, lastDraw = null;
 // node size by a centrality score (issue #29): 12 px, up to 12 + 36 px for the largest score in view
-const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree' };
+const CEN_FIELD = { betweenness: 'centrality_betweenness', pagerank: 'centrality_pagerank', degree: 'centrality_degree',
+                    market_cap: 'market_cap' };   // market cap (issue #31): companies without one stay small
+// MNT amounts as people say them: 1.23 тэрбум ₮ (issue #31)
+const fmtMNT = v => v == null ? '—' : Math.abs(v) >= 1e12 ? `${(v / 1e12).toFixed(2)} их наяд ₮` : Math.abs(v) >= 1e9 ? `${(v / 1e9).toFixed(2)} тэрбум ₮`
+  : Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(1)} сая ₮` : `${Math.round(v).toLocaleString('en-US')} ₮`;
 function nodeSizes(list) {
   const f = CEN_FIELD[document.getElementById('sizeBy').value];
   if (!f) return null;
@@ -172,7 +179,7 @@ function draw(data, { replace = true, focus = null } = {}) {
     shape: n.type === 'Company' ? 'box' : 'dot', size: sz ? sz(n) : 12,
     font: n.type === 'Company' ? { color: '#fff', size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
     color: { background: col[n.type], border: col[n.type], highlight: { background: col[n.type], border: css('--ink') } },
-    title: `${n.type}: ${n.name}${cen(n)}`,
+    title: `${n.type}: ${n.name}${cen(n)}${n.market_cap != null ? `\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
   })));
   edges.update(data.edges.filter(Boolean).map(e => ({
     id: `${e.source}|${e.type}|${e.target}|${e.title || ''}`, from: e.source, to: e.target,
@@ -212,14 +219,15 @@ const FACT_LABELS = {name: 'Нэр', name_en: 'Англи нэр', address: 'Х�
 async function showDetails(d) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
   // Company extras load in parallel; the flags go right under the company facts.
-  const [uo, hist, chg, flags, conc, turn] = await Promise.all(isCo ? [
+  const [uo, hist, chg, flags, conc, turn, mk] = await Promise.all(isCo ? [
     api(`/api/companies/${t}/ultimate-owners`),
     api(`/api/companies/${t}/ownership-history`).catch(() => null),
     api(`/api/changes?ticker=${t}&limit=30`).catch(() => []),
     api(`/api/companies/${t}/flags`).catch(() => []),
     api(`/api/companies/${t}/concentration`).catch(() => null),
     api(`/api/companies/${t}/turnover`).catch(() => null),
-  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null, null]);
+    api(`/api/companies/${t}/market`).catch(() => null),
+  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null, null, null]);
 
   let html = `<div><b style="color:var(--ink)">${esc(e.name)}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
   for (const [k, label] of [['ticker','Тикер'],['name_en','English'],['sector','Салбар'],['register_no','Регистр'],
@@ -238,13 +246,16 @@ async function showDetails(d) {
     links.push(`<a href="${esc(e.registry_url)}" target="_blank" rel="noopener">Open Data Lab</a>` +
                (e.registry_updated ? ` <span class="meta">(${esc(e.registry_updated)})</span>` : ''));
   if (links.length) html += `<div>${links.join(' · ')}</div>`;
+  html += marketBlock(mk);
   if (flags.length) html += `<h2>Анхаарах зүйлс</h2><ul>${flags.map(f =>
     `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`;
   const pct = p => p != null ? `${p}%` : '';
+  // a stake's MNT value (issue #31): percent × the market cap of the company it is in
+  const val = x => x.value_mnt != null ? ` <span class="meta" title="эзэмшлийн хувь × зах зээлийн үнэлгээ">≈ ${fmtMNT(x.value_mnt)}</span>` : '';
   // unlisted companies (subsidiaries, registry holders) have internal '~...' tickers: show their name
   const co = x => x.ticker && !x.ticker.startsWith('~') ? x.ticker : x.name;
   const reg = o => o.percent == null && /^https?:\/\/(www\.)?opendatalab\.mn/.test(o.source || '') ? '<span class="meta">бүртгэл</span>' : '';
-  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}</span>`);
+  html += list('Хувьцаа эзэмшигчид', d.owners, o => `<span>${esc(o.name)}${holdTag(o)}${o.share_class && o.share_class !== 'common' ? ` <span class="meta">${esc(o.share_class)}</span>` : ''}</span><span>${pct(o.percent)}${reg(o)}${val(o)}</span>`);
   const own = d.ownership;
   if (own && (own.nominee.holders || own.treasury.holders))
     html += `<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
@@ -256,7 +267,9 @@ async function showDetails(d) {
   html += list('Эцсийн өмчлөгч болох компаниуд', d.beneficially_owns,
                b => `<span>${esc(co(b))}</span><span class="meta">${esc(b.since || '')}</span>`);
   html += list('Удирдлага / ТУЗ', d.people, p => `<span>${esc(p.name)}</span><span class="meta">${esc(p.title)}</span>`);
-  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}</span>`);
+  html += list('Эзэмшдэг компаниуд', d.holdings, h => `<span>${esc(co(h))}${holdTag(h)}</span><span>${pct(h.percent)}${val(h)}</span>`);
+  if (d.holdings_value_mnt != null)
+    html += `<div class="meta">Эзэмшлийн нийт үнэлгээ ≈ ${fmtMNT(d.holdings_value_mnt)} (${d.holdings_valued} компани, зах зээлийн үнэлгээгээр; шууд эзэмшил)</div>`;
   html += list('Албан тушаал', d.positions, p => `<span>${esc(p.ticker)}</span><span class="meta">${esc(p.title)}</span>`);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
@@ -364,10 +377,11 @@ const GOV = {
     }).join('') || '<li class="meta">Олдсонгүй</li>');
   },
   state: async () => {
-    const res = await api('/api/analysis/state-ownership'), rs = res.items;
-    return covLine(res.coverage) + group('Шууд / look-through') + (rs.map(s =>
+    const res = await api('/api/analysis/state-ownership'), rs = res.items, sm = res.summary || {};
+    return covLine(res.coverage) + (sm.valued ? `<li class="meta" style="cursor:default">Төрийн эзэмшлийн үнэлгээ (${sm.valued}/${sm.companies} компани, зах зээлийн үнэлгээгээр): шууд ≈ ${fmtMNT(sm.direct_value_mnt)} · look-through ≈ ${fmtMNT(sm.lookthrough_value_mnt)}</li>` : '')
+      + group('Шууд / look-through') + (rs.map(s =>
       `<li data-key="${esc(s.key)}"><span>${esc(s.ticker || s.name)} <span class="meta">${esc(s.name)}</span></span>
-       <span>${s.direct_percent ? fmtPct(s.direct_percent) : '—'} / ${fmtPct(s.lookthrough_percent)}</span></li>`).join('')
+       <span>${s.direct_percent ? fmtPct(s.direct_percent) : '—'} / ${fmtPct(s.lookthrough_percent)}${s.lookthrough_value_mnt != null ? ` <span class="meta">≈ ${fmtMNT(s.lookthrough_value_mnt)}${s.price_stale ? ' (хуучин ханш)' : ''}</span>` : ''}</span></li>`).join('')
        || '<li class="meta">Олдсонгүй</li>');
   },
 };
@@ -456,6 +470,7 @@ document.getElementById('analysis').addEventListener('click', ev => {
   const cb = ev.target.closest('button[data-cen-by]'); if (cb) return showCentrality({ by: cb.dataset.cenBy });
   const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });
   const ts = ev.target.closest('button[data-turn-sort]'); if (ts) return showTurnover(ts.dataset.turnSort);
+  const ms = ev.target.closest('button[data-msort]'); if (ms) return showMarket(ms.dataset.msort);
   const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const gr = ev.target.closest('li[data-group]'); if (gr) return showGroup(gr.dataset.group);
   const cm = ev.target.closest('li[data-community]'); if (cm) return showCommunity(cm.dataset.community);
@@ -528,7 +543,8 @@ async function showConcentration(sort = 'hhi') {
   html += `<li class="sorts">${Object.entries(CONC_SORT).map(([k, l]) =>
     `<button data-sort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
   html += `<li class="meta" style="cursor:default">${s.companies} компани · хяналттай (look-through ≥ 50%): ${s.controlled}` +
-          (s.median_hhi != null ? ` · медиан HHI ${s.median_hhi} · медиан top-1 ${fmtPct(s.median_top1)} · медиан чөлөөт ~${fmtPct(s.median_free_float)}` : '') + '</li>';
+          (s.median_hhi != null ? ` · медиан HHI ${s.median_hhi} · медиан top-1 ${fmtPct(s.median_top1)} · медиан чөлөөт ~${fmtPct(s.median_free_float)}` : '') +
+          (s.weighted_hhi != null ? ` · зах зээлийн үнэлгээгээр жигнэсэн HHI ${s.weighted_hhi} (${s.weighted_companies} компани)` : '') + '</li>';
   html += r.items.map(c => `<li class="rv${c.plausible ? '' : ' rf error'}" data-key="${esc(c.key)}">
       <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
       <div class="meta">HHI ${c.hhi} · top-1 ${fmtPct(c.top1)} · top-3 ${fmtPct(c.top3)} · чөлөөт ~${fmtPct(c.free_float_estimate)}${c.plausible ? '' : ` · нийлбэр ${fmtPct(c.total_percent)}!`}</div>
@@ -577,7 +593,7 @@ async function showGroups() {
   const r = await api('/api/analysis/groups');
   let html = covLine(r.coverage) + `<li class="meta" style="cursor:default">Эзэмшигч бүрийн хяналт (&gt; 50%, хяналттай компаниудаар дамжуулан) ба нөлөө (хамгийн том багц, ≥ 20%). Хувьгүй бүртгэлийн мөр тооцогдохгүй.</li>`;
   html += r.items.slice(0, 200).map(x => `<li class="rv" data-group="${esc(x.key)}">
-      <span class="name">${esc(x.name)} <span class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</span></span>
+      <span class="name">${esc(x.name)} <span class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}${x.lookthrough_value_mnt != null ? ` · ≈ ${fmtMNT(x.lookthrough_value_mnt)}` : ''}</span></span>
       <div class="meta">${x.companies.slice(0, 6).map(c => `${esc(coName(c))} ${CTL_MN[c.level]} ${fmtPct(c.block_percent)}`).join(' · ')}${x.companies.length > 6 ? ' …' : ''}</div></li>`).join('')
     || '<li class="meta">Үр дүн алга</li>';
   ul.innerHTML = html;
@@ -588,8 +604,9 @@ async function showGroup(key) {
   document.getElementById('details').innerHTML =
     `<div><b style="color:var(--ink)">${esc(x.name)}</b> <span class="tag ${x.type}">${x.type}</span></div>` +
     `<div class="meta">хяналт ${x.controlled} · нөлөө ${x.influenced} · бүртгэлтэй ${x.listed_companies}</div>` +
+    (x.valued_companies ? `<div class="meta">Хяналттай компаниудын зах зээлийн үнэлгээ ${fmtMNT(x.controlled_market_cap)} · look-through хувиар ≈ ${fmtMNT(x.lookthrough_value_mnt)} (${x.valued_companies} компани үнэлгээтэй)</div>` : '') +
     list('Компаниуд', x.companies, c => `<span>${esc(coName(c))} <span class="meta">${CTL_MN[c.level]} · ` +
-      `${c.chain.map(esc).join(' → ')}</span></span><span class="meta">${fmtPct(c.block_percent)} / look-through ${fmtPct(c.lookthrough_percent)}</span>`) +
+      `${c.chain.map(esc).join(' → ')}</span></span><span class="meta">${fmtPct(c.block_percent)} / look-through ${fmtPct(c.lookthrough_percent)}${c.lookthrough_value_mnt != null ? ` ≈ ${fmtMNT(c.lookthrough_value_mnt)}` : ''}</span>`) +
     `<div class="meta" style="font-size:11px">${covText(r.coverage)}</div>`;
 }
 async function showCommunities() {
@@ -715,6 +732,37 @@ async function showTrends() {
 document.getElementById('btnTurnover').onclick = () => showTurnover();
 document.getElementById('btnAccum').onclick = showAccumulation;
 document.getElementById('btnTrends').onclick = showTrends;
+
+// ---- market data (issue #31) ---------------------------------------------------------
+// The last close with the date of that trade (many MSE stocks barely trade: stale = older than
+// MARKET_STALE_DAYS before the read), shares outstanding and market cap.
+function marketBlock(r) {
+  const m = r && r.market;
+  if (!m || (m.price == null && m.market_cap == null)) return '';
+  const stale = m.stale ? ` <span class="flag" title="сүүлийн арилжаа ${m.stale_days}+ хоногийн өмнө">хуучин ханш</span>` : '';
+  const basis = m.market_cap_basis === 'price_x_shares' ? ' <span class="meta">(ханш × хувьцааны тоо)</span>' : '';
+  return `<h2>Зах зээл</h2><div>Ханш: <b>${m.price != null ? m.price.toLocaleString('en-US') + ' ₮' : '—'}</b> ` +
+    `<span class="meta">${esc(m.price_date || '')} арилжаа${m.price_as_of && m.price_as_of !== m.price_date ? ` · ${esc(m.price_as_of)}-нд уншсан` : ''}</span>${stale}</div>` +
+    `<div>Зах зээлийн үнэлгээ: <b>${fmtMNT(m.market_cap)}</b>${basis}</div>` +
+    (m.shares_outstanding ? `<div class="meta">Гаргасан хувьцаа: ${m.shares_outstanding.toLocaleString('en-US')}</div>` : '') +
+    (m.series.length > 1 ? spark(m.series, 'close') + `<div class="meta" style="display:flex; justify-content:space-between; font-size:11px"><span>${esc(m.series[0].date)}</span><span>${m.series.length} өдөр</span><span>${esc(m.series[m.series.length - 1].date)}</span></div>` : '');
+}
+async function showMarket(sort = 'cap') {
+  const ul = document.getElementById('analysis');
+  ul.innerHTML = '<li class="meta">Ачаалж байна…</li>';
+  const r = await api(`/api/analysis/market?sort=${sort}`), s = r.summary;
+  let html = covLine(r.coverage);
+  html += `<li class="sorts">${Object.entries({ cap: 'Үнэлгээ', price_date: 'Хуучин ханш эхэнд', ticker: 'Тикер' }).map(([k, l]) =>
+    `<button data-msort="${k}" class="${k === sort ? 'on' : ''}">${l}</button>`).join('')}</li>`;
+  html += `<li class="meta" style="cursor:default">${s.priced}/${s.companies} компани ханштай · ${s.with_market_cap} үнэлгээтэй · нийт ${fmtMNT(s.total_market_cap)} · ` +
+          `${s.stale} нь хуучин ханш (сүүлийн арилжаа ${s.stale_days}+ хоногийн өмнө) · уншсан ${esc(s.as_of || 'хараахан үгүй')}. Эх сурвалж: mse.mn.</li>`;
+  html += r.items.filter(c => c.price != null || c.market_cap != null).map(c => `<li class="rv" data-key="${esc(c.key)}">
+      <span class="name">${esc(c.ticker)} <span class="meta">${esc(c.name)}</span></span>
+      <div class="meta">${fmtMNT(c.market_cap)}${c.weight_percent != null ? ` (${c.weight_percent}%)` : ''} · ханш ${c.price != null ? c.price.toLocaleString('en-US') : '—'} ₮ · ${esc(c.price_date || '?')}${c.stale ? ' <span class="flag">хуучин</span>' : ''}</div></li>`).join('')
+    || '<li class="meta">Ханшийн мэдээлэл хараахан алга</li>';
+  ul.innerHTML = html;
+}
+document.getElementById('btnMarket').onclick = () => showMarket();
 
 // Deep link: /?focus=company:XAG (used by the change feed).
 const focusKey = new URLSearchParams(location.search).get('focus');

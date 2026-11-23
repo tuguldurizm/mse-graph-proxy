@@ -56,7 +56,7 @@ CALL (c) {{
 }}
 RETURN c.key AS key, c.ticker AS ticker, c.name AS name, c.sector AS sector, c.sector_mse AS sector_mse,
        c.sector_std AS sector_std, c.register_no AS register_no, c.state_reg_no AS state_reg_no,
-       c.registry_url AS registry_url, stakes, officers
+       c.registry_url AS registry_url, c.market_cap AS market_cap, stakes, officers
 ORDER BY c.ticker
 """
 
@@ -115,6 +115,8 @@ PARTS = {
     "sector": ("a sector", "салбартай", lambda r: r["sector_any"]),
     "sector_std": ("a standard sector (registry activity codes)", "стандарт салбартай (үйл ажиллагааны код)",
                    lambda r: bool(r["sector_std"])),
+    "market_cap": ("a market cap (mse.mn price x shares)", "зах зээлийн үнэлгээтэй (mse.mn)",
+                   lambda r: r.get("market_cap") is not None),
 }
 
 # The data each analysis rests on: the first part is its basis, the others add a line.
@@ -130,14 +132,15 @@ ANALYSES = {
     "nominees": ("holdings", "registry_owners"),
     "roles": ("officers", "registry_officers"),
     "resolution": ("officers", "registry_officers"),
-    "concentration": ("holdings", "holdings_plausible", "registry_owners"),
+    "concentration": ("holdings", "holdings_plausible", "registry_owners", "market_cap"),
     "quality": ("holdings", "officers", "register_no", "registry", "sector"),
-    "groups": ("holdings", "holdings_plausible", "registry_owners"),
+    "groups": ("holdings", "holdings_plausible", "registry_owners", "market_cap"),
     "communities": ("holders", "officers", "registry_owners", "registry_officers"),
     "centrality": ("holders", "officers", "registry_owners", "registry_officers"),
     "turnover": ("officers", "registry_officers"),
     "accumulation": ("holdings", "registry_owners"),
     "trends": ("holdings", "officers", "registry_owners", "registry_officers"),
+    "market": ("market_cap", "holdings"),
 }
 
 
@@ -246,6 +249,12 @@ def concentration(g, sort: str = "hhi", rows: list[dict] | None = None) -> dict:
         "median_top1": round(statistics.median(c["top1"] for c in ok), 3) if ok else None,
         "median_free_float": round(statistics.median(c["free_float_estimate"] for c in ok), 3) if ok else None,
     }
+    # market level weighted by market cap (issue #31): the HHI of the average tugrik invested
+    caps = {r["key"]: r["market_cap"] for r in rows if r.get("market_cap")}
+    weighted = [(c["hhi"], caps[c["key"]]) for c in ok if caps.get(c["key"])]
+    total = sum(w for _h, w in weighted)
+    summary["weighted_hhi"] = round(sum(h * w for h, w in weighted) / total, 1) if total else None
+    summary["weighted_companies"] = len(weighted)
     return {"items": items, "summary": summary, "coverage": coverage(g, "concentration", rows)}
 
 

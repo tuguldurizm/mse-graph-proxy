@@ -1,6 +1,7 @@
 """Full data pipeline: wait for Neo4j -> scrape mse.mn -> load -> hand-curated datasets
 (data/manual/) -> Open Data Lab registry -> discovery (registry pages of companies the graph
-doesn't have yet, discovery.py) -> check the datasets against the registry -> summary.
+doesn't have yet, discovery.py) -> market data (prices, market caps: market.py, every 12 h even
+when the scrape is skipped) -> check the datasets against the registry -> summary.
 
 Real-data runs never wipe the graph: each load is compared with the previous
 one, so people who left and stakes that changed are kept as history. Every
@@ -159,6 +160,30 @@ def discovery_step(g, fetcher, limit: int | None = None, keep_lease=None) -> Non
         set_status("running", "registry discovery done", **discovery.summary(report))
     except Exception as exc:
         set_status("running", "registry discovery failed", error=str(exc))
+        log.error(traceback.format_exc())
+
+
+def market_step(g, force: bool = False) -> None:
+    """Today's prices and market caps from mse.mn (issue #31, market.py), at most every
+    MARKET_MIN_INTERVAL_HOURS (12), also when the company scrape is skipped: it is about one
+    request per listed company. MARKET_ENABLE=0 turns it off. Never raises."""
+    from . import market
+
+    if os.getenv("MARKET_ENABLE", "1") == "0":
+        return
+    try:
+        min_hours = float(os.getenv("MARKET_MIN_INTERVAL_HOURS", "12"))
+        since = market.hours_since_read(g)
+        if since is not None and since < min_hours and not force and os.getenv("PIPELINE_FORCE") != "1":
+            set_status("running", f"skipped market data: last read {since:.1f} h ago "
+                                  f"(MARKET_MIN_INTERVAL_HOURS={min_hours:g})")
+            return
+        set_status("running", "reading market data from mse.mn")
+        res = market.step(g)
+        set_status("running", "read market data", **{k: v for k, v in res.items() if k != "errors"},
+                   errors=res["errors"][:5])
+    except Exception as exc:
+        set_status("running", "market data failed", error=str(exc))
         log.error(traceback.format_exc())
 
 
@@ -328,6 +353,7 @@ def _run(force: bool = False) -> None:
                         lease.release()
 
         if os.getenv("PIPELINE_DEMO") != "1":
+            market_step(g, force=force)
             validation_step(g)
 
         stats = g.stats()
@@ -359,6 +385,11 @@ def _run(force: bool = False) -> None:
             log.info("PIPELINE trends: %s", json.dumps(trends.summary_line(g), ensure_ascii=False))
         except Exception as exc:  # nor the trends
             log.warning("PIPELINE trends failed: %s", exc)
+        try:   # market data (#31): prices, market caps, the largest companies
+            from . import market
+            log.info("PIPELINE market: %s", json.dumps(market.summary_line(g), ensure_ascii=False))
+        except Exception as exc:  # nor the market summary
+            log.warning("PIPELINE market failed: %s", exc)
         set_status("done", "finished", stats=stats, top_interlocks=top, quality=checked)
     except Exception as exc:
         set_status("failed", "pipeline crashed", error=str(exc))

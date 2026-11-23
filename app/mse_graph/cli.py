@@ -41,6 +41,8 @@
     python -m mse_graph.cli accumulation [--json]          holders whose stake keeps rising, thresholds crossed (#30)
     python -m mse_graph.cli trends [--every auto|day|week|month] [--json]
                                                            market time series: state, interlocks, HHI (#30)
+    python -m mse_graph.cli market [--fetch [--limit N]] [--sort cap|price_date|ticker] [--ticker T] [--json]
+                                                           prices and market caps (#31); --fetch reads mse.mn first
 
 Every analysis command ends with a coverage line (on stderr for the JSON ones, so stdout
 stays JSON): how many of the listed companies its result rests on (issue #27).
@@ -169,6 +171,13 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("trends", help="market-wide time series rebuilt from the edge periods (#30)")
     p.add_argument("--every", default="auto", choices=["auto", "day", "week", "month"])
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("market", help="share prices and market caps from mse.mn (#31)")
+    p.add_argument("--fetch", action="store_true", help="read today's quotes from mse.mn and store them first")
+    p.add_argument("--limit", type=int, help="with --fetch: only the first N companies")
+    p.add_argument("--sort", default="cap", choices=["cap", "price_date", "ticker"])
+    p.add_argument("--ticker", help="one company, with its price series")
+    p.add_argument("--top", type=int, default=30, help="rows to print (0 = all)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("flags", help="governance flags for one company")
     p.add_argument("ticker")
@@ -445,6 +454,8 @@ def main(argv=None):
             _centrality_cmd(g, args)
         elif args.cmd in ("turnover", "accumulation", "trends"):
             _trends_cmd(g, args)
+        elif args.cmd == "market":
+            _market_cmd(g, args)
         elif args.cmd in ("cycles", "cross-holdings", "state", "conflicts", "flags"):
             from . import analysis
             if args.cmd == "cycles":
@@ -612,6 +623,54 @@ def _trends_cmd(g, args) -> None:
                   f" {f(p['state_mean_percent']):>6} {p['interlocks']:>6} {p['cross_holdings']:>5}"
                   f" {f(p['median_hhi']):>7} {p['officers']:>8}")
         _coverage(g, "trends", sys.stdout)
+
+
+def _mnt(v) -> str:
+    """1234567890 -> '1.23 тэрбум ₮'."""
+    if v is None:
+        return "-"
+    for f, w in ((1e12, "их наяд"), (1e9, "тэрбум"), (1e6, "сая")):
+        if abs(v) >= f:
+            return f"{v / f:.2f} {w} ₮"
+    return f"{v:,.0f} ₮"
+
+
+def _market_cmd(g, args) -> None:
+    """Market data (issue #31, market.py)."""
+    from . import market
+
+    if args.fetch:
+        res = market.step(g, limit=args.limit)
+        print(json.dumps(res, ensure_ascii=False), file=sys.stderr)
+    if args.ticker:
+        t = g.resolve_ticker(args.ticker)
+        row = market.company_market(g, g.company_keys().get(t, "company:" + t))
+        if args.json or row is None:
+            _print(row)
+            return
+        print(f"{row['ticker']}: {row['price']} ₮ ({row['price_date']}{', stale' if row['stale'] else ''}) · "
+              f"{row['shares_outstanding'] or '?'} shares · market cap {_mnt(row['market_cap'])} "
+              f"({row['market_cap_basis'] or '-'})")
+        for p in row["series"][-15:]:
+            print(f"  {p['date']}  {p['close']:>12,.2f}  {_mnt(p['market_cap'])}")
+        return
+    res = market.market(g, args.sort)
+    if args.json:
+        _print(res)
+        _coverage(g, "market")
+        return
+    s = res["summary"]
+    print(f"{s['priced']}/{s['companies']} listed companies priced, {s['with_market_cap']} with a market cap, "
+          f"{s['stale']} stale (last trade > {s['stale_days']} days before the read), total "
+          f"{_mnt(s['total_market_cap'])}, read {s['as_of'] or 'never'}")
+    rows = res["items"] if not args.top else res["items"][:args.top]
+    for r in rows:
+        if r["price"] is None and r["market_cap"] is None:
+            continue
+        print(f"{r['ticker']:<6} {r['price'] if r['price'] is not None else '-':>12} {r['price_date'] or '':<10}"
+              f"{' stale' if r['stale'] else '      '} {_mnt(r['market_cap']):>18} "
+              f"{(str(r['weight_percent']) + '%') if r['weight_percent'] is not None else '':>8}  {r['name']}")
+    _coverage(g, "market", sys.stdout)
 
 
 def _coverage(g, analysis: str, out=None) -> None:

@@ -234,8 +234,11 @@ def conflicts(kind: str | None = Query(None, pattern="^(insider_owner|competitor
 
 @app.get("/api/analysis/state-ownership")
 def state_ownership():
+    """Companies with state owners, with the MNT value of the state's stakes where a market
+    cap is known (issue #31), and totals in `summary`."""
     from . import analysis
-    return _covered("state-ownership", analysis.state_ownership(g()))
+    rows = analysis.state_ownership(g())
+    return _covered("state-ownership", {"items": rows, "summary": analysis.state_value_summary(rows)})
 
 
 @app.get("/api/analysis/nominees")
@@ -370,6 +373,27 @@ def market_trends(every: str = Query("auto", pattern="^(auto|day|week|month)$"))
     cross-holdings, median HHI and coverage counts per date, from `history_start`."""
     from . import trends
     return _covered("trends", trends.market(g(), every))
+
+
+# ---- market data (issue #31): market.py ------------------------------------------------------
+
+@app.get("/api/analysis/market")
+def market(sort: str = Query("cap", pattern="^(cap|price_date|ticker)$")):
+    """Every listed company's last price (with the date of that trade; `stale` when it is more
+    than MARKET_STALE_DAYS old), shares outstanding and market cap, largest first, with totals."""
+    from . import market as mk
+    return _covered("market", mk.market(g(), sort))
+
+
+@app.get("/api/companies/{ticker}/market")
+def company_market(ticker: str):
+    """One company's quote and its daily price / market-cap series."""
+    from . import market as mk, quality
+    t = g().resolve_ticker(ticker)
+    row = mk.company_market(g(), g().company_keys().get(t, "company:" + t))
+    if row is None:
+        raise HTTPException(404, f"unknown company {ticker}")
+    return {"market": row, "coverage": quality.coverage(g(), "market")}
 
 
 # ---- review decisions (issue #6) -----------------------------------------------------
