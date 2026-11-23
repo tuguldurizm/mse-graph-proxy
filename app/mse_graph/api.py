@@ -129,6 +129,15 @@ def path(a: str, b: str, max_hops: int = 8):
     return g().shortest_path(a, b, max_hops)
 
 
+@app.get("/api/ask")
+def ask(q: str = Query(..., min_length=1, max_length=300)):
+    """Ask the graph (issue #10, ask.py): a question in plain Mongolian or English, answered by one
+    of a fixed set of read-only queries (the question never becomes Cypher). The answer names the
+    intent it ran, the entities it understood and the other candidates, the rows and a view to open."""
+    from . import ask as ask_mod
+    return ask_mod.answer(g(), q)
+
+
 @app.get("/api/companies/{ticker}/dossier")
 def company_dossier(ticker: str):
     """Everything about one company for its printable page (issue #10, dossier.py): the entity with
