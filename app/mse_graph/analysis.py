@@ -21,8 +21,9 @@ accordingly.
     nominees          holders that keep shares for others, stakes by holding type, and
                       holders that may be nominees but aren't marked (issue #39)
 
-Family links count only once a reviewer has confirmed them (RELATED_TO edges, relations.py):
-the possible links from shared patronymics are hypotheses and never reach these checks.
+Family links count when a reviewer has confirmed them (RELATED_TO edges, relations.py) or a company
+disclosed them for a shareholder on mse.mn (AFFILIATED_WITH with `family`, affiliations.py): the
+possible links from shared patronymics are hypotheses and never reach these checks.
 
 Only stakes that are ownership count (holdings.REAL: `direct` or `unknown`): a custodian
 holding shares for its clients is not an owner, a controller or a related party, and a
@@ -194,13 +195,15 @@ def related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict
 
 
 def family_related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
-    """Officers of a company whose confirmed relative (RELATED_TO, issue #32) has a post or a
-    stake >= min_stake in the same company (`same_company`) or in a company that owns it or
-    that it owns. Only confirmed links are edges, so hypotheses never show here."""
+    """Officers of a company whose relative has a post or a stake >= min_stake in the same company
+    (`same_company`) or in a company that owns it or that it owns. A relative is a confirmed link
+    (RELATED_TO, issue #32) or a family tie a company disclosed for a shareholder (AFFILIATED_WITH
+    with `family`, affiliations.py). Hypotheses are never edges, so they never show here."""
     rows = g.run(
         """
         MATCH (p:Person)-[h:HOLDS_POSITION {current: true}]->(c:Company)
-        MATCH (p)-[fam:RELATED_TO]-(q:Person) WHERE q <> p
+        MATCH (p)-[fam:RELATED_TO|AFFILIATED_WITH]-(q:Person)
+        WHERE q <> p AND (type(fam) = 'RELATED_TO' OR (fam.current AND fam.family))
         MATCH (q)-[r:OWNS|HOLDS_POSITION {current: true}]->(s:Company)
         WHERE type(r) = 'HOLDS_POSITION' OR (coalesce(r.percent, 0) >= $min AND REAL_R)
         WITH p, c, q, fam, s, collect(DISTINCT h.title) AS titles_c,
@@ -214,7 +217,8 @@ def family_related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> li
                CASE WHEN s = c THEN 'same_company' WHEN startNode(link) = s THEN 'shareholder'
                     ELSE 'subsidiary' END AS relation,
                link.percent AS percent,
-               {key: q.key, name: q.name, basis: fam.basis, source: fam.source} AS relative
+               {key: q.key, name: q.name, basis: coalesce(fam.basis, fam.relation_std), source: fam.source,
+                relation: fam.relation, disclosed_by: fam.company} AS relative
         """.replace("REAL_R", _REAL_R).replace("REAL_LINK", real("link")),
         min=min_stake,
     )

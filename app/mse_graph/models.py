@@ -78,6 +78,23 @@ class BeneficialOwner:
 
 
 @dataclass
+class Affiliation:
+    """A related party a company discloses for one of its shareholders (issue #10): open.mse.mn's
+    "Түүнтэй нэгдмэл сонирхолтой этгээд" table in the holder's row. `relation` is the page's word
+    ("эхнэр", "охин компани", "Хувьцаа эзэмшигч"); affiliations.relation_std() classifies it.
+    The party's shares and percent are its own stake in the company (mostly 0)."""
+    company_ticker: str
+    holder_name: str
+    party_name: str
+    relation: str = ""
+    party_shares: int | None = None
+    party_percent: float | None = None
+    holder_type: str = ""            # "person" | "organization" | "" (auto-detect)
+    party_type: str = ""
+    source: str = ""
+
+
+@dataclass
 class CompanyFacts:
     """Registry facts for an existing company. Loading only fills empty properties,
     so it never overwrites what mse.mn says. Every fact is also kept as a dated
@@ -134,6 +151,8 @@ class Dataset:
     facts: list[CompanyFacts] = field(default_factory=list)
     # officials' declared interests, licences, tenders (registry pages, issue #9)
     registry_lists: list[RegistryLists] = field(default_factory=list)
+    # related parties disclosed per shareholder (open.mse.mn, affiliations.py)
+    affiliations: list[Affiliation] = field(default_factory=list)
     # Date (YYYY-MM-DD) the data was observed, e.g. the scrape date. The loader
     # stamps first_seen / last_seen / until with it; empty means "today".
     observed_at: str = ""
@@ -163,6 +182,7 @@ class Dataset:
         self.beneficial_owners += other.beneficial_owners
         self.facts += other.facts
         self.registry_lists += other.registry_lists
+        self.affiliations += other.affiliations
         self.observed_at = self.observed_at or other.observed_at
         self.supplementary = self.supplementary or other.supplementary
         for kind, scopes in other.snapshots.items():
@@ -178,6 +198,8 @@ class Dataset:
             out["beneficial_owners"] = len(self.beneficial_owners)
         if self.facts:
             out["company_facts"] = len(self.facts)
+        if self.affiliations:
+            out["affiliations"] = len(self.affiliations)
         if any(r.declarations for r in self.registry_lists):
             out["declared_interests"] = sum(len(r.declarations) for r in self.registry_lists)
         return out

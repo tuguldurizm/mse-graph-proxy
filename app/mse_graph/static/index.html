@@ -306,11 +306,13 @@ function render() {
   edges.update(vis.map(e => ({
     id: edgeId(e), from: e.source, to: e.target,
     label: e.type === 'OWNS' ? (e.percent != null ? `${e.percent}%` : tr('эзэмшил')) + (HOLD_TAG[e.holding_type] ? ` (${HOLD_TAG[e.holding_type]})` : '')
-         : e.type === 'BENEFICIAL_OWNER' ? tr('эцсийн өмчлөгч') : roleTitle(e),
+         : e.type === 'BENEFICIAL_OWNER' ? tr('эцсийн өмчлөгч')
+         : e.type === 'AFFILIATED_WITH' ? relText(e) : roleTitle(e),
     dashes: e.type === 'HOLDS_POSITION' ? true : e.type === 'BENEFICIAL_OWNER' ? [2, 4]
+          : e.type === 'AFFILIATED_WITH' ? [1, 4]          // a disclosed related party: not a stake
           : HOLD_TAG[e.holding_type] ? [6, 3] : false,   // held for clients / own shares: not ownership
     width: e.type === 'OWNS' ? 1 + Math.min(6, (e.percent || 0) / 10) : 1,
-    color: { color: e.type === 'HOLDS_POSITION' ? css('--person') : HOLD_TAG[e.holding_type] ? css('--muted') : css('--company'),
+    color: { color: e.type === 'HOLDS_POSITION' ? css('--person') : e.type === 'AFFILIATED_WITH' || HOLD_TAG[e.holding_type] ? css('--muted') : css('--company'),
              opacity: .7 },
   })));
   showLegend(cats, mode, [...ns.values()]);
@@ -444,6 +446,11 @@ async function showDetails(d) {
   html += list(tr('Албан тушаал'), d.positions, p => `<span>${esc(co(p))}</span><span class="meta">${esc(roleTitle(p))}</span>${src(p)}`);
   html += list(tr('Ураг төрлийн холбоо (баталгаажсан)'), d.relatives,
                r => `<span>${esc(dn(r))} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
+  // a shareholder's related parties as the company disclosed them on mse.mn: "out" = this entity's row
+  // names the other, "in" = another holder's row names this one
+  const affRow = a => `<span>${esc(dn(a))} <span class="meta">${esc(relText(a))}${a.direction === 'in' ? tr(' (тэдний мэдээлсэн)') : ''}</span></span>` +
+    `<span class="meta">${esc(a.company && !a.company.startsWith('~') ? a.company : dnS(a.company_name || ''))}</span>${src(a)}`;
+  html += list(tr('Нэгдмэл сонирхолтой этгээд (ХК-ийн мэдээлсэн)'), d.affiliations, affRow);
   // ended links (people who left, stakes sold or resized), most recent first
   const h = d.history || {};
   const period = i => `<span class="meta" style="white-space:nowrap">${esc(i.since || i.first_seen || '?')} – ${esc(i.until || '?')}</span>`;
@@ -458,6 +465,8 @@ async function showDetails(d) {
   html += list(tr('Өмнөх мэдээлэл (нэр, хаяг, ...)'), h.facts,
                f => `<span>${esc(FACT_LABELS[f.name] || dn(f))}: ${esc(f.value)}</span>` +
                     `<span class="meta" style="white-space:nowrap">${esc(f.first_seen || '?')} – ${esc(f.until || '?')}</span>${src(f)}`);
+  html += list(tr('Өмнөх нэгдмэл сонирхолтой этгээд'), h.affiliations,
+               a => `<span>${esc(dn(a))} <span class="meta">${esc(relText(a))}</span></span>${period(a)}${src(a)}`);
   html += list(tr('Өмнөх албан тушаал'), h.positions,
                p => `<span>${esc(co(p))} <span class="meta">${esc(roleTitle(p))}</span></span>${period(p)}${src(p)}`);
   html += list(tr('Холбоотой компаниуд'), d.related_companies,
@@ -582,6 +591,13 @@ const RV_REASON = {
   one_letter: tr('нэг үсгээр зөрүүтэй'), transliteration: tr('латин / кирилл, ижил төстэй үсэг'), missing_initial: tr('эцгийн нэрийн үсэггүй'),
 };
 const BASIS_MN = {sibling: tr('ах дүү'), parent_child: tr('эцэг эх / хүүхэд'), spouse: tr('эхнэр нөхөр'), relative: tr('төрөл'), none: tr('холбоогүй')};
+// related parties a company disclosed for a shareholder (mse.mn, affiliations.py): the kind of each relation
+const AFF_MN = {spouse: tr('эхнэр / нөхөр'), parent_child: tr('эцэг эх / хүүхэд'), sibling: tr('ах эгч дүү'),
+  relative: tr('төрөл садан'), parent_company: tr('толгой компани'), subsidiary: tr('охин компани'),
+  beneficial_owner: tr('эцсийн өмчлөгч'), officer: tr('удирдлага'), shareholder: tr('хувьцаа эзэмшлийн холбоо'),
+  affiliate: tr('хамаарал бүхий'), other: tr('нэгдмэл сонирхолтой')};
+// the page's own word in Mongolian ("эхнэр"), the kind in English
+const relText = x => EN_ON ? (AFF_MN[x.relation_std] || x.relation_std || '') : (x.relation || AFF_MN[x.relation_std] || '');
 const REL_EVIDENCE = {shared_companies: tr('нэг компанид'), linked_companies: tr('компаниуд нь бие биенээ эзэмшдэг'),
                       same_group: tr('нэг бүлэгт'), same_clan: tr('ижил ургийн овог')};
 const reviewPw = (ask = true) => {

@@ -375,6 +375,8 @@ def _run(force: bool = False) -> None:
                 if not limit and not part:
                     g.mark_scrape()
                 track(g, loaded, ds, "mse")
+                from . import affiliations
+                log.info("PIPELINE affiliations: %s", json.dumps(affiliations.summary(g), ensure_ascii=False))
             except Exception as exc:
                 set_status("running", "mse.mn scrape failed", error=str(exc))
                 log.error(traceback.format_exc())

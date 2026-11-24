@@ -291,6 +291,11 @@ def main(argv=None):
     g_.add_argument("--refresh", action="store_true")
     g_.add_argument("--rebuild", action="store_true")
     p.add_argument("--ticker", action="append", help="with --refresh: these tickers instead of the default five")
+    p = sub.add_parser("affiliations",
+                       help="related parties the companies disclose per shareholder on mse.mn (affiliations.py): "
+                            "counts, or one company's list with --ticker")
+    p.add_argument("--ticker")
+    p.add_argument("--all", action="store_true", help="with --ticker: ended links too")
     p = sub.add_parser("repair-nested",
                        help="once: correct the stakes the nested-table bug loaded from open.mse.mn shareholder "
                             "tabs (2026-11-24); one request per suspicious company")
@@ -485,6 +490,10 @@ def main(argv=None):
                 r = notify.send(changes)
                 print(f"alerts: {r['sent']} sent via {', '.join(r['channels']) or 'no channel configured'}"
                       + (f"; errors: {r['errors']}" if r["errors"] else ""), file=sys.stderr)
+        elif args.cmd == "affiliations":
+            from . import affiliations
+            _print(affiliations.company_affiliations(g, g.resolve_ticker(args.ticker), current=not args.all)
+                   if args.ticker else affiliations.summary(g))
         elif args.cmd == "repair-nested":
             from . import layout
             _print(layout.repair_nested(g, dry_run=args.dry_run, force=args.force))

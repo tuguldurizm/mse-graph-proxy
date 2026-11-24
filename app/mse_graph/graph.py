@@ -10,6 +10,7 @@ Graph model
 (:Entity:Organization {key, name, org_type, register_no?})  -- shareholders outside the company lists
 (:Person)-[:RELATED_TO {basis, source, note, decided_by, decided_at}]->(:Person)  -- confirmed family links
                        only (relations.py, issue #32), rebuilt from data/overrides/relations.csv and decisions
+(:Entity)-[:AFFILIATED_WITH {company, relation, relation_std, family, source, current, until}]->(:Entity)  -- related parties a company disclosed for a shareholder (mse.mn, affiliations.py)
 
 A company is one legal entity (issue #35): its key is `company:<register_no>`
 (the registry's 7-digit number) when known, else `company:<TICKER>`; unlisted
@@ -118,6 +119,7 @@ from typing import Any
 
 from neo4j import GraphDatabase
 
+from . import affiliations as affiliations_mod
 from . import holdings as hold
 from . import officials as officials_mod
 from . import provenance
@@ -224,7 +226,8 @@ VIEW_NODE = ("n {.key, .name, .name_en, .ticker, .centrality_degree, .centrality
              "RETURN CASE WHEN a.ticker IS NOT NULL AND NOT a.ticker STARTS WITH '~' THEN a.ticker ELSE a.name END }) END, "
              "type: " + _TYPE.format("n") + "}")
 VIEW_EDGE = ("{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent, title: r.title, "
-             "role: r.role, role_std: r.role_std, holding_type: r.holding_type}")
+             "role: r.role, role_std: r.role_std, holding_type: r.holding_type, relation: r.relation, "
+             "relation_std: r.relation_std, company: r.company}")
 
 
 def _opt(value):
@@ -1362,7 +1365,7 @@ class Graph:
                 tmap[t] = new
             elif reg and reg not in by_reg:
                 by_reg[reg] = t
-        for t in {x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners} | \
+        for t in {x.company_ticker.upper() for x in ds.shareholdings + ds.positions + ds.beneficial_owners + ds.affiliations} | \
                  {x.holder_ticker.upper() for x in ds.shareholdings if x.holder_ticker} | \
                  {f.ticker.upper() for f in ds.facts} | {x.ticker.upper() for x in ds.registry_lists} | \
                  {t.upper() for scopes in ds.snapshots.values() for t in scopes}:
@@ -1375,7 +1378,7 @@ class Graph:
             if c.ticker.upper() in tmap:
                 c.merged_from, c.ticker = c.ticker.upper(), tmap[c.ticker.upper()]
                 c.merge_only = True
-        for x in ds.shareholdings + ds.positions + ds.beneficial_owners:
+        for x in ds.shareholdings + ds.positions + ds.beneficial_owners + ds.affiliations:
             x.company_ticker = tmap.get(x.company_ticker.upper(), x.company_ticker)
         for x in ds.shareholdings:
             if x.holder_ticker:
@@ -1581,6 +1584,7 @@ class Graph:
         changes.update(self._load_shareholdings(ds, when, run, people))
         changes.update(self._load_positions(ds, when, run, people))
         changes.update(self._load_beneficial_owners(ds, when, run, people))
+        changes.update(affiliations_mod.load(self, ds, when, run, people))   # related parties (mse.mn)
         self._note_names(people.noted)
         if adopted:
             changes["people_linked"] = adopted
@@ -2636,6 +2640,12 @@ class Graph:
         out["history"]["declared_interests"] = di["ended"]
         # confirmed family links only (issue #32); hypotheses are never served here
         out["relatives"] = relations_mod.relatives(self, key) if out["entity"]["type"] == "Person" else []
+        # related parties a company disclosed for a shareholder (mse.mn, affiliations.py): both ways
+        aff = affiliations_mod.for_entity(self, key)
+        for a in aff:
+            provenance.annotate(a)
+        out["affiliations"] = [a for a in aff if a["current"]]
+        out["history"]["affiliations"] = [a for a in aff if not a["current"]]
         return out
 
     @staticmethod
@@ -2677,7 +2687,7 @@ class Graph:
         rows = self.run(
             f"""
             MATCH (e:Entity {{key: $key}})
-            OPTIONAL MATCH path = (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*1..{depth}]-(:Entity)
+            OPTIONAL MATCH path = (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER|AFFILIATED_WITH*1..{depth}]-(:Entity)
             WHERE all(r IN relationships(path) WHERE r.current)
             WITH e, path LIMIT $limit
             WITH e, collect(path) AS paths
@@ -2743,7 +2753,7 @@ class Graph:
         rows = self.run(
             f"""
             MATCH (a:Entity {{key: $a}}), (b:Entity {{key: $b}})
-            MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER*..{max_hops}]-(b))
+            MATCH p = shortestPath((a)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER|AFFILIATED_WITH*..{max_hops}]-(b))
             WHERE all(r IN relationships(p) WHERE r.current)
             RETURN [n IN nodes(p) | {VIEW_NODE}] AS nodes,
                    [r IN relationships(p) | {VIEW_EDGE}] AS edges
