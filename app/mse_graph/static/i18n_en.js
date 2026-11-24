@@ -492,6 +492,7 @@ const EN = {
  "Хувьцаа эзэмшигч": "Shareholder",
  "хараат компани": "associate",
  "хуудас": "page",
+ "Ногдол ашгийн шийдвэр": "Dividend decision",
  "Тайлангийн PDF-ээс автоматаар уншсан мөр: шалгаагүй, эзэмшилд тооцоогүй.": "Lines read automatically from the report PDFs: not checked, not counted as stakes.",
  "PDF-ээс автоматаар уншсан: шалгаагүй, эзэмшилд тооцоогүй.": "Read automatically from the PDFs: not checked, not counted as stakes."
 };

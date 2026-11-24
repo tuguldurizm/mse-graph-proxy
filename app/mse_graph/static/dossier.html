@@ -314,8 +314,8 @@ function render(d) {
   const rp = d.reports || {items: [], findings: []};
   const RK = {annual_report: tr('Үйл ажиллагааны тайлан'), financial_statement: tr('Санхүүгийн тайлан'),
               audit: tr('Аудитын тайлан'), meeting: tr('Хурлын материал'), governance: tr('Засаглалын баримт бичиг'),
-              esg: tr('Тогтвортой байдлын тайлан'), other: tr('Бусад')};
-  const docs = rp.items.filter(x => x.current && x.kind !== 'meeting' && x.kind !== 'other');
+              esg: tr('Тогтвортой байдлын тайлан'), dividend: tr('Ногдол ашгийн шийдвэр'), other: tr('Бусад')};
+  const docs = rp.items.filter(x => x.current && !['meeting', 'other', 'dividend'].includes(x.kind));
   if (docs.length) {
     const [shown, more] = cap(docs, 15);
     h += section(tr('Тайлангууд'), table([{ h: tr('Он') }, { h: tr('Төрөл') }, { h: tr('Баримт бичиг') }],

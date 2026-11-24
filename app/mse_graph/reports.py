@@ -52,7 +52,9 @@ from .normalize import clean, parse_date
 
 log = logging.getLogger(__name__)
 
-STEP_VERSION = 1
+# 2: titles from the tables' columns, kinds from the upload folder, dividend decisions (first live run, 2026-11-24).
+# A new version re-reads every company's tabs before the rotation goes on, and the PDFs read before it.
+STEP_VERSION = 2
 
 # tab slug -> the kind a document there has when its title says nothing
 TABS = {"operations": "annual_report", "financials": "financial_statement",
@@ -65,15 +67,27 @@ KINDS = {
     "meeting": "Хурлын материал",
     "governance": "Засаглалын баримт бичиг",
     "esg": "Тогтвортой байдлын тайлан",
+    "dividend": "Ногдол ашгийн шийдвэр",
     "other": "Бусад",
 }
 # kinds whose PDFs are read for findings, in this order
 READ_KINDS = ("annual_report", "financial_statement", "audit")
 
+# the upload folder on issuers.mse.mn says what a file is (seen 2026-11-24: activityreport, finance_reports,
+# stockm_dec_files, dividend_files); checked before the words
+_PATH_KINDS = [
+    ("dividend", re.compile(r"/dividend", re.I)),
+    ("audit", re.compile(r"/audit", re.I)),
+    ("annual_report", re.compile(r"/activity_?report", re.I)),
+    ("financial_statement", re.compile(r"/financ\w*_?report|/finance", re.I)),
+    ("esg", re.compile(r"/esg|/sustainab", re.I)),
+    ("meeting", re.compile(r"/stockm|/meeting", re.I)),
+]
 # title words -> kind, checked in this order (an activity report often says "санхүү" too)
 _KIND_RULES = [
+    ("dividend", re.compile(r"ногдол ашиг|dividend", re.I)),
     ("audit", re.compile(r"аудит|audit", re.I)),
-    ("esg", re.compile(r"тогтвортой|байгаль орчин|\besg\b|sustainab", re.I)),
+    ("esg", re.compile(r"тогтвортой|байгаль орчин|\besg\b|бонз|sustainab", re.I)),
     ("governance", re.compile(r"засаглал|governance|дүрэм|журам|charter|bylaw", re.I)),
     ("meeting", re.compile(r"хурал|хурлын|meeting|agenda|хэлэлцэх асуудал", re.I)),
     ("annual_report", re.compile(r"үйл ажиллагаа|жилийн тайлан|annual report|operations report", re.I)),
@@ -82,15 +96,20 @@ _KIND_RULES = [
 
 DOC_EXT = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar")
 _DOC_PATH = re.compile(r"/(storage|uploads?|files?|documents?|attachments?|media|download)s?/|download|getfile", re.I)
-# link texts that say nothing about the document
-_GENERIC = re.compile(r"^(татах|үзэх|харах|дэлгэрэнгүй|файл|download|view|open|pdf|more|татаж авах|энд дарна уу)\W*$",
-                      re.I)
-_GENERIC_WORDS = re.compile(r"\b(татах|үзэх|харах|дэлгэрэнгүй|download|view)\b", re.I)
+# link texts that say nothing about the document (open.mse.mn's are "PDF" / "XLS")
+_GENERIC = re.compile(r"^(татах|үзэх|харах|дэлгэрэнгүй|файл|download|view|open|pdf|xlsx?|docx?|more|татаж авах|"
+                      r"энд дарна уу)\W*$", re.I)
+_GENERIC_WORDS = re.compile(r"(?<!\w)(татах|үзэх|харах|дэлгэрэнгүй|download|view|pdf|xlsx?|docx?)(?!\w)", re.I)
 _YEAR = re.compile(r"(?<!\d)(19[89]\d|20[0-4]\d)(?!\d)")
 _DATE = re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}")
 _HALF = re.compile(r"хагас|half|semi|6 сар", re.I)
 _QUARTER = re.compile(r"улира?л|quarter|\bq[1-4]\b", re.I)
 _ANNUAL = re.compile(r"жилийн|annual|\bжил\b|year", re.I)
+# table columns (lower case): what they hold
+_COL_SKIP = re.compile(r"^(№|#|файл|file|татах|\s*)$", re.I)
+_COL_YEAR = re.compile(r"^(он|year|тайлант он)$", re.I)
+_COL_QUARTER = re.compile(r"^(улирал|quarter)$", re.I)
+_COL_DATE = re.compile(r"огноо|date", re.I)
 
 
 def batch_size() -> int:
@@ -133,7 +152,84 @@ def _container_text(a) -> str:
     return ""
 
 
-def period_of(text: str) -> str:
+def _heading(table) -> str:
+    """The title a table sits under (open.mse.mn: a heading before each table, e.g. "БОНЗ, Тогтвортой
+    байдлын тайлан"), else ""."""
+    if table.caption:
+        return clean(table.caption.get_text(" "))[:80]
+    prev = table.find_previous(["h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "legend", "caption"])
+    if prev is not None and prev.find_parent("table") is None:
+        text = clean(prev.get_text(" "))
+        if 2 <= len(text) <= 80:
+            return text
+    return ""
+
+
+def _table_row(a) -> dict | None:
+    """{heading, cells: [(header, text)], link_header} of the table row a link sits in, else None."""
+    tr = a.find_parent("tr")
+    table = tr.find_parent("table") if tr is not None else None
+    if table is None:
+        return None
+    head = table.find("thead")
+    head_row = head.find("tr") if head is not None else next(
+        (r for r in table.find_all("tr") if r.find("th") and not r.find("td")), None)
+    headers = [clean(c.get_text(" ")) for c in head_row.find_all(["th", "td"])] if head_row is not None else []
+    cells = tr.find_all(["td", "th"], recursive=False)
+    pairs, link_header = [], ""
+    for i, cell in enumerate(cells):
+        h = headers[i] if i < len(headers) else ""
+        if a in cell.find_all("a"):
+            link_header = h
+        pairs.append((h, clean(cell.get_text(" "))))
+    return {"heading": _heading(table), "cells": pairs, "link_header": link_header}
+
+
+def _title_from_row(row: dict, own: str) -> tuple[str, int | None, int | None, str | None]:
+    """(title, year, quarter, date) from a table row: the heading, the year and quarter columns, the
+    describing columns, and the header of the link's own column when it isn't just "Файл"."""
+    parts, year, quarter, day = [], None, None, None
+    for h, text in row["cells"]:
+        hl = h.lower()
+        text = clean(_GENERIC_WORDS.sub(" ", text))
+        if not text or _COL_SKIP.match(hl) or _GENERIC.match(text):
+            continue
+        if _COL_YEAR.match(hl) and _YEAR.search(text):
+            year = int(_YEAR.search(text).group(1))
+        elif _COL_QUARTER.match(hl) and re.fullmatch(r"[1-4]", text):
+            quarter = int(text)
+        elif _COL_DATE.search(hl):
+            day = day or (parse_date(_DATE.search(text).group(0)) if _DATE.search(text) else None)
+        elif not re.fullmatch(r"[\d.,%\s-]+", text):
+            parts.append(text)
+    lead = row["heading"]
+    if year:
+        lead = f"{lead} {year} он".strip()
+    if quarter:
+        lead = f"{lead}, {quarter}-р улирал"
+    link = clean(re.sub(r"/?\(?\bфайл\b\)?/?", " ", row["link_header"], flags=re.I))   # "Хурлын шийдвэр /файл/"
+    extra = [link] if link and not _COL_SKIP.match(link.lower()) else []
+    if own and not _GENERIC.match(own):
+        extra.append(own)
+    title = clean(" · ".join(x for x in [lead, *parts[:2], *extra] if x))
+    return title, year, quarter, day
+
+
+def kind_of(text: str, tab: str, url: str = "") -> str:
+    path = urlsplit(url).path if url else ""
+    for kind, rule in _PATH_KINDS:
+        if path and rule.search(path):
+            return kind
+    for kind, rule in _KIND_RULES:
+        if rule.search(text):
+            return kind
+    return TABS.get(tab, "other")
+
+
+def period_of(text: str, quarter: int | None = None) -> str:
+    """annual / half / quarter. A quarter column's 4 is the year's report, 2 the half-year one."""
+    if quarter:
+        return {4: "annual", 2: "half"}.get(quarter, "quarter")
     if _QUARTER.search(text):
         return "quarter"
     if _HALF.search(text):
@@ -143,15 +239,10 @@ def period_of(text: str) -> str:
     return ""
 
 
-def kind_of(text: str, tab: str) -> str:
-    for kind, rule in _KIND_RULES:
-        if rule.search(text):
-            return kind
-    return TABS.get(tab, "other")
-
-
 def parse_tab(html: str, url: str, tab: str) -> list[dict]:
-    """The documents a tab links to: [{url, title, year, period, kind, tab, ext, date}], each URL once."""
+    """The documents a tab links to: [{url, title, year, quarter, period, kind, tab, ext, date, host}],
+    each URL once. In a table, the title is built from its heading and columns (open.mse.mn's link texts
+    are just "PDF" / "XLS"); elsewhere from the link's text, else its row's."""
     soup = BeautifulSoup(html, "lxml")
     out, seen = [], set()
     for a in soup.find_all("a", href=True):
@@ -160,20 +251,28 @@ def parse_tab(html: str, url: str, tab: str) -> list[dict]:
             continue
         seen.add(href)
         own = clean(a.get_text(" ") or a.get("title") or "")
-        row = _container_text(a)
-        title = own if own and not _GENERIC.match(own) else clean(_GENERIC_WORDS.sub(" ", row)) or own
+        row_text = _container_text(a)
+        row = _table_row(a)
+        year = quarter = day = None
+        if row is not None:
+            title, year, quarter, day = _title_from_row(row, own)
+        else:
+            title = own if own and not _GENERIC.match(own) else clean(_GENERIC_WORDS.sub(" ", row_text)) or own
         if not title:
             title = urlsplit(href).path.rsplit("/", 1)[-1]
         title = title[:300]
-        context = f"{title} {row}"
-        years = _YEAR.findall(title) or _YEAR.findall(row) or _YEAR.findall(href)
-        day = _DATE.search(row)
+        context = f"{title} {row_text}"
+        if year is None:
+            years = _YEAR.findall(title) or _YEAR.findall(row_text) or _YEAR.findall(href)
+            year = int(years[0]) if years else None
+        if day is None:
+            m = _DATE.search(row_text)
+            day = parse_date(m.group(0)) if m else None
         path = urlsplit(href).path.lower()
         ext = next((e.lstrip(".") for e in DOC_EXT if path.endswith(e)), "")
-        out.append({"url": href, "title": title, "year": int(years[0]) if years else None,
-                    "period": period_of(context), "kind": kind_of(title or context, tab), "tab": tab,
-                    "ext": ext, "date": parse_date(day.group(0)) if day else None,
-                    "host": urlsplit(href).hostname or ""})
+        out.append({"url": href, "title": title, "year": year, "quarter": quarter,
+                    "period": period_of(context, quarter), "kind": kind_of(context, tab, href), "tab": tab,
+                    "ext": ext, "date": day, "host": urlsplit(href).hostname or ""})
     return out
 
 
@@ -212,6 +311,8 @@ _PCT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,4})?)\s*%")
 # a section's lines are read until this many lines pass without a finding
 SECTION_SPAN = 60
 MAX_FINDINGS = 40
+# lines with a percent in a section that gave no finding: logged (not stored), to tune the parser
+UNMATCHED_LINES = 8
 
 
 def _org_name(line: str) -> str | None:
@@ -231,6 +332,7 @@ def analyse_text(pages: list[str], total_pages: int | None = None) -> dict:
     findings, seen = [], set()
     current, quiet = None, 0
     text_pages = 0
+    unmatched: list[str] = []
     for n, text in enumerate(pages, start=1):
         if len(clean(text)) >= 50:
             text_pages += 1
@@ -257,6 +359,8 @@ def analyse_text(pages: list[str], total_pages: int | None = None) -> dict:
             value = float(pct.group(1).replace(",", "."))
             name = _org_name(line[:pct.start()]) or _org_name(line)
             if not name or not 0 < value <= 100:
+                if len(unmatched) < UNMATCHED_LINES:
+                    unmatched.append(f"{n}: {line[:120]}")
                 continue
             k = (_FINDING_KIND[current], name.lower(), value)
             if k in seen:
@@ -269,7 +373,8 @@ def analyse_text(pages: list[str], total_pages: int | None = None) -> dict:
     read = len(pages)
     return {"pages": total_pages if total_pages is not None else read, "pages_read": read,
             "text_pages": text_pages, "scanned": read > 0 and text_pages / read < 0.3,
-            "sections": {k: v[:10] for k, v in sections.items() if v}, "findings": findings}
+            "sections": {k: v[:10] for k, v in sections.items() if v}, "findings": findings,
+            "unmatched": unmatched}
 
 
 def analyse_pdf(data: bytes, page_limit: int | None = None) -> dict:
@@ -323,7 +428,8 @@ def write_company(g, key: str, docs: list[dict], when: str) -> dict:
         MERGE (r:Report {url: d.url})
         ON CREATE SET r.first_seen = $when, r.new = true
         ON MATCH SET r.new = false
-        SET r.title = d.title, r.year = d.year, r.period = d.period, r.kind = d.kind, r.tab = d.tab,
+        SET r.title = d.title, r.year = d.year, r.quarter = d.quarter, r.period = d.period, r.kind = d.kind,
+            r.tab = d.tab,
             r.ext = d.ext, r.date = d.date, r.host = d.host, r.last_seen = $when, r.current = true,
             r.source = 'mse.mn', r.gone_at = null
         MERGE (c)-[:PUBLISHED]->(r)
@@ -454,7 +560,7 @@ def read_pdfs(g, fetcher=None, budget: int | None = None, when: str | None = Non
         report["scanned"] += bool(res.get("scanned"))
         report["findings"] += len(res.get("findings") or [])
         log.info("REPORTS pdf %s %s: %s", r["ticker"], r["url"][-80:], json.dumps(
-            {k: res.get(k) for k in ("pages", "pages_read", "text_pages", "scanned", "sections")} |
+            {k: res.get(k) for k in ("pages", "pages_read", "text_pages", "scanned", "sections", "unmatched")} |
             {"findings": (res.get("findings") or [])[:5]}, ensure_ascii=False))
     return report
 
@@ -466,13 +572,27 @@ def hours_since_step(g) -> float | None:
     return (datetime.now(timezone.utc) - datetime.fromisoformat(rows[0]["at"])).total_seconds() / 3600
 
 
+def upgrade(g) -> dict | None:
+    """After a parser change (STEP_VERSION): every company's tabs are due again, and the PDFs read by an
+    older version are read again. None when nothing changed."""
+    rows = g.run("MATCH (m:Meta {key: 'reports'}) RETURN m.version AS v")
+    if not rows or (rows[0]["v"] or 0) >= STEP_VERSION:
+        return None
+    companies = g.run("MATCH (c:Company) WHERE c.reports_read_at IS NOT NULL REMOVE c.reports_read_at "
+                      "RETURN count(c) AS n")[0]["n"]
+    pdfs = g.run("""MATCH (r:Report) WHERE r.pdf_read_at IS NOT NULL AND coalesce(r.pdf_version, 0) < $v
+                    REMOVE r.pdf_read_at, r.pdf_error RETURN count(r) AS n""", v=STEP_VERSION)[0]["n"]
+    return {"from": rows[0]["v"], "to": STEP_VERSION, "companies": companies, "pdfs": pdfs}
+
+
 def step(g, fetcher=None, when: str | None = None) -> dict:
     """The pipeline's reports step: index a batch of companies, then read a few PDFs."""
     from .scraper import Fetcher
 
     fetcher = fetcher or Fetcher()
     when = when or date.today().isoformat()
-    res = {"index": index(g, fetcher, when=when)}
+    res = {"upgraded": upgrade(g)}
+    res["index"] = index(g, fetcher, when=when)
     res["pdf"] = read_pdfs(g, fetcher, when=when) if pdf_budget() > 0 else {"read": 0}
     g.run("MERGE (m:Meta {key: 'reports'}) SET m.at = $at, m.version = $v", at=_utc_now(), v=STEP_VERSION)
     res["summary"] = summary(g)
