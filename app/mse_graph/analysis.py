@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from .graph import Graph
 from .holdings import real
-from .normalize import is_state
+from .normalize import comparable_sector, is_state, mse_sector_code, sector_std_name
 
 # a stake that is ownership (not nominee or treasury), for the relationship variable r
 _REAL_R = real("r")
@@ -122,38 +122,111 @@ def insider_owners(g: Graph) -> list[dict]:
     )
 
 
-def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
-    """People or entities with a post, or a stake >= min_stake, in two+ companies of the same sector.
+# A company or organisation holding at least this much of a company puts the two in one group
+# (significant influence, as in IAS 28), and so are companies it holds that much of: they are
+# related parties, not competitors.
+GROUP_STAKE = 20.0
 
-    The sector is the standard one (`sector_std`, the ISIC section of the registry's main
-    activity code, issue #38). A company without registry activity codes falls back to the
-    company list's sector text (`sector_mse`), so it is compared only with companies that
-    have the same text and no standard sector. `sector_std` says which kind a row is."""
+
+def _find(parent: dict[str, str], k: str) -> str:
+    parent.setdefault(k, k)
+    while parent[k] != k:
+        parent[k] = parent[parent[k]]
+        k = parent[k]
+    return k
+
+
+def ownership_groups(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> tuple[dict[str, str], set[frozenset]]:
+    """(groups, pairs) for telling competitors from related companies.
+
+    `groups`: company key -> its group's representative, for companies joined by real stakes
+    >= GROUP_STAKE held by a company or organisation (a parent and its subsidiaries, sister
+    companies, the companies one state body owns). `pairs`: two companies where one holds a
+    real stake >= min_stake in the other, which ties those two only. People never join
+    companies: two companies one person controls are what the competitor check is about."""
+    rows = g.run(
+        f"""
+        MATCH (h:Entity)-[o:OWNS {{current: true}}]->(c:Company)
+        WHERE h <> c AND (h:Company OR h:Organization) AND NOT h:Person AND {real("o")}
+          AND coalesce(o.percent, 0) >= $min
+        RETURN h.key AS h, h:Company AS company, c.key AS c, o.percent AS percent
+        """, min=min(min_stake, GROUP_STAKE))
+    parent: dict[str, str] = {}
+    pairs: set[frozenset] = set()
+    for r in rows:
+        if r["percent"] >= GROUP_STAKE:
+            a, b = _find(parent, r["h"]), _find(parent, r["c"])
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+        if r["company"] and r["percent"] >= min_stake:
+            pairs.add(frozenset((r["h"], r["c"])))
+    return {k: _find(parent, k) for k in parent}, pairs
+
+
+def _clusters(keys: list[str], groups: dict[str, str], pairs: set[frozenset]) -> int:
+    """How many of `keys` are apart: not one group and not a pair."""
+    local: dict[str, str] = {}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if (groups.get(a, a) == groups.get(b, b)) or frozenset((a, b)) in pairs:
+                x, y = _find(local, a), _find(local, b)
+                if x != y:
+                    local[max(x, y)] = min(x, y)
+    return len({_find(local, k) for k in keys})
+
+
+def _sector_label(key: str, div: str, sec: str, cos: list[dict]) -> str:
+    """mse.mn's own text for the sector a row matched on, else the section's name."""
+    for co in cos:
+        code = mse_sector_code(co["sector_mse"])
+        if co["sector_mse"] and (key.startswith("text:") or code == (div or sec)):
+            return co["sector_mse"]
+    return sector_std_name(sec) or cos[0]["sector"]
+
+
+def competitor_links(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
+    """People or entities with a post, or a stake >= min_stake, in two+ companies of the same sector
+    that are not one group or a holder and its holding (ownership_groups).
+
+    Companies compare on normalize.comparable_sector: the ISIC division of mse.mn's sector text
+    (MSE_SECTOR_DIVISIONS), else of the registry's main activity, else the section alone, else
+    the text. `sector_div` and `sector_std` (the section) say what a row matched on; `sector` is
+    the mse.mn text or the section's name, for display. Checked on the live graph on 2026-11-24
+    (issue #10): before, one division spelled two ways, or known from mse.mn for one company and
+    from the registry for another, never matched, and a parent and its own subsidiary counted as
+    competitors."""
     rows = g.run(
         """
         MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION {current: true}]->(c:Company)
         WHERE x <> c AND (type(r) = 'HOLDS_POSITION' OR (coalesce(r.percent, 0) >= $min AND REAL_R))
-        WITH x, r, c, CASE WHEN c.sector_std IS NOT NULL THEN 'std:' + c.sector_std
-                           WHEN coalesce(c.sector_mse, c.sector, '') <> ''
-                           THEN 'text:' + toLower(coalesce(c.sector_mse, c.sector)) END AS sector_key
-        WHERE sector_key IS NOT NULL
-        WITH x, sector_key, c, collect({rel: type(r), title: r.title, percent: r.percent}) AS roles
-        WITH x, sector_key, collect({key: c.key, ticker: c.ticker, name: c.name, sector: c.sector,
-                                     sector_std: c.sector_std, roles: roles}) AS companies,
-             head(collect(coalesce(c.sector_std_name, c.sector_mse, c.sector))) AS sector
+        WITH x, c, collect({rel: type(r), title: r.title, percent: r.percent}) AS roles
+        WITH x, collect({key: c.key, ticker: c.ticker, name: c.name, sector: c.sector, sector_mse: c.sector_mse,
+                         sector_std: c.sector_std, activity_main: c.activity_main, roles: roles}) AS companies
         WHERE size(companies) >= 2
-        RETURN 'competitor' AS kind, x.key AS key, x.name AS name,
-               [l IN labels(x) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type,
-               sector, CASE WHEN sector_key STARTS WITH 'std:' THEN substring(sector_key, 4) END AS sector_std,
-               companies
-        ORDER BY size(companies) DESC, name
+        RETURN x.key AS key, x.name AS name,
+               [l IN labels(x) WHERE l IN ['Company', 'Person', 'Organization']][0] AS type, companies
         """.replace("REAL_R", _REAL_R),
         min=min_stake,
     )
+    groups, pairs = ownership_groups(g, min_stake) if rows else ({}, set())
+    out = []
     for row in rows:
+        by_sector: dict[tuple, list[dict]] = {}
         for co in row["companies"]:
-            co["roles"] = _roles(co["roles"])
-    return rows
+            match = comparable_sector(co["sector_mse"] or co["sector"], co["activity_main"], co["sector_std"])
+            if match[0]:
+                by_sector.setdefault(match, []).append(co)
+        for (key, div, sec), cos in by_sector.items():
+            if len(cos) < 2 or _clusters([co["key"] for co in cos], groups, pairs) < 2:
+                continue
+            out.append({"kind": "competitor", "key": row["key"], "name": row["name"], "type": row["type"],
+                        "sector": _sector_label(key, div, sec, cos), "sector_std": sec or None,
+                        "sector_div": div or None,
+                        "companies": [{"key": co["key"], "ticker": co["ticker"], "name": co["name"],
+                                       "sector": co["sector"], "sector_std": co["sector_std"],
+                                       "roles": _roles(co["roles"])} for co in cos]})
+    out.sort(key=lambda r: (-len(r["companies"]), r["name"] or "", r["sector"] or ""))
+    return out
 
 
 def related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
@@ -266,7 +339,9 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
 
     `direct_percent` sums stakes held directly by state bodies. `lookthrough_percent`
     follows chains from the top state owners (those not themselves owned by another
-    state body), so Government -> State holding -> X is counted once.
+    state body), so Government -> State holding -> X is counted once. A state-owned
+    company is listed too (Төрийн банк, owned by the Ministry of Finance): only state
+    bodies that are not companies are left out as targets.
     """
     keys = [r["key"] for r in state_entities(g)]
     if not keys:
@@ -277,7 +352,7 @@ def state_ownership(g: Graph, max_depth: int = 5) -> list[dict]:
         MATCH (s:Entity) WHERE s.key IN $keys
           AND NOT EXISTS {{ MATCH (t:Entity)-[x:OWNS {{current: true}}]->(s) WHERE t.key IN $keys AND {real("x")} }}
         MATCH p = (s)-[:OWNS*1..{max_depth}]->(c:Company)
-        WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL AND {_REAL_R}) AND NOT c.key IN $keys
+        WHERE all(r IN relationships(p) WHERE r.current AND r.percent IS NOT NULL AND {_REAL_R}) AND c <> s
           AND {_SIMPLE}
         WITH c, s, sum(reduce(x = 100.0, r IN relationships(p) | x * r.percent / 100.0)) AS eff
         WITH c, sum(eff) AS lookthrough, collect({{key: s.key, name: s.name, percent: round(eff, 3)}}) AS via
