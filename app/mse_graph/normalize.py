@@ -16,7 +16,7 @@ from dataclasses import dataclass
 _ORG_MARKERS = [
     "ххк", "хк", "төхк", "төк", "өхк", "ххн", "хзх", "ббсб", "ттб", "ҮЦК", "ҮЦ",
     "компани", "корпораци", "групп", "холдинг", "банк", "сан", "нөхөрлөл", "хоршоо",
-    "засгийн газар", "төрийн", "өмчийн", "яам", "агентлаг", "газар", "хороо",
+    "засгийн газар", "төрийн", "өмч", "өмчийн", "яам", "яамны", "холбоо", "хурал", "агентлаг", "газар", "хороо",
     "llc", "jsc", "ltd", "inc", "plc", "corp", "corporation", "company", "co.",
     "group", "holding", "holdings", "bank", "fund", "capital", "partners", "trust",
     "limited", "gmbh", "ag", "s.a.", "b.v.", "pte", "government", "ministry",
@@ -139,9 +139,12 @@ def entity_key(name: str, kind: str = "") -> str:
       "Б.Батболд" is one of them is decided by the loader, which knows the company
       (Graph._people_resolver)
     * `kind="organization"` forces an organisation key for names without a
-      legal-form marker (e.g. a registry row typed "Хуулийн этгээд")
+      legal-form marker (e.g. a registry row typed "Хуулийн этгээд"); `kind="person"`
+      forces the person reading (the key a name had before a marker made it an organisation)
     """
     n = _QUOTES_RE.sub("", clean(name)).casefold()
+    if kind.startswith("person"):
+        return person_name(n).key
     if kind.startswith("org") or is_organization(n):
         n = _SPACE_RE.sub(" ", re.sub(r"[^\w\s]", " ", n)).strip()
         # "Багануур ХК" (MSE) == "Багануур" (registry): ignore a trailing legal form
@@ -307,14 +310,25 @@ def split_reg_numbers(*numbers: str | None) -> tuple[str, str]:
 ORG_TYPES = ("state", "foreign", "fund", "other")
 
 # Name markers of state or municipal owners (Mongolian / English).
+# Names of state and municipal bodies and of state-owned companies, matched as whole words.
+# Checked against the live graph on 2026-11-24 (governance check validation, issue #10): a place
+# word alone ("аймгийн", "дүүргийн") marked herders' and pasture users' associations as the state,
+# so local bodies are named by what they are (council, governor's office, property office); the
+# genitive forms ("засгийн газрын", "яамны") and local property ("орон нутгийн өмч", the holder
+# of BTG, BDL and TTL on mse.mn) were missed.
 STATE_MARKERS = [
-    "төрийн", "засгийн газар", "яам", "аймгийн", "нийслэлийн", "дүүргийн", "төк", "төхк",
-    "эрдэнэс монгол", "монгол банк", "нийгмийн даатгалын сан",
+    "төрийн", "засгийн газар", "засгийн газрын", "яам", "яамны", "нийслэлийн", "төк", "төхк",
+    "орон нутгийн өмч", "орон нутгийн өмчийн", "орон нутгийн өмчит",
+    "иргэдийн төлөөлөгчдийн хурал", "засаг даргын", "тамгын газар", "өмчийн харилцааны газар",
+    "хотын захиргаа", "эрдэнэс монгол", "монгол банк", "монгол улсын хөгжлийн банк",
+    "нийгмийн даатгалын сан",
     "government", "ministry", "state property", "state-owned", "state owned", "municipal",
-    "erdenes mongol", "bank of mongolia",
+    "erdenes mongol", "bank of mongolia", "development bank of mongolia",
 ]
 _STATE_RE = re.compile(r"(?<![\w])(" + "|".join(re.escape(m) for m in STATE_MARKERS) + r")(?![\w])",
                        re.IGNORECASE)
+# "Төрийн бус байгууллага" is a non-governmental organisation.
+_NOT_STATE_RE = re.compile(r"(?<![\w])төрийн\s+бус(?![\w])", re.IGNORECASE)
 # Investment and pension funds.
 _FUND_RE = re.compile(r"(?<![\w])(сан|фонд|fund|funds|trust|etf)(?![\w])", re.IGNORECASE)
 # Foreign legal forms. Only names written wholly in Latin letters count: Mongolian
@@ -326,12 +340,12 @@ _FOREIGN_RE = re.compile(
 _CYRILLIC_RE = re.compile(r"[а-яёөүА-ЯЁӨҮ]")
 # Changes whenever the name rules change, so graph.consolidate_companies re-types organisations.
 ORG_TYPES_VERSION = hashlib.sha1(
-    (_STATE_RE.pattern + _FUND_RE.pattern + _FOREIGN_RE.pattern).encode()).hexdigest()[:12]
+    (_STATE_RE.pattern + _NOT_STATE_RE.pattern + _FUND_RE.pattern + _FOREIGN_RE.pattern).encode()).hexdigest()[:12]
 
 
 def is_state(name: str | None) -> bool:
     """Whether a name marks a state or municipal body or a state-owned company."""
-    return bool(_STATE_RE.search(clean(name).lower()))
+    return bool(_STATE_RE.search(_NOT_STATE_RE.sub(" ", clean(name).lower())))
 
 
 def org_type_from_name(name: str | None) -> str:
@@ -428,6 +442,88 @@ def main_activity(codes: list[str]) -> str:
 def sector_std_name(section: str | None, lang: str = "mn") -> str:
     entry = SECTIONS_STD.get(section or "")
     return "" if entry is None else entry[1 if lang == "mn" else 2]
+
+
+# ---- mse.mn's sector texts as ISIC divisions (governance check validation, issue #10) ----
+#
+# mse.mn names a listed company's sector with the Mongolian title of an MNSIC / ISIC Rev. 4
+# division ("Хүнсний бүтээгдэхүүний үйлдвэрлэл" is division 10), sometimes in a shorter
+# spelling of its own ("Хүнсний үйлдвэрлэл"). Every text the live graph held on 2026-11-24 is
+# here, so two spellings of one division compare as one sector. "Санхүүгийн бусад үйл
+# ажиллагаа" is mse.mn's catch-all for banks, brokers, the exchange and lenders alike: only
+# its section (K) is known. A text not listed is compared only with the same text.
+
+MSE_SECTOR_DIVISIONS = {
+    "агуулахын болон тээврийн туслах үйл ажиллагаа": "52",
+    "аж ахуйн нэгжийн удирдах дээд байгууллагын үйл ажиллагаа, менежментийн зөвлөгөө өгөх үйл ажиллагаа": "70",
+    "албан байгууллагын удирдлагын болон туслах үйл ажиллагаа, бизнесийн бусад туслах үйл ажиллагаа": "82",
+    "албан журмын нийгмийн даатгалаас бусад даатгал, давхар даатгал, тэтгэврийн санхүүжилтын үйл ажиллагаа": "65",
+    "архитектур болон инженерийн үйл ажиллагаа; техникийн туршилт, шинжилгээ": "71",
+    "арьс, арьсан бүтээгдэхүүн үйлдвэрлэл": "15",
+    "аялал, жуулчлалын агентлаг, аяллын оператор болон захиалгат бусад үйлчилгээний үйл ажиллагаа": "79",
+    "барилга угсралт": "41",
+    "барилгын тусгай үйл ажиллагаа": "43",
+    "бохир ус цуглуулах, цэвэршүүлэх, ариутгах үйл ажиллагаа": "37",
+    "бусад ашигт малтмал олборлолт": "08",
+    "бусад боловсруулах үйлдвэрлэл": "32",
+    "газар тариалан, мал аж ахуйн үйлдвэрлэл, ан агнуур болон түүнд холбогдох туслах үйл ажиллагаа": "01",
+    "гишүүнчлэл бүхий байгууллагын үйл ажиллагаа": "94",
+    "даатгалын болон тэтгэврийн санхүүжилтийн үйл ажиллагаанаас бусад санхүүгийн үйлчилгээний үйл ажиллагаа": "64",
+    "зочид буудал, байр, сууцаар үйлчлэх үйл ажиллагаа": "55",
+    "иргэний зориулалттай инженерийн байгууламжийн угсралтын үйл ажиллагаа": "42",
+    "компьютер програмчлал, зөвлөгөө болон түүнд холбогдох үйл ажиллагаа": "62",
+    "машин, мотоциклээс бусад барааны бөөний худалдаа": "46",
+    "машин, мотоциклээс бусад барааны жижиглэн худалдаа": "47",
+    "менежментийн зөвлөх үйлчилгээ": "70",
+    "металл үйлдвэрлэл": "24",
+    "металлын хүдэр олборлолт": "07",
+    "нийтийн хоолны үйлчилгээ": "56",
+    "нэхмэлийн үйлдвэрлэл": "13",
+    "санхүүгийн бусад үйл ажиллагаа": "K",
+    "түрээс, лизингийн үйл ажиллагаа": "77",
+    "төмөрлөг бус эрдэс бодисоор хийсэн эдлэл үйлдвэрлэл": "23",
+    "ус цуглуулах, ариутгах, ус хангамж": "36",
+    "уул уурхайн олборлолтын туслах үйл ажиллагаа": "09",
+    "хог хаягдлыг цуглуулах, ариутгах, боловсруулах үйл ажиллагаа": "38",
+    "хуурай замын болон хий дамжуулах хоолойн тээвэрлэлт": "49",
+    "хүнсний бүтээгдэхүүний үйлдвэрлэл": "10",
+    "хүнсний үйлдвэрлэл": "10",
+    "цахилгаан холбоо": "61",
+    "цахилгаан, хий, уур, агааржуулалт": "35",
+    "чулуун, хүрэн нүүрс олборлолт": "05",
+    "шингэн хүнсний үйлдвэрлэл": "11",
+    "шуудан, зарлага, элчийн үйл ажиллагаа": "53",
+    "үл хөдлөх хөрөнгийн үйл ажиллагаа": "68",
+}
+
+
+def mse_sector_code(text: str | None) -> str:
+    """The ISIC division ("10") or, for a catch-all text, the section ("K") of an mse.mn sector
+    text; "" for a text not in MSE_SECTOR_DIVISIONS."""
+    return MSE_SECTOR_DIVISIONS.get(clean(text).casefold(), "")
+
+
+def comparable_sector(sector_mse: str | None, activity_main: str | None = None,
+                      sector_std: str | None = None) -> tuple[str, str, str]:
+    """(key, division, section) on which two companies count as the same sector.
+
+    The ISIC division where one is known: mse.mn's sector text first (how the exchange
+    classifies a listed company; the registry's first activity is often a side line, such
+    as APU's trade), else the registry's main activity code. Then the section alone (an
+    mse.mn catch-all text, or `sector_std`), then the text itself. Keys of different kinds
+    never match: a company known only as section K is not compared with banks (64) or
+    insurers (65). ("", "", "") when nothing is known."""
+    code = mse_sector_code(sector_mse)
+    if code.isdigit():
+        return "div:" + code, code, isic_section(code)
+    digits = re.sub(r"\D", "", activity_main or "")
+    if len(digits) >= 2 and isic_section(digits):
+        return "div:" + digits[:2], digits[:2], isic_section(digits)
+    section = code or (sector_std or "")
+    if section:
+        return "sec:" + section, "", section
+    text = clean(sector_mse).casefold()
+    return ("text:" + text, "", "") if text else ("", "", "")
 
 
 def split_activities(text: str | None) -> list[str]:

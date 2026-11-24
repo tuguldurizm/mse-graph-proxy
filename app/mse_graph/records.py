@@ -152,8 +152,9 @@ class Override:
 
     @property
     def keys(self) -> set[str]:
-        """The name keys this row matches: the spelling read as a person and as an organisation."""
-        return {name_key(self.name), name_key(self.name, "organization")}
+        """The name keys this row matches: the spelling read by today's rules, as a person and as an
+        organisation (records written before a name rule changed keep the key they had then)."""
+        return {name_key(self.name), name_key(self.name, "organization"), name_key(self.name, "person")}
 
     @property
     def label(self) -> str:
