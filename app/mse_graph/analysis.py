@@ -395,7 +395,8 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
     def add(kind, level, text, keys=()):
         flags.append({"kind": kind, "level": level, "text": text, "keys": list(keys)})
 
-    for cyc in cycles(g):
+    from .memo import cached
+    for cyc in cached(g, "cycles", cycles):
         tickers = [_co(n) for n in cyc["companies"]]
         if ticker in tickers:
             i = tickers.index(ticker)
@@ -405,7 +406,7 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
             label = "Харилцан эзэмшил" if cyc["mutual"] else "Тойрог эзэмшил"
             add(kind, "warn", f"{label}: {' → '.join(ring)}{pct}", [n["key"] for n in cyc["companies"]])
 
-    for x in cross_holdings(g):
+    for x in cached(g, "cross_holdings", cross_holdings):
         if x["company"] == ticker and x["reverse_percent"] is None:
             add("listed_holder", "info", f"Бүртгэлтэй компани {x['holder']} {x['percent']:g}% эзэмшдэг"
                 if x["percent"] is not None else f"Бүртгэлтэй компани {x['holder']} эзэмшдэг", [x["holder_key"]])
@@ -424,20 +425,20 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
     if held["treasury"]["holders"] and held["treasury"]["percent"] is not None:
         add("treasury", "info", f"Өөрийн (буцаан авсан) хувьцаа: {held['treasury']['percent']:g}%")
 
-    for s in state_ownership(g):
+    for s in cached(g, "state_ownership", state_ownership):
         if s["key"] == me:
             direct = f"шууд {s['direct_percent']:g}%, " if s["direct_percent"] else ""
             add("state", "info", f"Төрийн оролцоо: {direct}look-through {s['lookthrough_percent']:g}%",
                 [o["key"] for o in s["top_owners"]])
 
-    for c in insider_owners(g):
+    for c in cached(g, "insider_owners", insider_owners):
         co = c["companies"][0]
         if co["ticker"] == ticker:
             pct = f" {co['percent']:g}%-ийг" if co["percent"] is not None else ""
             add("insider_owner", "info", f"{c['name']} ({', '.join(co['titles'])}) компанийн хувьцааны{pct} эзэмшдэг",
                 [c["key"]])
 
-    for c in competitor_links(g, min_stake):
+    for c in cached(g, "competitor_links", competitor_links, min_stake):
         tickers = [co["ticker"] for co in c["companies"]]
         if ticker in tickers:
             mine = next(co for co in c["companies"] if co["ticker"] == ticker)
@@ -447,7 +448,7 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
                 f"{c['name']} ({', '.join(mine['roles'])}) ижил салбарын ({c['sector']}) өөр компанид бас оролцоотой — {others}",
                 [c["key"]] + [co["key"] for co in c["companies"]])
 
-    for r in related_parties(g, min_stake):
+    for r in cached(g, "related_parties", related_parties, min_stake):
         sides = {r["company"]["key"], r["counterparty"]["key"]}
         if me in sides and r["relative"]:
             q = r["relative"]

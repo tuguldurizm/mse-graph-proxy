@@ -304,6 +304,8 @@ def run(force: bool = False) -> None:
         _run(force)
     finally:
         stop.set()
+        from . import memo
+        memo.clear()        # the API's cached analyses (memo.py) describe the graph before this run
 
 
 def _run(force: bool = False) -> None:

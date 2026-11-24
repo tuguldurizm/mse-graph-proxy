@@ -345,7 +345,15 @@ class PeopleResolver:
             seen["variants"].append(variant)
 
 
+# a query that may change the graph: it moves Graph.generation, which drops memo.py's entries
+_WRITE_RE = re.compile(r"\b(MERGE|CREATE|SET|DELETE|REMOVE|DROP)\b", re.IGNORECASE)
+
+
 class Graph:
+    # moves on every write query through any Graph in this process (memo.py): the pipeline writes
+    # through its own Graph, the API reads through another
+    generation = 0
+
     def __init__(self, uri=None, user=None, password=None, database=None):
         uri = uri or settings.neo4j_uri
         auth = (user or settings.neo4j_user, password or settings.neo4j_password)
@@ -395,10 +403,17 @@ class Graph:
         return self._run(cypher, params)
 
     def _run(self, cypher: str, params: dict) -> list[dict[str, Any]]:
-        if self.http:
-            return self.driver.run(cypher, params)
-        with self.session() as s:
-            return [r.data() for r in s.run(cypher, **params)]
+        write = bool(_WRITE_RE.search(cypher))
+        if write:
+            Graph.generation += 1
+        try:
+            if self.http:
+                return self.driver.run(cypher, params)
+            with self.session() as s:
+                return [r.data() for r in s.run(cypher, **params)]
+        finally:
+            if write:       # again once it is committed: a read that started meanwhile isn't kept
+                Graph.generation += 1
 
     # ---- schema / admin -----------------------------------------------------
 

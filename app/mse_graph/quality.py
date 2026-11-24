@@ -163,7 +163,11 @@ def coverage(g, analysis: str | None = None, rows: list[dict] | None = None) -> 
          "parts": [{"name", "basis", "label", "companies", "of"}, ...],
          "text": "based on 158/160 companies; registry owners (Open Data Lab) for 2/160"}
     """
-    counts = coverage_counts(company_rows(g) if rows is None else rows)
+    if rows is None:      # the per-company views ask for it on every click (memo.py)
+        from .memo import cached
+        counts = cached(g, "coverage_counts", lambda g_: coverage_counts(company_rows(g_)))
+    else:
+        counts = coverage_counts(rows)
     names = ANALYSES.get(analysis or "", tuple(PARTS))
     of = counts["of"]
     parts = [{"name": n, "basis": PARTS[n][0], "label": PARTS[n][1], "companies": counts[n], "of": of}
@@ -266,12 +270,13 @@ def concentration(g, sort: str = "hhi", rows: list[dict] | None = None) -> dict:
 def company_concentration(g, key: str) -> dict | None:
     """The concentration row of one company (None when it has no disclosed percentages)."""
     key = g.resolve_key(key)
-    rows = [r for r in company_rows(g) if r["key"] == key]
+    from .memo import cached
+    rows = [r for r in cached(g, "company_rows", company_rows) if r["key"] == key]
     if not rows:
         return None
     from .analysis import state_entities
-    state = {s["key"] for s in state_entities(g)}
-    top = {t["key"]: t["top"] for t in g.run(_LOOKTHROUGH)}.get(key)
+    state = cached(g, "state_keys", lambda g_: {s["key"] for s in state_entities(g_)})
+    top = cached(g, "lookthrough_top", lambda g_: {t["key"]: t["top"] for t in g_.run(_LOOKTHROUGH)}).get(key)
     return _concentration(rows[0], state, top)
 
 

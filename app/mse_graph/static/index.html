@@ -83,6 +83,15 @@
   a.dossier { font-size:12px; padding:3px 8px; border:1px solid var(--line); border-radius:6px; color:var(--accent); text-decoration:none; }
   a.dossier:hover { border-color:var(--accent); }
   .flag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--accent); color:var(--accent); margin-left:4px; }
+  .loading { display:inline-flex; align-items:center; gap:6px; }
+  .spin { width:12px; height:12px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%;
+          animation:spin .8s linear infinite; flex:none; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration:2.4s; } }
+  #busy { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); z-index:5; background:var(--panel);
+          border:1px solid var(--line); border-radius:14px; padding:4px 12px; font-size:12px; color:var(--muted);
+          box-shadow:0 1px 4px rgba(0,0,0,.12); }
+  #busy[hidden] { display:none; }
   @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows: 45vh 55vh; } aside { order:2; } }
 </style>
 </head>
@@ -170,6 +179,7 @@
 </aside>
 <main>
   <div id="net"></div>
+  <div id="busy" hidden role="status" aria-live="polite"><span class="loading"><span class="spin"></span>Ачаалж байна…</span></div>
   <div class="legend" id="legend">
     <span style="--c:var(--company)">Компани</span>
     <span style="--c:var(--person)">Хувь хүн</span>
@@ -338,19 +348,35 @@ function showLegend(cats, mode, all) {
   box.innerHTML = html || item('var(--none)', tr('Ангилал алга'));
 }
 
+// Clicking a node: the details panel says it is loading at once (and a pill over the graph, which
+// is what a phone shows first), the node's own facts appear as soon as /api/entity answers, and
+// each company extra (flags, concentration, market, history, ...) fills its place when it arrives.
+// `openSeq` drops answers that come back after another node was clicked.
+let openSeq = 0;
+const LOADING = () => `<span class="loading"><span class="spin"></span>${tr('Ачаалж байна…')}</span>`;
+function busy(on) { document.getElementById('busy').hidden = !on; }
 async function open(key) {
+  const seq = ++openSeq;
   selected = key;
   const depth = document.getElementById('depth').value;
-  const [g, d] = await Promise.all([
-    api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}`),
-    api(`/api/entity?key=${encodeURIComponent(key)}`),
-  ]);
-  // an old link (company:APU, company:~2702673) resolves to the node's current key
-  key = selected = (d && d.entity && d.entity.key) || key;
-  shown = { kind: 'focus', key };
-  draw(g, { focus: key });
-  network.selectNodes([key]);
-  showDetails(d);
+  const box = document.getElementById('details');
+  box.innerHTML = `<div class="meta">${LOADING()}</div>`;
+  busy(true);
+  const ent = api(`/api/entity?key=${encodeURIComponent(key)}`);
+  const nb = api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}`);
+  ent.then(d => { if (seq === openSeq) showDetails(d, seq); },
+           () => { if (seq === openSeq) box.innerHTML = tr('<span class="meta">Ачаалж чадсангүй. Дахин оролдоно уу.</span>'); });
+  try {
+    const [g, d] = await Promise.all([nb, ent]);
+    if (seq !== openSeq) return;
+    // an old link (company:APU, company:~2702673) resolves to the node's current key
+    key = selected = (d && d.entity && d.entity.key) || key;
+    shown = { kind: 'focus', key };
+    draw(g, { focus: key });
+    network.selectNodes([key]);
+  } finally {
+    if (seq === openSeq) busy(false);
+  }
 }
 
 // where a link comes from (issue #10): each source (the one that owns the link first) with a link
@@ -382,18 +408,25 @@ function list(title, items, fmt) {
 const FACT_LABELS = {name: tr('Нэр'), name_en: tr('Англи нэр'), address: tr('Хаяг'), legal_form: tr('Хэлбэр'),
                      sector: tr('Салбар'), activity_codes: tr('Үйл ажиллагааны код')};
 
-async function showDetails(d) {
+async function showDetails(d, seq = openSeq) {
   const e = d.entity, isCo = e.type === 'Company', t = encodeURIComponent(e.ticker || '');
-  // Company extras load in parallel; the flags go right under the company facts.
-  const [uo, hist, chg, flags, conc, turn, mk] = await Promise.all(isCo ? [
-    api(`/api/companies/${t}/ultimate-owners`),
-    api(`/api/companies/${t}/ownership-history`).catch(() => null),
-    api(`/api/changes?ticker=${t}&limit=30`).catch(() => []),
-    api(`/api/companies/${t}/flags`).catch(() => []),
-    api(`/api/companies/${t}/concentration`).catch(() => null),
-    api(`/api/companies/${t}/turnover`).catch(() => null),
-    api(`/api/companies/${t}/market`).catch(() => null),
-  ] : [[], null, api(`/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []), [], null, null, null]);
+  // Company extras load in parallel and each fills its slot when it arrives, so the node's own
+  // facts show at once; the flags go right under the company facts.
+  const later = (name, p, render) => {
+    p.then(v => {
+      const el = seq === openSeq && document.querySelector(`#details [data-slot="${name}"]`);
+      if (el) el.outerHTML = render(v) || '';
+    });
+    return `<div data-slot="${name}">${isCo || name === 'chg' ? `<div class="meta">${LOADING()}</div>` : ''}</div>`;
+  };
+  const none = Promise.resolve(null);
+  const uo = isCo ? api(`/api/companies/${t}/ultimate-owners`).catch(() => []) : none;
+  const hist = isCo ? api(`/api/companies/${t}/ownership-history`).catch(() => null) : none;
+  const chg = api(isCo ? `/api/changes?ticker=${t}&limit=30` : `/api/changes?key=${encodeURIComponent(e.key)}&limit=30`).catch(() => []);
+  const flags = isCo ? api(`/api/companies/${t}/flags`).catch(() => []) : none;
+  const conc = isCo ? api(`/api/companies/${t}/concentration`).catch(() => null) : none;
+  const turn = isCo ? api(`/api/companies/${t}/turnover`).catch(() => null) : none;
+  const mk = isCo ? api(`/api/companies/${t}/market`).catch(() => null) : none;
 
   let html = `<div><b style="color:var(--ink)">${esc(dn(e))}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
   if (EN_ON && dn(e) !== e.name) html += `<div class="meta">${esc(e.name)}</div>`;   // the name as the sources give it
@@ -417,10 +450,10 @@ async function showDetails(d) {
   if (links.length) html += `<div>${links.join(' · ')}</div>`;
   // one printable page with everything about the company (issue #10, dossier.html)
   if (isCo) html += L`<div class="row"><a class="dossier" href="/dossier/${t}${EN_ON ? '?lang=en' : ''}" target="_blank" rel="noopener" title="Эзэмшигч, удирдлага, анхаарах зүйлс, өөрчлөлтийг нэг хуудсанд: хэвлэх эсвэл PDF болгох">Компанийн досье (хэвлэх)</a></div>`;
-  html += marketBlock(mk);
+  html += later('mk', mk, marketBlock);
   // the server writes these sentences in Mongolian (analysis.company_flags); say so in English
-  if (flags.length) html += L`<h2>Анхаарах зүйлс</h2>${EN_ON ? '<div class="meta">(in Mongolian: the checks write their findings in Mongolian)</div>' : ''}<ul>${flags.map(f =>
-    `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`;
+  html += later('flags', flags, fl => !fl || !fl.length ? '' : L`<h2>Анхаарах зүйлс</h2>${EN_ON ? '<div class="meta">(in Mongolian: the checks write their findings in Mongolian)</div>' : ''}<ul>${fl.map(f =>
+    `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`);
   const pct = p => p != null ? `${p}%` : '';
   // a stake's MNT value (issue #31): percent × the market cap of the company it is in
   const val = x => x.value_mnt != null ? L` <span class="meta" title="эзэмшлийн хувь × зах зээлийн үнэлгээ">≈ ${fmtMNT(x.value_mnt)}</span>` : '';
@@ -432,8 +465,8 @@ async function showDetails(d) {
   if (own && (own.nominee.holders || own.treasury.holders))
     html += L`<div class="meta">Номини эзэмшил: ${own.nominee.holders} (${own.nominee.percent != null ? fmtPct(own.nominee.percent) : '?'})` +
             (own.treasury.holders ? L` · өөрийн хувьцаа: ${own.treasury.percent != null ? fmtPct(own.treasury.percent) : '?'}` : '') + '</div>';
-  html += concBlock(conc);
-  html += turnoverBlock(turn);
+  html += later('conc', conc, concBlock);
+  html += later('turn', turn, turnoverBlock);
   html += officialsBlock(e, d);
   html += list(tr('Эцсийн өмчлөгч (бүртгэл)'), d.beneficial_owners,
                b => `<span>${esc(dn(b))}</span><span class="meta">${esc(b.since || '')}</span>${src(b)}`);
@@ -471,11 +504,11 @@ async function showDetails(d) {
                p => `<span>${esc(co(p))} <span class="meta">${esc(roleTitle(p))}</span></span>${period(p)}${src(p)}`);
   html += list(tr('Холбоотой компаниуд'), d.related_companies,
                r => `<span>${esc(r.ticker)} ${esc(dn(r))}</span><span class="meta">${[...new Set(r.links.map(l => l.name))].map(n => esc(dnS(n))).join(', ')}</span>`);
-  html += list(tr('Эцсийн өмчлөгчид (look-through)'), uo,
-               u => `<span>${esc(dn(u))}</span><span>${u.effective_percent}%</span>`);
-  html += historyTable(hist);
-  html += changeList(tr('Өөрчлөлтүүд'), chg, !isCo);
-  document.getElementById('details').innerHTML = html;
+  html += later('uo', uo, u => list(tr('Эцсийн өмчлөгчид (look-through)'), u,
+               u => `<span>${esc(dn(u))}</span><span>${u.effective_percent}%</span>`));
+  html += later('hist', hist, historyTable);
+  html += later('chg', chg, c => changeList(tr('Өөрчлөлтүүд'), c, !isCo));
+  if (seq === openSeq) document.getElementById('details').innerHTML = html;
 }
 
 // ---- change history ----------------------------------------------------------
