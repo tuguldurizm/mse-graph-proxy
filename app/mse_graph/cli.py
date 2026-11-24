@@ -278,6 +278,25 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("ownership-history", help="shareholder percentages of a company over time")
     p.add_argument("ticker")
+    p = sub.add_parser("layout-check",
+                       help="fetch the fixture companies' open.mse.mn pages live and compare them with "
+                            "tests/fixtures/live (#10): exit code 1 when a table header is gone or a tab parses empty")
+    p.add_argument("--dir", default=None, help="fixtures directory (default tests/fixtures/live)")
+    p.add_argument("--ticker", action="append", help="only this ticker (repeatable)")
+    p = sub.add_parser("layout-fixtures",
+                       help="the saved real open.mse.mn pages (#10): check them, --rebuild snapshot.json after a "
+                            "deliberate parser change, or --refresh them from the live site (26 requests)")
+    p.add_argument("--dir", default=None)
+    g_ = p.add_mutually_exclusive_group()
+    g_.add_argument("--refresh", action="store_true")
+    g_.add_argument("--rebuild", action="store_true")
+    p.add_argument("--ticker", action="append", help="with --refresh: these tickers instead of the default five")
+    p = sub.add_parser("repair-nested",
+                       help="once: correct the stakes the nested-table bug loaded from open.mse.mn shareholder "
+                            "tabs (2026-11-24); one request per suspicious company")
+    p.add_argument("--dry-run", action="store_true", help="read the tabs and report; change nothing")
+    p.add_argument("--force", action="store_true", help="run even if it ran before")
+
     p = sub.add_parser("diff", help="compare two CSV dirs without saving anything")
     p.add_argument("old")
     p.add_argument("new")
@@ -309,6 +328,26 @@ def main(argv=None):
             with _graph() as g:
                 g.drop_demo_data()
                 _print(g.load(ds))
+        return
+
+    if args.cmd in ("layout-check", "layout-fixtures"):
+        from . import layout, scraper
+        d = Path(args.dir) if args.dir else layout.LIVE_DIR
+        if args.cmd == "layout-check":
+            rep = layout.live_check(scraper.Fetcher(), d, tickers=args.ticker)
+            _print(rep)
+            if not rep["ok"]:
+                sys.exit(1)
+            return
+        if args.refresh:
+            _print(layout.refresh(scraper.Fetcher(), tuple(args.ticker or layout.DEFAULT_TICKERS), d))
+        elif args.rebuild:
+            snap = layout.rebuild(d)
+            print(f"rewrote {d / 'snapshot.json'}: {', '.join(snap['companies'])}")
+        found = {t: p for t, p in layout.check_saved(d).items() if p}
+        _print({"problems": found} if found else {"ok": True})
+        if found:
+            sys.exit(1)
         return
 
     if args.cmd == "frc-probe":
@@ -446,6 +485,9 @@ def main(argv=None):
                 r = notify.send(changes)
                 print(f"alerts: {r['sent']} sent via {', '.join(r['channels']) or 'no channel configured'}"
                       + (f"; errors: {r['errors']}" if r["errors"] else ""), file=sys.stderr)
+        elif args.cmd == "repair-nested":
+            from . import layout
+            _print(layout.repair_nested(g, dry_run=args.dry_run, force=args.force))
         elif args.cmd == "review":
             from . import review
             q = review.queue(g)
