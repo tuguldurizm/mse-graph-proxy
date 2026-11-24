@@ -260,6 +260,15 @@ def main(argv=None):
     p.add_argument("question", nargs="+")
     p = sub.add_parser("frc", help="import FRC's licensed entities (frc.mn port 5001; needs open egress, not a cloud "
                                    "session): lists, licences, register numbers, decisions (people: Open Data Lab)")
+    p = sub.add_parser("reports", help="annual reports and other documents from open.mse.mn's tabs (#10): the "
+                                       "index, the PDFs read and their unchecked findings")
+    p.add_argument("--fetch", action="store_true", help="run the step first: index a batch of companies, read PDFs")
+    p.add_argument("--batch", type=int, help="with --fetch: companies to index (REPORTS_BATCH, 25)")
+    p.add_argument("--pdf", type=int, help="with --fetch: PDFs to read (REPORTS_PDF_BUDGET, 4)")
+    p.add_argument("--ticker", help="one company's documents and findings")
+    p.add_argument("--kind", default="", choices=["", "subsidiary", "associate", "shareholder"])
+    p.add_argument("--summary", action="store_true", help="counts only")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("frc-decisions", help="the FRC's decisions with the companies they name (adverse only "
                                              "unless --all)")
     p.add_argument("--all", action="store_true")
@@ -591,6 +600,8 @@ def main(argv=None):
             res = frc.step(g)
             frc.mark_step(g, res)
             print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        elif args.cmd == "reports":
+            _reports_cmd(g, args)
         elif args.cmd == "frc-decisions":
             from . import frc
             res = frc.decisions_report(g, not args.all, args.since)
@@ -819,6 +830,42 @@ def _market_cmd(g, args) -> None:
               f"{' stale' if r['stale'] else '      '} {_mnt(r['market_cap']):>18} "
               f"{(str(r['weight_percent']) + '%') if r['weight_percent'] is not None else '':>8}  {r['name']}")
     _coverage(g, "market", sys.stdout)
+
+
+def _reports_cmd(g, args) -> None:
+    from . import reports
+    if args.fetch:
+        logging.getLogger("mse_graph.reports").setLevel(logging.INFO)
+        res = {"index": reports.index(g, limit=args.batch)}
+        res["pdf"] = reports.read_pdfs(g, budget=args.pdf)
+        print(json.dumps(res, ensure_ascii=False, default=str))
+    if args.summary:
+        print(json.dumps(reports.summary(g), ensure_ascii=False))
+        return
+    if args.ticker:
+        t = g.resolve_ticker(args.ticker)
+        key = g.company_keys().get(t)
+        if not key:
+            raise SystemExit(f"unknown company {args.ticker}")
+        res = reports.company_reports(g, key)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+            return
+        for r in res["items"]:
+            state = "" if r["current"] else " (gone)"
+            read = (" scanned" if r["scanned"] else f" {r['pages']} p.") if r["pdf_read_at"] and not r["pdf_error"] \
+                else (f" [{r['pdf_error']}]" if r["pdf_error"] else "")
+            print(f"{r['year'] or '----'}  {r['kind']:<19} {r['title'][:70]}{state}{read}\n      {r['url']}")
+        for f in res["findings"]:
+            print(f"  {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']}, {f['year'] or '?'})")
+        return
+    res = reports.findings_report(g, args.kind)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return
+    print(json.dumps(res["summary"], ensure_ascii=False))
+    for f in res["items"]:
+        print(f"{f['ticker']:<6} {f['year'] or '----'} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']})")
 
 
 def _coverage(g, analysis: str, out=None) -> None:

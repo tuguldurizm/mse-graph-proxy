@@ -246,14 +246,16 @@ class Fetcher:
         path.write_text(r.text, encoding="utf-8")
         return r.text
 
-    def get_bytes(self, url: str, use_cache: bool = True) -> bytes | None:
+    def get_bytes(self, url: str, use_cache: bool = True, store: bool = True) -> bytes | None:
+        """A binary download. `store=False` keeps it off the disk cache (large PDFs, reports.py)."""
         path = self._cache_path(url, ".bin")
         if use_cache and self._fresh(path):
             return path.read_bytes()
         r = self._request(url)
         if r is None:
             return None
-        path.write_bytes(r.content)
+        if store:
+            path.write_bytes(r.content)
         return r.content
 
 

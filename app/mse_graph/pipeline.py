@@ -211,6 +211,27 @@ def frc_step(g, force: bool = False) -> None:
         log.error(traceback.format_exc())
 
 
+def reports_step(g, force: bool = False) -> None:
+    """Annual reports and other documents from open.mse.mn (issue #10, reports.py): the document tabs of
+    REPORTS_BATCH (25) listed companies and up to REPORTS_PDF_BUDGET (4) PDFs a run, at most every
+    REPORTS_MIN_INTERVAL_HOURS (20). REPORTS_ENABLE=0 turns it off. Never raises."""
+    from . import reports
+
+    if os.getenv("REPORTS_ENABLE", "1") == "0":
+        return
+    try:
+        min_hours = float(os.getenv("REPORTS_MIN_INTERVAL_HOURS", "20"))
+        since = reports.hours_since_step(g)
+        if since is not None and since < min_hours and not force and os.getenv("PIPELINE_FORCE") != "1":
+            return
+        set_status("running", "reading company reports (open.mse.mn)")
+        res = reports.step(g)
+        log.info("PIPELINE reports: %s", json.dumps(res, ensure_ascii=False, default=str))
+    except Exception as exc:
+        log.warning("PIPELINE reports failed: %s", exc)
+        log.error(traceback.format_exc())
+
+
 def nested_repair_step(g) -> None:
     """Once, before the first scrape with the fixed open.mse.mn parser: correct the stakes the
     nested-table bug loaded (layout.repair_nested, 2026-11-24). About 15 requests to open.mse.mn.
@@ -404,6 +425,7 @@ def _run(force: bool = False) -> None:
             market_step(g, force=force)
             validation_step(g)
             frc_step(g, force=force)
+            reports_step(g, force=force)
 
         stats = g.stats()
         top = [{"name": r["name"], "companies": r["companies"]} for r in g.interlocks()[:10]]

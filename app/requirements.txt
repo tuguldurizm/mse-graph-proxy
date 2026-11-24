@@ -6,4 +6,5 @@ beautifulsoup4>=4.12
 lxml>=5.0
 openpyxl>=3.1
 networkx>=3.2         # group detection (#28): Louvain communities
+pdfplumber>=0.11      # annual reports (#10 "More sources"): text of the PDFs on open.mse.mn
 pytest>=8.0

@@ -427,6 +427,7 @@ async function showDetails(d, seq = openSeq) {
   const conc = isCo ? api(`/api/companies/${t}/concentration`).catch(() => null) : none;
   const turn = isCo ? api(`/api/companies/${t}/turnover`).catch(() => null) : none;
   const mk = isCo ? api(`/api/companies/${t}/market`).catch(() => null) : none;
+  const rep = isCo ? api(`/api/companies/${t}/reports`).catch(() => null) : none;
 
   let html = `<div><b style="color:var(--ink)">${esc(dn(e))}</b> <span class="tag ${e.type}">${e.type}</span></div>`;
   if (EN_ON && dn(e) !== e.name) html += `<div class="meta">${esc(e.name)}</div>`;   // the name as the sources give it
@@ -507,6 +508,7 @@ async function showDetails(d, seq = openSeq) {
   html += later('uo', uo, u => list(tr('Эцсийн өмчлөгчид (look-through)'), u,
                u => `<span>${esc(dn(u))}</span><span>${u.effective_percent}%</span>`));
   html += later('hist', hist, historyTable);
+  html += later('rep', rep, reportsBlock);
   html += later('chg', chg, c => changeList(tr('Өөрчлөлтүүд'), c, !isCo));
   if (seq === openSeq) document.getElementById('details').innerHTML = html;
 }
@@ -1113,6 +1115,22 @@ document.getElementById('btnTrends').onclick = showTrends;
 // ---- market data (issue #31) ---------------------------------------------------------
 // The last close with the date of that trade (many MSE stocks barely trade: stale = older than
 // MARKET_STALE_DAYS before the read), shares outstanding and market cap.
+// the company's annual and financial reports on open.mse.mn, and the unchecked findings in them (reports.py)
+function reportsBlock(r) {
+  if (!r || !r.items) return '';
+  const docs = r.items.filter(x => x.current && ['annual_report', 'financial_statement', 'audit'].includes(x.kind)).slice(0, 6);
+  if (!docs.length && !r.findings.length) return '';
+  const FK = {subsidiary: tr('охин компани'), associate: tr('хараат компани'), shareholder: tr('хувьцаа эзэмшигч')};
+  let h = docs.length ? list(tr('Тайлангууд (mse.mn)'), docs, x => `<span>${/^https?:/.test(x.url) ?
+    `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}</span>` +
+    `<span class="meta">${esc(x.year || '')}${x.scanned ? tr(' скан') : ''}</span>`) : '';
+  if (r.findings.length)
+    h += list(tr('Тайлангаас (шалгаагүй)'), r.findings.slice(0, 10), f => `<span>${esc(f.name)} <span class="meta">${esc(FK[f.kind] || f.kind)}</span></span>` +
+      `<span>${esc(f.percent)}% <span class="meta">${esc(f.year || '')}</span></span>`) +
+      tr('<div class="meta">PDF-ээс автоматаар уншсан: шалгаагүй, эзэмшилд тооцоогүй.</div>');
+  return h;
+}
+
 function marketBlock(r) {
   const m = r && r.market;
   if (!m || (m.price == null && m.market_cap == null)) return '';

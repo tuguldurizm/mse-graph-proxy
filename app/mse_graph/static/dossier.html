@@ -310,6 +310,28 @@ function render(d) {
         `${x.adverse ? `<span class="tag">${esc(x.kind)}</span>` : ''}</td>`)) +
       tr('<p class="note">Санхүүгийн зохицуулах хорооны тогтоол (frc.mn), монголоор.</p>'));
 
+  // the company's documents on open.mse.mn and the unchecked findings in its PDFs (reports.py)
+  const rp = d.reports || {items: [], findings: []};
+  const RK = {annual_report: tr('Үйл ажиллагааны тайлан'), financial_statement: tr('Санхүүгийн тайлан'),
+              audit: tr('Аудитын тайлан'), meeting: tr('Хурлын материал'), governance: tr('Засаглалын баримт бичиг'),
+              esg: tr('Тогтвортой байдлын тайлан'), other: tr('Бусад')};
+  const docs = rp.items.filter(x => x.current && x.kind !== 'meeting' && x.kind !== 'other');
+  if (docs.length) {
+    const [shown, more] = cap(docs, 15);
+    h += section(tr('Тайлангууд'), table([{ h: tr('Он') }, { h: tr('Төрөл') }, { h: tr('Баримт бичиг') }],
+      shown.map(x => `<td class="d">${esc(x.year || '')}</td><td>${esc(RK[x.kind] || x.kind)}</td>` +
+        `<td>${/^https?:/.test(x.url) ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}` +
+        `${x.scanned ? tr(' <span class="tag">скан</span>') : ''}</td>`), more) +
+      tr('<p class="note">Компанийн open.mse.mn дээр нийтэлсэн баримт бичиг.</p>'));
+  }
+  if (rp.findings.length) {
+    const FK = {subsidiary: tr('Охин компани'), associate: tr('Хараат компани'), shareholder: tr('Хувьцаа эзэмшигч')};
+    h += section(tr('Тайлангаас (шалгаагүй)'), table([{ h: tr('Төрөл') }, { h: tr('Байгууллага') }, { h: '%', n: 1 }, { h: tr('Эх сурвалж') }],
+      rp.findings.slice(0, 25).map(f => `<td>${esc(FK[f.kind] || f.kind)}</td><td>${esc(f.name)}</td><td class="n">${esc(f.percent)}</td>` +
+        `<td class="d">${esc(f.year || '')} · ${tr('хуудас')} ${esc(f.page)}</td>`), rp.findings.length - 25) +
+      tr('<p class="note">Тайлангийн PDF-ээс автоматаар уншсан мөр: шалгаагүй, эзэмшилд тооцоогүй.</p>'));
+  }
+
   // the shareholder table over time
   const oh = d.ownership_history;
   if (oh && oh.points.length >= 2) {
