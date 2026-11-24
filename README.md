@@ -61,5 +61,6 @@ the UI. Progress is at `/api/status` and in the service logs.
 - `SCRAPE_LIMIT`: scrape only the first N companies (0 = all)
 - `PIPELINE_DEMO=1`: load the fictional demo data instead
 
-Memory is tuned to fit a 512 MB instance. The free plan has no disk, so the data is
-rebuilt each time the service starts or wakes up.
+Memory is tuned to fit a 512 MB instance. The free plan has no disk, so the graph and all its
+history live in Neo4j Aura (`NEO4J_URI` on Render); the bundled Neo4j starts only when that URI is
+local.
