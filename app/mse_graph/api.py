@@ -454,6 +454,30 @@ def frc_decisions(adverse: bool = True, since: str = Query("", pattern=r"^(\d{4}
     return frc.decisions_report(g(), adverse, since, limit)
 
 
+# ---- annual reports and other company documents (issue #10): reports.py -------------------
+
+@app.get("/api/companies/{ticker}/reports")
+def company_reports(ticker: str):
+    """The documents a listed company publishes on open.mse.mn (annual and financial reports, meeting
+    papers, ...), newest first, and the unchecked findings read from its PDFs (organisations named with
+    a percent: subsidiaries, associates, shareholders). Source: mse.mn."""
+    from . import reports
+    t = g().resolve_ticker(ticker)
+    key = g().company_keys().get(t)
+    if not key:
+        raise HTTPException(404, f"unknown company {ticker}")
+    return reports.company_reports(g(), key)
+
+
+@app.get("/api/analysis/reports")
+def reports_findings(kind: str = Query("", pattern=r"^(subsidiary|associate|shareholder)?$"),
+                     limit: int = Query(500, ge=1, le=5000)):
+    """The findings read from listed companies' reports across the market (unchecked), with the counts
+    of documents indexed and PDFs read."""
+    from . import reports
+    return reports.findings_report(g(), kind, limit)
+
+
 # ---- review decisions (issue #6) -----------------------------------------------------
 # Writing needs REVIEW_PASSWORD (else APP_PASSWORD) in the X-Review-Password header.
 # Without either, the review is read-only: a public site never takes decisions from anyone.

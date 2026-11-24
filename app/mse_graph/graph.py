@@ -163,6 +163,8 @@ SCHEMA = [
     "CREATE INDEX fact_name IF NOT EXISTS FOR (f:Fact) ON (f.name, f.source)",
     # public officials whose asset declarations name a company (issue #9, officials.py)
     "CREATE CONSTRAINT official_key IF NOT EXISTS FOR (o:Official) REQUIRE o.key IS UNIQUE",
+    # documents listed companies publish on open.mse.mn (issue #10, reports.py)
+    "CREATE CONSTRAINT report_url IF NOT EXISTS FOR (r:Report) REQUIRE r.url IS UNIQUE",
 ]
 # company properties kept as dated facts (issue #38): fact name -> company-row field
 COMPANY_FACTS = {"name": "name", "name_en": "name_en", "address": "address", "sector": "sector_mse"}

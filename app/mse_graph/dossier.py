@@ -11,6 +11,7 @@ It gathers what the details panel loads piece by piece, in one response:
     changes                                               significant changes, newest first (history)
     ownership_history                                     the shareholder table over time (history)
     concentration, turnover, market                       quality / trends / market, as the panel shows them
+    reports                                               its documents on open.mse.mn and their findings (reports.py)
     quality                                               the company's data problems (quality.company_issues)
     sources                                               every source behind the page, once each
 
@@ -65,6 +66,9 @@ def company_dossier(g, ticker: str, changes_limit: int = MAX_CHANGES) -> dict | 
     out["flags"] = analysis.company_flags(g, t)
     from . import frc
     out["frc_decisions"] = frc.company_decisions(g, key)
+    from . import reports
+    # the documents the company publishes on open.mse.mn and the unchecked findings in its PDFs
+    out["reports"] = reports.company_reports(g, key, limit=40)
     chg = history.recent_changes(g, ticker=t, significant_only=True, limit=changes_limit + 1)
     out["changes"], out["changes_more"] = chg[:changes_limit], len(chg) > changes_limit
     out["ownership_history"] = history.ownership_timeline(g, t)
