@@ -238,6 +238,16 @@ function render(d) {
     own += tr('<p class="note">Үнэлгээ = эзэмшлийн хувь × зах зээлийн үнэлгээ: бага арилжаатай хувьцаанд баримжаа л болно.</p>');
   h += section(tr('Хувьцаа эзэмшигчид'), own || tr('<p class="meta">Эзэмшигчийн мэдээлэл алга</p>'));
 
+  // related parties the company disclosed per shareholder on mse.mn ("Түүнтэй нэгдмэл сонирхолтой этгээд")
+  const AFF = {spouse: tr('эхнэр / нөхөр'), parent_child: tr('эцэг эх / хүүхэд'), sibling: tr('ах эгч дүү'),
+    relative: tr('төрөл садан'), parent_company: tr('толгой компани'), subsidiary: tr('охин компани'),
+    beneficial_owner: tr('эцсийн өмчлөгч'), officer: tr('удирдлага'), shareholder: tr('хувьцаа эзэмшлийн холбоо'),
+    affiliate: tr('хамаарал бүхий'), other: tr('нэгдмэл сонирхолтой')};
+  const aff = d.disclosed_affiliations || [];
+  if (aff.length)
+    h += section(tr('Нэгдмэл сонирхолтой этгээд (ХК-ийн мэдээлсэн)'), table([{ h: tr('Эзэмшигч') }, { h: tr('Холбоотой этгээд') }, { h: tr('Холбоо') }, { h: tr('Эх сурвалж') }],
+      aff.map(a => `<td>${esc(dnS(a.holder))}</td><td>${esc(dnS(a.name))}</td><td>${esc(EN_ON ? (AFF[a.relation_std] || a.relation_std) : (a.relation || AFF[a.relation_std] || ''))}</td>${srcCell(a)}`)));
+
   // look-through owners
   const chainTxt = u => (u.chains || []).slice(0, 2).map(ch => ch.map(x => esc(dnS(x))).join(' → ')).join('<br>');
   h += section(tr('Эцсийн өмчлөгчид (look-through)'), table([{ h: tr('Эзэмшигч') }, { h: tr('Төрөл') }, { h: tr('Хувь'), n: 1 }, { h: tr('Гинж') }],

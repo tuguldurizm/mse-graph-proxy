@@ -35,7 +35,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import IO
 
-from .models import BeneficialOwner, Company, CompanyFacts, Dataset, Position, Shareholding
+from .models import Affiliation, BeneficialOwner, Company, CompanyFacts, Dataset, Position, Shareholding
 from .normalize import clean, parse_int, parse_percent
 
 FILES = {
@@ -44,8 +44,9 @@ FILES = {
     "positions": ("executives.csv", Position),
     "beneficial_owners": ("beneficial_owners.csv", BeneficialOwner),
     "facts": ("company_facts.csv", CompanyFacts),
+    "affiliations": ("affiliations.csv", Affiliation),
 }
-OPTIONAL = {"beneficial_owners", "facts"}   # only written when non-empty
+OPTIONAL = {"beneficial_owners", "facts", "affiliations"}   # only written when non-empty
 
 
 def _coerce(cls, row: dict):
@@ -55,9 +56,9 @@ def _coerce(cls, row: dict):
         if raw is None:
             continue
         raw = clean(raw)
-        if f.name == "percent":
+        if f.name.endswith("percent"):
             kwargs[f.name] = parse_percent(raw)
-        elif f.name == "shares":
+        elif f.name.endswith("shares"):
             kwargs[f.name] = parse_int(raw)
         elif f.name == "listed":
             kwargs[f.name] = raw.lower() not in ("0", "false", "no", "")

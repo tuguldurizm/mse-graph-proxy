@@ -29,8 +29,8 @@ from bs4 import BeautifulSoup, Tag
 
 from . import egress
 from .config import settings
-from .models import Company, Dataset, Position, Shareholding
-from .normalize import clean, is_aggregate, parse_int, parse_percent
+from .models import Affiliation, Company, Dataset, Position, Shareholding
+from .normalize import clean, is_aggregate, is_organization, parse_int, parse_percent, person_name
 
 log = logging.getLogger(__name__)
 
@@ -693,6 +693,64 @@ def parse_open_tab(html: str, ticker: str, kind: str, source: str, nested: bool 
     return ds
 
 
+AFFILIATION_HEADER = "нэгдмэл сонирхол"     # "Түүнтэй нэгдмэл сонирхолтой этгээд"
+
+
+def _party_ok(name: str) -> bool:
+    """A related party worth a node: a real name, and for a person not an initial form only
+    ("Б.Болд" could be anyone; the owner keeps such names out, as with FRC's)."""
+    if (not name or len(name) < 3 or re.search(r"\d", name) or is_aggregate(name)
+            or name.casefold() in ("байхгүй", "нэр", "name")):
+        return False
+    return is_organization(name) or person_name(name).form != "initial"
+
+
+def parse_affiliations(html: str, ticker: str, source: str) -> list[Affiliation]:
+    """The related parties of each shareholder on an open.mse.mn shareholders tab: the table in
+    the holder's "Түүнтэй нэгдмэл сонирхолтой этгээд" cell (№ | Нэр | Холбоо, хамаарал |
+    Хувьцааны тоо | Хувь). The history table and the "other holdings" cell are not read."""
+    out: list[Affiliation] = []
+    soup = BeautifulSoup(html, "lxml")
+    for table in soup.find_all("table"):
+        if table.find_parent("table") is not None:
+            continue
+        ctx = _context_text(table).lower()
+        if "түүх" in ctx or "history" in ctx:
+            continue
+        rows = _own_rows(table)
+        if not rows:
+            continue
+        header = [clean(c.get_text(" ")).lower() for c in rows[0].find_all(["th", "td"], recursive=False)]
+        c_name, c_aff = _hcol(header, "нэр", "name"), _hcol(header, AFFILIATION_HEADER)
+        if c_name is None or c_aff is None:
+            continue
+        for tr in rows[1:]:
+            cells = tr.find_all(["th", "td"], recursive=False)
+            if max(c_name, c_aff) >= len(cells):
+                continue
+            holder = clean(cells[c_name].get_text(" "))
+            inner = cells[c_aff].find("table")
+            if not holder or inner is None:
+                continue
+            irows = _own_rows(inner)
+            ih = [clean(c.get_text(" ")).lower() for c in irows[0].find_all(["th", "td"], recursive=False)] if irows else []
+            i_name, i_rel = _hcol(ih, "нэр", "name"), _hcol(ih, "холбоо", "хамаарал", "relation")
+            i_sh = _hcol(ih, "хувьцааны тоо", "тоо")
+            i_pct = next((i for i, h in enumerate(ih) if h in ("хувь", "%") or h.endswith("%")), None)
+            if i_name is None:
+                continue
+            for itr in irows[1:]:
+                ic = [clean(c.get_text(" ")) for c in itr.find_all(["th", "td"], recursive=False)]
+                cell = lambda i: ic[i] if i is not None and i < len(ic) else ""   # noqa: E731
+                party = cell(i_name)
+                if not _party_ok(party) or party.casefold() == holder.casefold():
+                    continue
+                out.append(Affiliation(ticker, holder, party, relation=cell(i_rel),
+                                       party_shares=parse_int(cell(i_sh)), party_percent=parse_percent(cell(i_pct)),
+                                       source=source))
+    return out
+
+
 def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None,
                shard: tuple[int, int] | None = None) -> Dataset:
     from . import shard as sharding
@@ -725,6 +783,8 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None,
                 describe_page(frag, url)
             page.shareholdings += part.shareholdings
             page.positions += part.positions
+            if kind == "shareholders":
+                page.affiliations += parse_affiliations(frag, c.ticker, url)
         # The CEO appears in the info table and (usually) the officials tab, often in a
         # different name format; keep the tab entry when one exists.
         tab_ceo = any("гүйцэтгэх захирал" in p.title.lower() and p.source.endswith("/officials")
@@ -742,6 +802,7 @@ def crawl_open(limit: int | None = None, fetcher: Fetcher | None = None,
         # with the previous scrape has left. A failed fetch must not look like a departure.
         if fetched["shareholders"]:
             page.mark_snapshot("shareholdings", c.ticker, c.url)
+            page.mark_snapshot("affiliations", c.ticker, c.url)
         if fetched["info"] and fetched["board"] and fetched["executive"]:
             page.mark_snapshot("positions", c.ticker, c.url)
         log.info("[%d/%d] %s %s: %s", i + 1, len(companies), c.ticker, c.name, page.summary())

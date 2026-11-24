@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from . import analysis, groups, history, quality, trends
+from . import analysis, groups, history, provenance, quality, trends
 from . import market as mk
 
 # the most changes one page lists (the page says when there are more)
@@ -55,6 +55,11 @@ def company_dossier(g, ticker: str, changes_limit: int = MAX_CHANGES) -> dict | 
     out["ticker"] = t
     out["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out["ultimate_owners"] = g.ultimate_owners(t)
+    from . import affiliations
+    # the related parties the company's own page discloses per shareholder (mse.mn)
+    out["disclosed_affiliations"] = affiliations.company_affiliations(g, t)
+    for a in out["disclosed_affiliations"]:
+        provenance.annotate(a)
     grp = groups.group_of(g, key)
     out["controls"] = [c for c in (grp or {}).get("companies", []) if c["key"] != key]
     out["flags"] = analysis.company_flags(g, t)

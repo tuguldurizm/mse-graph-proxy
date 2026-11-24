@@ -139,6 +139,9 @@ def parse_pages(pages: dict[str, str | None], company: Company) -> dict:
         if kind == "shareholders":
             out[page] = [{"name": s.holder_name, "percent": s.percent, "shares": s.shares, "as_of": s.as_of}
                          for s in ds.shareholdings]
+            out["affiliations"] = [{"holder": a.holder_name, "party": a.party_name, "relation": a.relation,
+                                    "party_shares": a.party_shares}
+                                   for a in scraper.parse_affiliations(pages[page], c.ticker, page_url(c, page))]
         else:
             out[page] = [{"name": p.person_name, "title": p.title, "role": p.role, "since": p.since}
                          for p in ds.positions]
