@@ -190,6 +190,7 @@ const EN = {
  "ижил ургийн овог": "same clan name",
  "Хяналтын нууц үг (REVIEW_PASSWORD):": "Review password (REVIEW_PASSWORD):",
  "Ачаалж байна…": "Loading…",
+ "Ачаалж чадсангүй. Дахин оролдоно уу.": "Could not load. Please try again.",
  "Зөвхөн харах горим: шийдвэр гаргахад серверт REVIEW_PASSWORD тохируулна.": "Read-only: decisions need REVIEW_PASSWORD set on the server.",
  "Git-д ороогүй шийдвэр:": "Decisions not in git yet:",
  "Эргэлзээтэй эцгийн нэрийн үсэгтэй хүмүүс (": "People with an ambiguous patronymic initial (",

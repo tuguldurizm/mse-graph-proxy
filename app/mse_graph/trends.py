@@ -267,7 +267,9 @@ def turnover(g=None, sort: str = "rate", periods: Periods | None = None, key: st
 
 
 def company_turnover(g, key: str) -> dict | None:
-    rows = turnover(g, key=g.resolve_key(key))["items"]
+    # every edge period of the market, shared by the clicks in the details panel (memo.py)
+    from .memo import cached
+    rows = turnover(g, key=g.resolve_key(key), periods=cached(g, "periods", Periods.read))["items"]
     return rows[0] if rows else None
 
 
