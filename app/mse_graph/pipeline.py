@@ -211,6 +211,24 @@ def frc_step(g, force: bool = False) -> None:
         log.error(traceback.format_exc())
 
 
+def nested_repair_step(g) -> None:
+    """Once, before the first scrape with the fixed open.mse.mn parser: correct the stakes the
+    nested-table bug loaded (layout.repair_nested, 2026-11-24). About 15 requests to open.mse.mn.
+    Done when `(:Meta {key: 'mse_nested_repair'})` says so; NESTED_REPAIR=0 turns it off. Never raises."""
+    from . import layout
+
+    if os.getenv("NESTED_REPAIR", "1") == "0":
+        return
+    try:
+        res = layout.repair_nested(g)
+        if res.get("skipped"):
+            return
+        log.info("PIPELINE mse repair: %s", json.dumps(res, ensure_ascii=False, default=str))
+    except Exception as exc:
+        log.warning("PIPELINE mse repair failed: %s", exc)
+        log.error(traceback.format_exc())
+
+
 def keep_awake(url: str, stop: threading.Event, interval: float = 240.0, get=None) -> int:
     """GET <url>/healthz every `interval` seconds until `stop` is set; returns the ping count.
 
@@ -316,6 +334,8 @@ def _run(force: bool = False) -> None:
         typed = getattr(g, "holdings_typed", None)
         if typed and typed.get("stakes_typed"):   # holding types (#39): the first start types every stake
             log.info("PIPELINE holdings typed: %s", json.dumps(typed))
+        if os.getenv("PIPELINE_DEMO") != "1":
+            nested_repair_step(g)
         min_hours = float(os.getenv("PIPELINE_MIN_INTERVAL_HOURS", "20"))
         since = g.hours_since_last_scrape()
         if os.getenv("PIPELINE_DEMO") == "1":

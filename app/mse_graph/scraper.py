@@ -286,11 +286,20 @@ def _context_text(table: Tag) -> str:
     return clean(" ".join(parts))
 
 
-def _table_rows(table: Tag) -> tuple[list[str], list[list[str]]]:
-    rows = [
-        [clean(c.get_text(" ")) for c in tr.find_all(["th", "td"])]
-        for tr in table.find_all("tr")
-    ]
+def _own_rows(table: Tag) -> list[Tag]:
+    """The table's own rows: not those of a table nested in one of its cells."""
+    return [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+
+
+def _table_rows(table: Tag, nested: bool = False) -> tuple[list[str], list[list[str]]]:
+    """(lower-case header, rows) of a table. A nested table's rows and cells are left out
+    (open.mse.mn puts each shareholder's related parties in a table inside a cell);
+    `nested=True` keeps them, as the parser did before 2026-11-24 (repair_nested only)."""
+    if nested:
+        rows = [[clean(c.get_text(" ")) for c in tr.find_all(["th", "td"])] for tr in table.find_all("tr")]
+    else:
+        rows = [[clean(c.get_text(" ")) for c in tr.find_all(["th", "td"], recursive=False)]
+                for tr in _own_rows(table)]
     rows = [r for r in rows if any(r)]
     if not rows:
         return [], []
@@ -609,7 +618,7 @@ HEADER_LABELS = {"нэр", "овог нэр", "овог, нэр", "компан�
 _logged_company_tables: dict[str, bool] = {}
 
 
-def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
+def parse_open_tab(html: str, ticker: str, kind: str, source: str, nested: bool = False) -> Dataset:
     """Parse an open.mse.mn tab fragment: shareholders / boardmembers / officials.
 
     Layouts (as served by open.mse.mn):
@@ -617,14 +626,22 @@ def parse_open_tab(html: str, ticker: str, kind: str, source: str) -> Dataset:
                     Түүнтэй нэгдмэл сонирхолтой этгээд | Огноо     (+ a '...түүх' history table: skipped)
       boardmembers: № | Нэр | Гишүүнчлэл | Албан тушаал | Сонгогдсон огноо | ... | Хувьцааны тоо | ...
       officials:    № | Нэр | Албан тушаал | Хувьцааны тоо          (КЭБАТ, plus securities officer table)
+
+    A shareholder's cells "Бусад компанийн хувьцааг эзэмшиж буй байдал" and "Түүнтэй нэгдмэл
+    сонирхолтой этгээд" may hold tables of their own (other holdings; related parties with
+    "Холбоо, хамаарал"). Their rows are not shareholders of this company and are skipped
+    (real pages: tests/fixtures/live/). `nested=True` reads them as the parser did before
+    2026-11-24, which only repair_nested uses, to find the rows it wrongly loaded.
     """
     ds = Dataset()
     soup = BeautifulSoup(html, "lxml")
     for table in soup.find_all("table"):
+        if not nested and table.find_parent("table") is not None:
+            continue  # a table inside a cell: related parties or other holdings of one row
         ctx = _context_text(table).lower()
         if "түүх" in ctx or "history" in ctx:
             continue  # historical holders/officers, not current
-        header, rows = _table_rows(table)
+        header, rows = _table_rows(table, nested=nested)
         if not header and len(rows) > 1 and not any(re.search(r"\d", c) for c in rows[0]):
             header, rows = [h.lower() for h in rows[0]], rows[1:]
         if not header or not rows:
