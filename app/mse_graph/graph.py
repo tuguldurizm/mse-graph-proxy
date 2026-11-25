@@ -109,12 +109,14 @@ the first Open Data Lab import) get `baseline: true` and are not changes.
 """
 from __future__ import annotations
 
+import csv
 import dataclasses
 import logging
 import os
 import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from neo4j import GraphDatabase
@@ -208,6 +210,7 @@ MIGRATE_CHANGES = [
 DEMO_SOURCE = "DEMO-fictional"
 # a source on this host (the state registry mirror) gives people's full names
 REGISTRY_MARK = "opendatalab.mn"
+REGISTER_NUMBERS_FILE = "data/overrides/register_numbers.csv"
 
 
 # a name that says it is a limited liability company ("Алтан Шувуу ХХК"): not a listed company's twin
@@ -1093,7 +1096,29 @@ class Graph:
         if pairs:
             self.run("""UNWIND $rows AS r MATCH (c:Company {ticker: r.ticker})
                         SET c.register_no = r.reg, c.register_no_found_via = 'registry twin'""", rows=pairs)
-        return pairs
+        return pairs + self._apply_register_numbers()
+
+    def _apply_register_numbers(self, path: str | os.PathLike | None = None) -> list[dict]:
+        """Register numbers decided by hand (REGISTER_NUMBERS, default
+        data/overrides/register_numbers.csv: ticker,register_no,decided_by,decided_at,note): a
+        listed company without a number takes the one given, so consolidate_companies merges it
+        with the company that has it (a twin the name rule leaves apart, e.g. TAND's
+        "ТАНДЭМ ИНВЭСТ ББСБ ХХК"). A company that has a number already is left alone."""
+        f = Path(path or os.getenv("REGISTER_NUMBERS") or REGISTER_NUMBERS_FILE)
+        if not f.is_file():
+            return []
+        lines = [ln for ln in f.read_text(encoding="utf-8-sig").splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")]
+        rows = [{"ticker": clean(r.get("ticker")).upper(), "reg": re.sub(r"\D", "", r.get("register_no") or "")}
+                for r in csv.DictReader(lines)]
+        rows = [r for r in rows if r["ticker"] and re.fullmatch(REGISTER_NO_RE, r["reg"])]
+        if not rows:
+            return []
+        return [{"ticker": r["t"], "reg": r["reg"]} for r in self.run(
+            """UNWIND $rows AS r MATCH (c:Company {ticker: r.ticker})
+               WHERE NOT coalesce(c.register_no, '') =~ $re
+               SET c.register_no = r.reg, c.register_no_found_via = 'register_numbers.csv'
+               RETURN c.ticker AS t, r.reg AS reg""", rows=rows, re=REGISTER_NO_RE)]
 
     def consolidate_companies(self) -> dict:
         """One :Company node per legal entity, keyed by its register number.
