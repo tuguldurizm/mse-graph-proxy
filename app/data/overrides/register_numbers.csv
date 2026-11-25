@@ -1,0 +1,5 @@
+# Register numbers decided by hand (mse_graph/graph.py, Graph._apply_register_numbers): a listed company
+# without a register number takes the one given here, and every start merges it with the company that has
+# that number (its registry twin). A company that already has a number is left alone.
+ticker,register_no,decided_by,decided_at,note
+TAND,5425999,owner (2026-11-25),2026-11-25,"registry twin ~5425999 ТАНДЭМ ИНВЭСТ ББСБ ХХК: no legal form and an LLC name, so the name rule left it apart; same address (Баянгол 2-р хороо, Эрхи төв 402)"
