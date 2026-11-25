@@ -34,6 +34,13 @@
   button { cursor:pointer; }
   button:hover { border-color:var(--accent); }
   .row { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .kinds { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+  .kinds label { display:inline-flex; align-items:center; gap:4px; font-size:12px; border:1px solid var(--line);
+                 border-radius:12px; padding:2px 8px; cursor:pointer; user-select:none; }
+  .kinds label:hover { border-color:var(--accent); }
+  .kinds label.off { color:var(--muted); text-decoration:line-through; }
+  .kinds input { width:auto; margin:0; padding:0; }
+  .kinds .n { color:var(--muted); }
   ul { list-style:none; padding:0; margin:0; }
   li { padding:5px 6px; border-radius:5px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   li:hover { background:var(--bg); }
@@ -124,7 +131,7 @@
 
   <h2>Өнгө, шүүлтүүр / Encode &amp; filter</h2>
   <div class="row">
-    <select id="colorBy" title="Зангилааны өнгө (issue #10): салбар нь компанийн салбар, бүлэг нь илрүүлсэн бүлэг (#28)"><option value="">Өнгө: төрөл</option><option value="sector">Өнгө: салбар</option><option value="group">Өнгө: илрүүлсэн бүлэг</option></select>
+    <select id="colorBy" title="Зангилааны өнгө (issue #10): салбар нь компанийн салбар, бүлэг нь илрүүлсэн бүлэг (#28)"><option value="">Өнгө: төрөл</option><option value="sector">Өнгө: салбар</option><option value="group">Өнгө: илрүүлсэн бүлэг</option><option value="kind">Өнгө: компанийн төрөл</option></select>
     <select id="sizeBy" title="Зангилааны хэмжээ (issue #29)"><option value="">Хэмжээ: ижил</option><option value="betweenness">Хэмжээ: зуучлал</option><option value="pagerank">Хэмжээ: PageRank</option><option value="degree">Хэмжээ: компанийн тоо</option><option value="market_cap">Хэмжээ: зах зээлийн үнэлгээ</option></select>
   </div>
   <div class="row">
@@ -133,6 +140,9 @@
     <select id="ties" title="Ямар холбоо харуулах"><option value="">Холбоо: бүгд</option><option value="board">Зөвхөн ТУЗ</option><option value="positions">Зөвхөн албан тушаал</option><option value="owners">Зөвхөн эзэмшил</option></select>
     <button id="resetFilters" title="Өнгө, хэмжээ, шүүлтүүрийг анхны байдалд">Цэвэрлэх</button>
   </div>
+  <div class="meta" style="margin-top:8px" title="Хадгаламж зээлийн хоршоо (ХЗХ) гишүүдээ эзэмшигчээр бүртгэдэг тул графыг дүүргэж удаашруулдаг: анхдагчаар нуугдсан, энд дарж харуулна">Компанийн төрөл</div>
+  <div class="kinds" id="kinds"></div>
+  <input type="hidden" id="hideKinds" value="savings_coop">
   <div class="meta" id="filterNote"></div>
 
   <h2>Холбоос олох / Path</h2>
@@ -245,9 +255,11 @@ const inkOn = hex => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i
 // by this mode: people and organisations when colouring by sector)
 function category(n, mode) {
   if (mode === 'sector') return n.type === 'Company' ? (n.sector || null) : undefined;
+  if (mode === 'kind') return n.type === 'Company' ? (n.company_kind || null) : undefined;
   if (mode === 'group') return n.group_id || null;
 }
-const catLabel = (n, mode) => mode === 'group' ? dnS(n.group_label || n.group_id) : secName(n.sector, n.sector_std);
+const catLabel = (n, mode) => mode === 'group' ? dnS(n.group_label || n.group_id)
+  : mode === 'kind' ? KIND_LABEL[n.company_kind] || n.company_kind : secName(n.sector, n.sector_std);
 function categories(all, mode) {
   const count = new Map(), label = new Map();
   for (const n of all) {
@@ -266,10 +278,47 @@ function loaded() {   // the drawn data, one entry per node and edge
   for (const e of lastDraw.edges) if (e) es.set(edgeId(e), e);
   return { ns, es };
 }
+// Company types (graph.COMPANY_KINDS): chips in the sidebar; the unticked ones are in #hideKinds
+// ("savings_coop,nbfi", "none" for nothing hidden), which the address bar keeps (export.js). The
+// overview and a node's neighbourhood leave them out on the server (`hide`), the other views here.
+// Savings cooperatives (ХЗХ) are hidden by default: their members are their shareholders, about
+// 29,000 stakes, which filled the overview and slowed the page. The path view shows every node.
+const KIND_LABEL = { listed: tr('Биржийн ХК'), savings_coop: tr('ХЗХ'), nbfi: tr('ББСБ'),
+  money_lender: tr('Зээлдүүлэгч, ломбард'), insurance: tr('Даатгал'), securities: tr('Үнэт цаасны компани'),
+  jsc: tr('Бусад ХК'), llc: tr('ХХК'), other: tr('Бусад') };
+const KIND_TITLE = { listed: tr('МХБ-д бүртгэлтэй хувьцаат компани (банк, даатгал, брокер ч энд)'),
+  savings_coop: tr('Хадгаламж зээлийн хоршоо (СЗХ-ны жагсаалт, хэлбэр эсвэл нэрээр)'),
+  nbfi: tr('Банк бус санхүүгийн байгууллага (СЗХ-ны жагсаалт)'), money_lender: tr('СЗХ-ны зээлдүүлэгчийн жагсаалт'),
+  insurance: tr('Даатгагч, давхар даатгагч, даатгалын зуучлагч (СЗХ)'),
+  securities: tr('Брокер, дилер, андеррайтер, кастодиан, хөрөнгө удирдагч г.м. (СЗХ)'),
+  jsc: tr('Бүртгэлгүй хувьцаат компани'), llc: tr('Хязгаарлагдмал хариуцлагатай компани'),
+  other: tr('Хоршоо, нөхөрлөл, ТББ эсвэл хэлбэр тодорхойгүй') };
+const DEFAULT_HIDE = 'savings_coop';
+const hiddenKinds = () => val('hideKinds').split(',').filter(k => k in KIND_LABEL);
+function setHidden(list) {
+  document.getElementById('hideKinds').value = list.length ? [...new Set(list)].sort().join(',') : 'none';
+  syncKinds();
+}
+function syncKinds() {   // the chips follow #hideKinds
+  const hide = new Set(hiddenKinds());
+  for (const box of document.querySelectorAll('#kinds input')) {
+    box.checked = !hide.has(box.dataset.kind);
+    box.parentElement.classList.toggle('off', !box.checked);
+  }
+}
+function buildKinds(counts = {}) {
+  document.getElementById('kinds').innerHTML = Object.entries(KIND_LABEL).map(([k, l]) =>
+    `<label title="${esc(KIND_TITLE[k])}"><input type="checkbox" data-kind="${k}">${esc(l)}` +
+    `${counts[k] != null ? ` <span class="n">${counts[k]}</span>` : ''}</label>`).join('');
+  syncKinds();
+}
+const hideParam = () => { const h = hiddenKinds(); return h.length ? `hide=${encodeURIComponent(h.join(','))}` : ''; };
 function visibleSet(ns, es) {
   const minPct = +val('minPct') || 0, ties = val('ties'), sector = val('sector');
-  const active = !!(minPct > 0 || ties || sector);
-  const nodeOk = n => !!n && (!sector || n.type !== 'Company' || n.sector === sector);
+  const hide = new Set(shown.kind === 'path' ? [] : hiddenKinds());
+  const kindOk = n => n.key === selected || !hide.has(n.company_kind);
+  const active = !!(minPct > 0 || ties || sector || [...ns.values()].some(n => !kindOk(n)));
+  const nodeOk = n => !!n && kindOk(n) && (!sector || n.type !== 'Company' || n.sector === sector);
   const edgeOk = e => !(ties === 'board' && !isBoard(e)) && !(ties === 'positions' && e.type !== 'HOLDS_POSITION')
     && !(ties === 'owners' && e.type === 'HOLDS_POSITION')
     && !(minPct > 0 && e.type === 'OWNS' && e.percent != null && +e.percent < minPct);
@@ -310,7 +359,7 @@ function render() {
     shape: n.type === 'Company' ? 'box' : 'dot', size: sz ? sz(n) : 12,
     font: n.type === 'Company' ? { color: inkOn(bg), size: sz ? Math.round(sz(n) * 0.55 + 6) : 13 } : undefined,
     color: { background: bg, border: bg, highlight: { background: bg, border: css('--ink') } },
-    title: `${n.type}: ${dn(n)}${EN_ON && dn(n) !== n.name ? ` (${n.name})` : ''}${n.sector ? L`\nсалбар: ${secName(n.sector, n.sector_std)}` : ''}${n.group_id ? L`\nбүлэг: ${dnS(n.group_label || n.group_id)}` : ''}` +
+    title: `${n.type}: ${dn(n)}${EN_ON && dn(n) !== n.name ? ` (${n.name})` : ''}${KIND_LABEL[n.company_kind] ? L`\nтөрөл: ${KIND_LABEL[n.company_kind]}` : ''}${n.sector ? L`\nсалбар: ${secName(n.sector, n.sector_std)}` : ''}${n.group_id ? L`\nбүлэг: ${dnS(n.group_label || n.group_id)}` : ''}` +
            `${cen(n)}${n.market_cap != null ? L`\nзах зээлийн үнэлгээ ${fmtMNT(n.market_cap)}` : ''}`,
   }; }));
   edges.update(vis.map(e => ({
@@ -342,9 +391,9 @@ function showLegend(cats, mode, all) {
   let html = cats.order.slice(0, cats.slots).map(c => item(cats.color.get(c), cats.label.get(c), cats.count.get(c))).join('');
   const rest = cats.order.slice(cats.slots).reduce((a, c) => a + cats.count.get(c), 0);
   const nil = all.filter(n => category(n, mode) === null).length;
-  if (rest) html += item('var(--none)', L`Бусад ${cats.order.length - cats.slots} ${mode === 'group' ? tr('бүлэг') : tr('салбар')}`, rest);
-  if (nil) html += item('var(--none)', mode === 'group' ? tr('Бүлэггүй') : tr('Салбар тодорхойгүй'), nil);
-  if (mode === 'sector' && all.some(n => n.type !== 'Company')) html += item('var(--muted)', tr('Хүн, байгууллага'));
+  if (rest) html += item('var(--none)', L`Бусад ${cats.order.length - cats.slots} ${mode === 'group' ? tr('бүлэг') : mode === 'kind' ? tr('төрөл') : tr('салбар')}`, rest);
+  if (nil) html += item('var(--none)', mode === 'group' ? tr('Бүлэггүй') : mode === 'kind' ? tr('Төрөл тодорхойгүй') : tr('Салбар тодорхойгүй'), nil);
+  if ((mode === 'sector' || mode === 'kind') && all.some(n => n.type !== 'Company')) html += item('var(--muted)', tr('Хүн, байгууллага'));
   box.innerHTML = html || item('var(--none)', tr('Ангилал алга'));
 }
 
@@ -363,7 +412,7 @@ async function open(key) {
   box.innerHTML = `<div class="meta">${LOADING()}</div>`;
   busy(true);
   const ent = api(`/api/entity?key=${encodeURIComponent(key)}`);
-  const nb = api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}`);
+  const nb = api(`/api/graph/neighborhood?key=${encodeURIComponent(key)}&depth=${depth}${hideParam() ? '&' + hideParam() : ''}`);
   ent.then(d => { if (seq === openSeq) showDetails(d, seq); },
            () => { if (seq === openSeq) box.innerHTML = tr('<span class="meta">Ачаалж чадсангүй. Дахин оролдоно уу.</span>'); });
   try {
@@ -851,7 +900,8 @@ document.getElementById('askResult').addEventListener('click', ev => {
 network.on('click', p => { if (p.nodes.length) open(p.nodes[0]); });
 async function showOverview() {
   const sector = val('sector');
-  const g = await api('/api/graph/overview' + (sector ? `?sector=${encodeURIComponent(sector)}` : ''));
+  const q = [sector ? `sector=${encodeURIComponent(sector)}` : '', hideParam()].filter(Boolean).join('&');
+  const g = await api('/api/graph/overview' + (q ? '?' + q : ''));
   shown = { kind: 'overview' };
   draw(g);
   view = 'overview';
@@ -1020,11 +1070,22 @@ document.getElementById('btnCentrality').onclick = () => showCentrality();
 for (const id of ['sizeBy', 'colorBy', 'minPct', 'ties']) document.getElementById(id).onchange = render;
 // one sector: the overview is trimmed, so it is read again for that sector; other views filter what is drawn
 document.getElementById('sector').onchange = () => view === 'overview' ? showOverview() : render();
+// a company type ticked or unticked: the overview and a neighbourhood are read again (the server
+// leaves the hidden types out), the other views filter what is drawn
+const rekind = () => view === 'overview' ? showOverview() : shown.kind === 'focus' ? open(shown.key) : render();
+document.getElementById('kinds').onchange = ev => {
+  const k = ev.target.dataset.kind; if (!k) return;
+  const hide = hiddenKinds().filter(x => x !== k);
+  setHidden(ev.target.checked ? hide : [...hide, k]);
+  rekind();
+};
 document.getElementById('resetFilters').onclick = () => {
-  const refetch = view === 'overview' && val('sector');
+  const kinds = val('hideKinds') !== DEFAULT_HIDE;
+  const refetch = (view === 'overview' && val('sector')) || kinds;
   for (const id of ['sizeBy', 'colorBy', 'sector', 'ties']) document.getElementById(id).value = '';
   document.getElementById('minPct').value = '0';
-  refetch ? showOverview() : render();
+  if (kinds) setHidden(DEFAULT_HIDE.split(','));
+  refetch ? (kinds ? rekind() : showOverview()) : render();
 };
 darkMq.addEventListener('change', render);
 document.getElementById('btnCommunities').onclick = showCommunities;
@@ -1224,6 +1285,7 @@ let keptSector = '';
   for (const [id, v] of Object.entries(want)) {
     const el = document.getElementById(id);
     if (id === 'sector') keptSector = v;                 // its choices load later (loadSectors)
+    else if (id === 'hideKinds') el.value = v.split(',').filter(k => k in KIND_LABEL).join(',') || 'none';
     else if (el && [...el.options].some(o => o.value === v)) el.value = v;
   }
 }
@@ -1340,6 +1402,8 @@ function loadSectors() {
     }
   }).catch(() => {});
 }
+buildKinds();
+api('/api/company-kinds').then(rows => buildKinds(Object.fromEntries(rows.map(r => [r.kind, r.companies])))).catch(() => {});
 loadStats(); pollStatus();
 </script>
 </body>
