@@ -11,11 +11,12 @@
 //           (none)                        the market overview
 //   choices depth (1-3, default 2), color (sector | group), size (betweenness | pagerank | degree |
 //           market_cap), sector (<sector text>), min (stake %: 1 5 10 20 50), ties (board |
-//           positions | owners), lang (en | mn, see i18n.js)
+//           positions | owners), hide (company types left out, graph.COMPANY_KINDS: "savings_coop,nbfi";
+//           default savings_coop, "none" shows all), lang (en | mn, see i18n.js)
 const VIEW_KEYS = ['focus', 'a', 'b', 'group', 'community'];
 // query name -> [the page's select id, its default]
 const CHOICES = { depth: ['depth', '2'], color: ['colorBy', ''], size: ['sizeBy', ''], sector: ['sector', ''],
-                  min: ['minPct', '0'], ties: ['ties', ''] };
+                  min: ['minPct', '0'], ties: ['ties', ''], hide: ['hideKinds', 'savings_coop'] };
 
 // the query for a view and the choices ({select id: value}), keeping other parameters (lang)
 function viewQuery(search, shown, choices) {

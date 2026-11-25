@@ -235,11 +235,52 @@ _TYPE = "[l IN labels({0}) WHERE l IN ['Company', 'Person', 'Organization']][0]"
 # carries its sector and detected group (#28) with that group's label (its anchor's ticker or
 # name), so the UI can colour and filter by them, and `name_en` for the English UI (issue #10); an
 # edge carries `role_std` for the "board ties only" filter and the English title.
+# Company types, for the graph's "Компанийн төрөл" filter: each company gets one, the first that fits.
+# Listed companies come first (a listed bank, insurer or broker stays "listed"), then FRC's licence
+# lists (frc.py: `frc_kinds`), then the registry's legal form and the name. Savings cooperatives (ХЗХ)
+# hold their members as shareholders: 174 of them carry about 29,000 current stakes, ten times what all
+# listed companies have, so the UI hides them unless asked (`hide`, below).
+COMPANY_KINDS = ("listed", "savings_coop", "nbfi", "money_lender", "insurance", "securities", "jsc", "llc", "other")
+_INSURANCE_KINDS = ("insurer", "life_insurer", "reinsurer", "insurance_broker")
+_SECURITIES_KINDS = ("broker", "dealer", "underwriter", "custodian", "nominal_account", "asset_manager",
+                     "investment_adviser", "trust_manager", "rating_agency")
+
+
+def company_kind(v: str) -> str:
+    """Cypher for the company type of node `v` (null for a person or organisation)."""
+    fk, form = f"coalesce({v}.frc_kinds, [])", f"coalesce({v}.legal_form, '')"
+    word = lambda w: f"(' ' + toUpper(coalesce({v}.name, '')) + ' ') CONTAINS ' {w} '"   # "Нандин Эв ХЗХ"
+    anyk = lambda ks: f"any(k IN {fk} WHERE k IN {list(ks)!r})"
+    return (f"CASE WHEN NOT {v}:Company THEN null "
+            f"WHEN coalesce({v}.listed, true) THEN 'listed' "
+            f"WHEN 'savings_coop' IN {fk} OR {form} CONTAINS 'ХЗХ' OR {word('ХЗХ')} THEN 'savings_coop' "
+            f"WHEN 'nbfi' IN {fk} OR {word('ББСБ')} THEN 'nbfi' "
+            f"WHEN 'money_lender' IN {fk} THEN 'money_lender' "
+            f"WHEN {anyk(_INSURANCE_KINDS)} THEN 'insurance' "
+            f"WHEN {anyk(_SECURITIES_KINDS)} THEN 'securities' "
+            f"WHEN toLower({form}) CONTAINS 'хувьцаат' OR {form} ENDS WITH 'ХК' OR {word('ХК')} OR {word('ТӨХК')} "
+            f"THEN 'jsc' "
+            f"WHEN toLower({form}) CONTAINS 'хязгаарлагдмал' OR {form} STARTS WITH 'ХХК' OR {word('ХХК')} THEN 'llc' "
+            f"ELSE 'other' END")
+
+
+def kind_shown(v: str, param: str = "hide") -> str:
+    """Cypher: node `v` is not a company of a type in `$hide` (people and organisations always pass)."""
+    return f"NOT coalesce(({company_kind(v)}) IN ${param}, false)"
+
+
+def hidden_kinds(hide) -> list[str]:
+    """`hide` as the API takes it ("savings_coop,nbfi" or a list): the known company types in it."""
+    if isinstance(hide, str):
+        hide = hide.split(",")
+    return sorted({h.strip() for h in hide or () if h and h.strip() in COMPANY_KINDS})
+
+
 VIEW_NODE = ("n {.key, .name, .name_en, .ticker, .centrality_degree, .centrality_betweenness, .centrality_pagerank, "
              ".market_cap, .sector, .sector_std, .group_id, listed: CASE WHEN 'Company' IN labels(n) THEN coalesce(n.listed, true) END, "
              "group_label: CASE WHEN n.group_id IS NULL THEN null ELSE head(COLLECT { MATCH (a:Entity {key: substring(n.group_id, 4)}) "
              "RETURN CASE WHEN a.ticker IS NOT NULL AND NOT a.ticker STARTS WITH '~' THEN a.ticker ELSE a.name END }) END, "
-             "type: " + _TYPE.format("n") + "}")
+             "company_kind: " + company_kind("n") + ", type: " + _TYPE.format("n") + "}")
 VIEW_EDGE = ("{source: startNode(r).key, target: endNode(r).key, type: type(r), percent: r.percent, title: r.title, "
              "role: r.role, role_std: r.role_std, holding_type: r.holding_type, relation: r.relation, "
              "relation_std: r.relation_std, company: r.company}")
@@ -2765,14 +2806,18 @@ class Graph:
             key=key,
         )
 
-    def neighborhood(self, key: str, depth: int = 1, limit: int = 300) -> dict:
+    def neighborhood(self, key: str, depth: int = 1, limit: int = 300, hide=()) -> dict:
+        """The node and what is linked to it, up to `depth` steps. `hide` (company types,
+        COMPANY_KINDS) leaves out paths through companies of those types; the node itself stays."""
         depth = max(1, min(int(depth), 3))
         key = self.resolve_key(key)
+        hide = hidden_kinds(hide)
+        keep = f"AND all(n IN nodes(path) WHERE n = e OR {kind_shown('n')})" if hide else ""
         rows = self.run(
             f"""
             MATCH (e:Entity {{key: $key}})
             OPTIONAL MATCH path = (e)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER|AFFILIATED_WITH*1..{depth}]-(:Entity)
-            WHERE all(r IN relationships(path) WHERE r.current)
+            WHERE all(r IN relationships(path) WHERE r.current) {keep}
             WITH e, path LIMIT $limit
             WITH e, collect(path) AS paths
             WITH e, [p IN paths | nodes(p)] AS ns, [p IN paths | relationships(p)] AS rs
@@ -2783,40 +2828,53 @@ class Graph:
             RETURN [n IN nodes | {VIEW_NODE}] AS nodes,
                    [r IN rels | {VIEW_EDGE}] AS edges
             """,
-            key=key, limit=limit,
+            key=key, limit=limit, hide=hide,
         )
         return rows[0] if rows else {"nodes": [], "edges": []}
 
-    def overview(self, limit: int = 400, sector: str | None = None) -> dict:
+    def overview(self, limit: int = 400, sector: str | None = None, hide=()) -> dict:
         """Whole-market graph (trimmed): companies plus entities linked to 2+ companies.
 
         `sector` (issue #10) keeps only that sector's companies (matched on the `sector` the UI
         shows, or the standard section letter `sector_std`), all of them, and the entities linked
-        to them: any company that holds or is held by one, anything else linked to two or more."""
+        to them: any company that holds or is held by one, anything else linked to two or more.
+        `hide` (company types, COMPANY_KINDS) leaves those companies out before the trim, so a
+        person counts only the companies shown."""
+        hide = hidden_kinds(hide)
+        keep = f"AND {kind_shown('c')} AND {kind_shown('x')}" if hide else ""
         rows = self.run(
             f"""
             MATCH (x:Entity)-[r:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER {{current: true}}]->(c:Company)
-            WHERE $sector IS NULL OR c.sector = $sector OR c.sector_std = $sector
-               OR (x:Company AND (x.sector = $sector OR x.sector_std = $sector))
+            WHERE ($sector IS NULL OR c.sector = $sector OR c.sector_std = $sector
+               OR (x:Company AND (x.sector = $sector OR x.sector_std = $sector))) {keep}
             WITH x, collect(DISTINCT c) AS cs, collect(r) AS rs
             WHERE size(cs) >= 2 OR x:Company
-            WITH x, cs, rs LIMIT $limit
+            // the trim keeps what touches the most listed companies, then the most companies
+            WITH x, cs, rs ORDER BY size([c IN cs WHERE coalesce(c.listed, true)]) DESC, size(cs) DESC, x.key
+            LIMIT $limit
             UNWIND rs AS r
             WITH collect(DISTINCT x) + collect(DISTINCT endNode(r)) AS ns, collect(DISTINCT r) AS rels
             UNWIND ns AS n WITH collect(DISTINCT n) AS nodes, rels
             RETURN [n IN nodes | {VIEW_NODE}] AS nodes,
                    [r IN rels | {VIEW_EDGE}] AS edges
             """,
-            limit=limit, sector=(sector or None),
+            limit=limit, sector=(sector or None), hide=hide,
         )
         out = rows[0] if rows else {"nodes": [], "edges": []}
         if sector:      # every company of the sector, also those with no link to another company
             have = {n["key"] for n in out["nodes"]}
             out["nodes"] += [r["n"] for r in self.run(
                 f"""MATCH (n:Company) WHERE (n.sector = $sector OR n.sector_std = $sector) AND NOT n.key IN $have
+                      AND {kind_shown('n')}
                     RETURN {VIEW_NODE} AS n ORDER BY coalesce(n.listed, true) DESC, n.name LIMIT $limit""",
-                sector=sector, have=sorted(have), limit=limit)]
+                sector=sector, have=sorted(have), limit=limit, hide=hide)]
         return out
+
+    def company_kinds(self) -> list[dict]:
+        """Companies per company type (COMPANY_KINDS order), for the graph's type filter."""
+        rows = {r["kind"]: r for r in self.run(
+            f"MATCH (n:Company) WITH {company_kind('n')} AS kind RETURN kind, count(*) AS companies")}
+        return [{"kind": k, "companies": rows[k]["companies"] if k in rows else 0} for k in COMPANY_KINDS]
 
     def sectors(self) -> list[dict]:
         """The sectors companies have (the `sector` text the UI shows), with counts, for the

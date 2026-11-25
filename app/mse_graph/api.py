@@ -108,14 +108,22 @@ def entity(key: str):
 
 
 @app.get("/api/graph/neighborhood")
-def neighborhood(key: str, depth: int = 1):
-    return g().neighborhood(key, depth)
+def neighborhood(key: str, depth: int = 1, hide: str | None = None):
+    """A node's neighbourhood; `hide` ("savings_coop,nbfi") leaves out companies of those types."""
+    return g().neighborhood(key, depth, hide=hide)
 
 
 @app.get("/api/graph/overview")
-def overview(limit: int = 400, sector: str | None = None):
-    """The whole-market view; `sector` keeps one sector's companies and what links them (#10)."""
-    return g().overview(limit, sector=sector)
+def overview(limit: int = 400, sector: str | None = None, hide: str | None = None):
+    """The whole-market view; `sector` keeps one sector's companies and what links them (#10);
+    `hide` ("savings_coop,nbfi", see graph.COMPANY_KINDS) leaves out companies of those types."""
+    return g().overview(limit, sector=sector, hide=hide)
+
+
+@app.get("/api/company-kinds")
+def company_kinds():
+    """Companies per type (listed, savings cooperative, NBFI, ...), for the graph's type filter."""
+    return g().company_kinds()
 
 
 @app.get("/api/sectors")
