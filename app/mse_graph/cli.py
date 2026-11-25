@@ -124,8 +124,8 @@ def main(argv=None):
     p.add_argument("--compare", action="store_true",
                    help="counts and what changed since the last saved result, then save this one in the graph")
     p = sub.add_parser("prune-listed-registry-owners",
-                       help="remove stakes that only the registry reports from listed companies with a long "
-                            "registry list (its share register, e.g. Хаан банк's 4,105 small holders); "
+                       help="remove stakes in listed companies that only the registry reports (a listed "
+                            "company's owners are mse.mn's; every start and load does this too); "
                             "counts only without --apply")
     p.add_argument("--apply", action="store_true", help="delete them (and records/people left unlinked)")
     p = sub.add_parser("group-people",

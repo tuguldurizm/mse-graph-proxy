@@ -208,6 +208,16 @@ MIGRATE_CHANGES = [
 DEMO_SOURCE = "DEMO-fictional"
 # a source on this host (the state registry mirror) gives people's full names
 REGISTRY_MARK = "opendatalab.mn"
+
+
+# a name that says it is a limited liability company ("Алтан Шувуу ХХК"): not a listed company's twin
+_LLC_NAME_RE = re.compile(r"(?<!\w)ххк(?!\w)", re.IGNORECASE)
+
+
+def _is_jsc_form(legal_form: str) -> bool:
+    """A listed company is a joint-stock company (Хувьцаат компани, ХК). Unknown counts as yes."""
+    f = clean(legal_form).lower()
+    return not f or "хувьцаат" in f or f in ("хк", "төхк", "өхк", "jsc")
 # as_of values that compare correctly as strings (see normalize.parse_date)
 ISO_DATE = r"\d{4}(-\d{2}){0,2}"
 # Two stakes differing by less than this many percentage points count as equal.
@@ -430,6 +440,8 @@ class Graph:
         self.rekeyed_people = self.rekey_entities()
         # what the last start or load merged and re-keyed (the pipeline logs it)
         self.consolidated = self.consolidate_companies()
+        # a listed company's owners are mse.mn's: stakes only the registry reports go (2026-11-25)
+        self.pruned_registry = self.drop_registry_owners_of_listed(apply=True)
         self.adopted = self._adopt_initials()
         # decisions from the identity overrides file (issue #37); `overrides` replaces the file
         self.overridden = self.apply_overrides(overrides)
@@ -1052,6 +1064,37 @@ class Graph:
 
     # ---- one node per legal entity (issue #35) ----------------------------------
 
+    def _adopt_registry_twins(self) -> list[dict]:
+        """Give a listed company without a register number the number of its registry twin:
+        the one unlisted company of the same name (an `org:` alias) that has a number and is
+        a joint-stock company (of unknown legal form: a name without "ХХК"). The FRC import and the registry
+        rotation made such twins on 2026-11-23 (Худалдаа хөгжлийн банк as ~2635534, Монгол
+        даатгал, Ард даатгал and six more), so the listed company and its registry page were
+        two nodes. With the number, consolidate_companies merges them. Returns the pairs."""
+        rows = self.run(
+            """
+            MATCH (l:Company) WHERE coalesce(l.listed, true) AND NOT l.ticker STARTS WITH '~'
+              AND NOT coalesce(l.register_no, '') =~ $re
+            MATCH (u:Company) WHERE u.listed = false AND u.register_no =~ $re
+              AND any(a IN coalesce(u.aliases, []) WHERE a STARTS WITH 'org:' AND a IN coalesce(l.aliases, []))
+            RETURN l.ticker AS t,
+                   collect(DISTINCT {reg: u.register_no, form: coalesce(u.legal_form, ''), name: u.name}) AS cands
+            """, re=REGISTER_NO_RE)
+        picks: dict[str, str] = {}
+        for r in rows:
+            regs = {c["reg"] for c in r["cands"]
+                    if (_is_jsc_form(c["form"]) if clean(c["form"]) else not _LLC_NAME_RE.search(c["name"] or ""))}
+            if len(regs) == 1:
+                picks[r["t"]] = regs.pop()
+        claimed: dict[str, int] = {}
+        for reg in picks.values():
+            claimed[reg] = claimed.get(reg, 0) + 1
+        pairs = [{"ticker": t, "reg": reg} for t, reg in sorted(picks.items()) if claimed[reg] == 1]
+        if pairs:
+            self.run("""UNWIND $rows AS r MATCH (c:Company {ticker: r.ticker})
+                        SET c.register_no = r.reg, c.register_no_found_via = 'registry twin'""", rows=pairs)
+        return pairs
+
     def consolidate_companies(self) -> dict:
         """One :Company node per legal entity, keyed by its register number.
 
@@ -1071,6 +1114,7 @@ class Graph:
         Runs on every start and after every load. Returns what it changed.
         """
         out = {"split_numbers": self._split_reg_numbers(),
+               "twins_adopted": self._adopt_registry_twins(),
                "companies_merged": 0, "organizations_merged": 0}
         groups = self.run(
             """
@@ -1613,6 +1657,9 @@ class Graph:
         merged = self.consolidate_companies()   # e.g. a registry page gave a company its register number
         if merged["companies_merged"] or merged["organizations_merged"]:
             changes.update({k: merged[k] for k in ("companies_merged", "organizations_merged")})
+        pruned = self.drop_registry_owners_of_listed(apply=True)   # a merged twin's registry stakes
+        if pruned["stakes"]:
+            changes["registry_stakes_of_listed_dropped"] = pruned["stakes"]
         self._refresh_former_names()
         self._derive_sectors()
         relations_mod.apply(self)               # the people of a confirmed family link may be new
@@ -1633,21 +1680,18 @@ class Graph:
         )
         return {r["t"] for r in rows}
 
-    # A listed company whose registry page lists more holders than this shows its share
-    # register: thousands of small holders without a percentage (Хаан банк: 4,105). From such
-    # a list only the rows that confirm an mse.mn owner are loaded; shorter lists (Голомт
-    # Банк's holding companies) are kept whole (owner's decision, 2026-11-23).
-    REGISTRY_LISTED_MAX_HOLDERS = int(os.getenv("REGISTRY_LISTED_MAX_HOLDERS", "50"))
+    # A listed company's owners are the ones mse.mn reports. Its registry shareholder list is
+    # out of date for a listed company (holders from before the listing, staff share schemes:
+    # Худалдаа хөгжлийн банк's 2020 list, Хаан банк's 4,105 small holders), so from it only the
+    # rows that confirm an mse.mn owner are loaded, whatever its length (owner's decision,
+    # 2026-11-25: "if it's not currently on MSE they don't own it"; it replaces the 50-holder
+    # cap of 2026-11-23).
 
     def _mse_owners_of_listed(self, ds: Dataset) -> dict[str, set[str]]:
-        """For each listed company with a registry shareholder list longer than
-        REGISTRY_LISTED_MAX_HOLDERS in the dataset: the keys of its current owners from
-        other sources (mse.mn), the only ones of that list to load."""
-        count: dict[str, int] = {}
-        for h in ds.shareholdings:
-            if REGISTRY_MARK in (h.source or ""):
-                count[h.company_ticker.upper()] = count.get(h.company_ticker.upper(), 0) + 1
-        tickers = sorted(t for t, n in count.items() if n > self.REGISTRY_LISTED_MAX_HOLDERS)
+        """For each listed company with registry shareholder rows in the dataset: the keys
+        of its current owners from other sources (mse.mn), the only ones of those rows to load."""
+        tickers = sorted({h.company_ticker.upper() for h in ds.shareholdings
+                          if REGISTRY_MARK in (h.source or "")})
         if not tickers:
             return {}
         rows = self.run(
@@ -1666,20 +1710,18 @@ class Graph:
         return out
 
     def drop_registry_owners_of_listed(self, apply: bool = False) -> dict:
-        """Remove what `_mse_owners_of_listed` now keeps out: in listed companies with more
-        than REGISTRY_LISTED_MAX_HOLDERS registry holders, the stakes only the registry
-        reports, their source records, and the people and organisations left with no link
-        at all. `apply=False` only counts."""
+        """Remove what `_mse_owners_of_listed` keeps out: in listed companies, the stakes
+        (current or past) only the registry reports, their source records, and the people
+        and organisations left with no link at all. Runs on every start and after every
+        load (a merge can bring a registry twin's stakes, see _adopt_registry_twins).
+        `apply=False` only counts."""
         edges = self.run(
             """
-            MATCH (:Entity)-[r:OWNS]->(c:Company)
+            MATCH (e:Entity)-[o:OWNS]->(c:Company)
             WHERE coalesce(c.listed, true) AND NOT c.ticker STARTS WITH '~'
-              AND any(s IN coalesce(r.sources, [r.source]) WHERE s CONTAINS $reg)
-            WITH c, count(r) AS n WHERE n > $max
-            MATCH (e:Entity)-[o:OWNS]->(c) WHERE NOT e:Company
               AND all(s IN coalesce(o.sources, [o.source]) WHERE s CONTAINS $reg)
             RETURN elementId(o) AS id, e.key AS key, c.ticker AS ticker, coalesce(o.records, []) AS records
-            """, reg=REGISTRY_MARK, max=self.REGISTRY_LISTED_MAX_HOLDERS)
+            """, reg=REGISTRY_MARK)
         by_company: dict[str, int] = {}
         for r in edges:
             by_company[r["ticker"]] = by_company.get(r["ticker"], 0) + 1
