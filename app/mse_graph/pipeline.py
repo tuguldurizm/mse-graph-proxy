@@ -348,6 +348,11 @@ def _run(force: bool = False) -> None:
         done = {k: v for k, v in (getattr(g, "consolidated", None) or {}).items() if v}
         if done:   # one node per legal entity (#35): the first start re-keys every company
             log.info("PIPELINE companies consolidated: %s", json.dumps(done, ensure_ascii=False))
+        pruned = getattr(g, "pruned_registry", None)
+        if pruned and pruned.get("stakes"):   # listed companies: mse.mn owners only (2026-11-25)
+            log.info("PIPELINE registry stakes of listed companies dropped: %s",
+                     json.dumps({k: pruned[k] for k in ("stakes", "records", "entities", "by_company")},
+                                ensure_ascii=False))
         people = {"rekeyed_or_split": getattr(g, "rekeyed_people", 0), "linked": getattr(g, "adopted", 0)}
         if any(people.values()):   # person identity (#36): the first start splits merged namesakes
             log.info("PIPELINE people resolved: %s, under review: %d", json.dumps(people),
