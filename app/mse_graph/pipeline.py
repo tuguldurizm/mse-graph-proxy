@@ -164,13 +164,24 @@ def discovery_step(g, fetcher, limit: int | None = None, keep_lease=None) -> Non
         log.error(traceback.format_exc())
 
 
+def mse_enabled() -> bool:
+    """MSE_ENABLE: whether the runs read open.mse.mn (the company scrape, market data, the report index).
+    Off by default since 2026-11-27 (owner): open.mse.mn added an anti-scraping block that morning
+    (docs/SYSTEM.md, known problems), and we don't work around it. MSE_ENABLE=1 turns it back on, e.g. once
+    MSE allows access. issuers.mse.mn's PDFs, Open Data Lab, FRC and the manual datasets are not affected."""
+    return os.getenv("MSE_ENABLE", "0") == "1"
+
+
+MSE_PAUSED = "open.mse.mn paused (MSE_ENABLE=0: it blocks automated access since 2026-11-27)"
+
+
 def market_step(g, force: bool = False) -> None:
     """Today's prices and market caps from mse.mn (issue #31, market.py), at most every
     MARKET_MIN_INTERVAL_HOURS (12), also when the company scrape is skipped: it is about one
     request per listed company. MARKET_ENABLE=0 turns it off. Never raises."""
     from . import market
 
-    if os.getenv("MARKET_ENABLE", "1") == "0":
+    if os.getenv("MARKET_ENABLE", "1") == "0" or not mse_enabled():
         return
     try:
         min_hours = float(os.getenv("MARKET_MIN_INTERVAL_HOURS", "12"))
@@ -238,7 +249,7 @@ def nested_repair_step(g) -> None:
     Done when `(:Meta {key: 'mse_nested_repair'})` says so; NESTED_REPAIR=0 turns it off. Never raises."""
     from . import layout
 
-    if os.getenv("NESTED_REPAIR", "1") == "0":
+    if os.getenv("NESTED_REPAIR", "1") == "0" or not mse_enabled():
         return
     try:
         res = layout.repair_nested(g)
@@ -379,6 +390,27 @@ def _run(force: bool = False) -> None:
             set_status("running", f"skipped scrape: last one {since:.1f} h ago "
                                   f"(PIPELINE_MIN_INTERVAL_HOURS={min_hours:g}, PIPELINE_FORCE=1 to override)")
             manual_step(g)
+        elif not mse_enabled():
+            from . import opendatalab, shard
+
+            set_status("running", MSE_PAUSED)
+            part = shard.parse(os.getenv("PIPELINE_SHARD", ""))
+            limit = int(os.getenv("SCRAPE_LIMIT", "0")) or None
+            if not limit and not part:
+                g.mark_scrape()          # keeps PIPELINE_MIN_INTERVAL_HOURS between the registry runs too
+            manual_step(g)
+            if os.getenv("ODL_ENABLE", "1") == "0":
+                set_status("running", "Open Data Lab skipped (ODL_ENABLE=0)")
+            else:
+                lease = opendatalab.RegistryLease(g, "hosted pipeline")
+                if not lease.acquire():
+                    set_status("running", "Open Data Lab skipped: another run is reading the registry",
+                               holder=lease.holder.get("owner"), until=lease.holder.get("until"))
+                else:
+                    try:
+                        registry_step(g, part, limit, lease.keep)
+                    finally:
+                        lease.release()
         else:
             from . import opendatalab, scraper, shard
 

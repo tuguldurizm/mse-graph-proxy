@@ -598,8 +598,11 @@ def step(g, fetcher=None, when: str | None = None) -> dict:
 
     fetcher = fetcher or Fetcher()
     when = when or date.today().isoformat()
+    from .pipeline import mse_enabled
+
     res = {"upgraded": upgrade(g)}
-    res["index"] = index(g, fetcher, when=when)
+    # the tabs are on open.mse.mn (paused: pipeline.mse_enabled); the PDFs are on issuers.mse.mn
+    res["index"] = index(g, fetcher, when=when) if mse_enabled() else {"skipped": "MSE_ENABLE=0"}
     res["pdf"] = read_pdfs(g, fetcher, when=when) if pdf_budget() > 0 else {"read": 0}
     g.run("MERGE (m:Meta {key: 'reports'}) SET m.at = $at, m.version = $v", at=_utc_now(), v=STEP_VERSION)
     res["summary"] = summary(g)
