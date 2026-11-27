@@ -2763,8 +2763,17 @@ class Graph:
         di = officials_mod.company_interests(self, out["entity"]["key"]) if company else {"current": [], "ended": []}
         out["declared_interests"] = di["current"]
         out["history"]["declared_interests"] = di["ended"]
-        # confirmed family links only (issue #32); hypotheses are never served here
-        out["relatives"] = relations_mod.relatives(self, key) if out["entity"]["type"] == "Person" else []
+        # family links (issue #32): confirmed ones, and the unconfirmed hypotheses marked as such
+        person = out["entity"]["type"] == "Person"
+        out["relatives"] = relations_mod.relatives(self, key) if person else []
+        try:
+            out["possible_relatives"] = (relations_mod.possible_for_person(self, out["entity"]["key"])
+                                         if person else [])
+            out["possible_family"] = (relations_mod.possible_for_company(
+                self, out["entity"].get("ticker"), out["entity"].get("name")) if company else [])
+        except Exception as exc:   # a hypothesis list must never break the panel
+            log.warning("possible family links for %s failed: %s", key, exc)
+            out["possible_relatives"], out["possible_family"] = [], []
         # related parties a company disclosed for a shareholder (mse.mn, affiliations.py): both ways
         aff = affiliations_mod.for_entity(self, key)
         for a in aff:
