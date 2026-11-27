@@ -502,9 +502,10 @@ async function showDetails(d, seq = openSeq) {
   // one printable page with everything about the company (issue #10, dossier.html)
   if (isCo) html += L`<div class="row"><a class="dossier" href="/dossier/${t}${EN_ON ? '?lang=en' : ''}" target="_blank" rel="noopener" title="Эзэмшигч, удирдлага, анхаарах зүйлс, өөрчлөлтийг нэг хуудсанд: хэвлэх эсвэл PDF болгох">Компанийн досье (хэвлэх)</a></div>`;
   html += later('mk', mk, marketBlock);
-  // the server writes these sentences in Mongolian (analysis.company_flags); say so in English
-  html += later('flags', flags, fl => !fl || !fl.length ? '' : L`<h2>Анхаарах зүйлс</h2>${EN_ON ? '<div class="meta">(in Mongolian: the checks write their findings in Mongolian)</div>' : ''}<ul>${fl.map(f =>
-    `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(f.text)}</li>`).join('')}</ul>`);
+  // the server writes these sentences in Mongolian, with their content as `args` (analysis.company_flags);
+  // in English flagText (i18n.js) words them
+  html += later('flags', flags, fl => !fl || !fl.length ? '' : L`<h2>Анхаарах зүйлс</h2><ul>${fl.map(f =>
+    `<li class="rf ${f.level}" data-key="${esc(f.keys[0] || '')}">${esc(flagText(f))}</li>`).join('')}</ul>`);
   const pct = p => p != null ? `${p}%` : '';
   // a stake's MNT value (issue #31): percent × the market cap of the company it is in
   const val = x => x.value_mnt != null ? L` <span class="meta" title="эзэмшлийн хувь × зах зээлийн үнэлгээ">≈ ${fmtMNT(x.value_mnt)}</span>` : '';
@@ -848,7 +849,7 @@ function askRow(a, r) {
   switch (a.intent) {
     case 'officers': case 'positions': return li(askName(r), esc(roleTitle(r)));
     case 'related': return li(askName(r), (r.via || []).map(n => esc(dnS(n))).join(', '));
-    case 'flags': return `<li class="rf ${r.level}"${r.key ? ` data-key="${esc(r.key)}"` : ''}>${esc(r.text)}</li>`;
+    case 'flags': return `<li class="rf ${r.level}"${r.key ? ` data-key="${esc(r.key)}"` : ''}>${esc(flagText(r))}</li>`;
     case 'interlocks': return li(esc(dn(r)), L`${r.count} компани: ${(r.via || []).map(esc).join(', ')}`);
     case 'largest': return li(askName(r), fmtMNT(r.market_cap) + (r.percent != null ? ` (${r.percent}%)` : ''));
     case 'state': return li(askName(r), `${fmtPct(r.percent)}${r.direct ? L` (шууд ${fmtPct(r.direct)})` : ''}`);

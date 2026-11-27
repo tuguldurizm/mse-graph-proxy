@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from .graph import Graph, is_joint_stock
 from .holdings import real
-from .normalize import comparable_sector, is_state, mse_sector_code, sector_std_name
+from .normalize import comparable_sector, is_state, mse_sector_code, role_std, sector_std_name
 
 # a stake that is ownership (not nominee or treasury), for the relationship variable r
 _REAL_R = real("r")
@@ -52,6 +52,17 @@ def _co(n) -> str:
 
 def _pct(v) -> str:
     return f"{v:g}%" if v is not None else "?%"
+
+
+def _node_arg(n) -> dict:
+    """A node for a flag's `args`: the English page labels it (ticker, else the name transliterated)."""
+    return {"key": n.get("key"), "ticker": n.get("ticker"), "name": n.get("name")}
+
+
+def _role_args(roles: list[str]) -> list[dict]:
+    """Role strings ("ТУЗ-ийн гишүүн", "51%") for a flag's `args`: a title with its standard role
+    (normalize.ROLES_STD), so the English page can name it; a stake as its percent text."""
+    return [{"percent": r} if r.endswith("%") else {"title": r, "role_std": role_std(r)} for r in roles]
 
 
 def _roles(items: list[dict]) -> list[str]:
@@ -309,6 +320,13 @@ def family_related_parties(g: Graph, min_stake: float = DEFAULT_MIN_STAKE) -> li
     return out
 
 
+def _related_args(r: dict) -> dict:
+    """A related_party row as a flag's `args`: the officer, both companies with their roles, how they link."""
+    return {"person": _node_arg(r), "relation": r["relation"],
+            "company": {**_node_arg(r["company"]), "roles": _role_args(r["company"]["roles"])},
+            "counterparty": {**_node_arg(r["counterparty"]), "roles": _role_args(r["counterparty"]["roles"])}}
+
+
 BASIS_MN = {"sibling": "ах дүү", "parent_child": "эцэг эх / хүүхэд", "spouse": "эхнэр нөхөр", "relative": "төрөл"}
 
 
@@ -460,17 +478,20 @@ def position_roles(g: Graph, limit: int = 200) -> dict:
 # ---- per-company summary ----------------------------------------------------------
 
 def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -> list[dict]:
-    """Everything above that involves one company, as {kind, level, text, keys}.
+    """Everything above that involves one company, as {kind, level, text, keys, args}.
 
     level is "warn" for structures that usually need a closer look (loops, mutual
-    holdings, competitor ties) and "info" for common, disclosure-worthy ones.
+    holdings, competitor ties) and "info" for common, disclosure-worthy ones. `text` is the
+    sentence in Mongolian; `args` holds what it says as data (nodes, roles with their
+    `role_std`, percents, the sector), so the English page words it itself and transliterates
+    the names as it does everywhere else (static/i18n.js `flagText`, issue #10).
     """
     ticker = g.resolve_ticker(ticker)
     me = g.company_keys().get(ticker, "company:" + ticker)
     flags: list[dict] = []
 
-    def add(kind, level, text, keys=()):
-        flags.append({"kind": kind, "level": level, "text": text, "keys": list(keys)})
+    def add(kind, level, text, keys=(), **args):
+        flags.append({"kind": kind, "level": level, "text": text, "keys": list(keys), "args": args})
 
     from .memo import cached
     for cyc in cached(g, "cycles", cycles):
@@ -481,39 +502,45 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
             pct = f" (давталтаар өөрийгөө {cyc['loop_percent']:g}% эзэмшинэ)" if cyc["loop_percent"] else ""
             kind = "mutual_holding" if cyc["mutual"] else "ownership_cycle"
             label = "Харилцан эзэмшил" if cyc["mutual"] else "Тойрог эзэмшил"
-            add(kind, "warn", f"{label}: {' → '.join(ring)}{pct}", [n["key"] for n in cyc["companies"]])
+            nodes = cyc["companies"][i:] + cyc["companies"][:i] + [cyc["companies"][i]]
+            add(kind, "warn", f"{label}: {' → '.join(ring)}{pct}", [n["key"] for n in cyc["companies"]],
+                ring=[_node_arg(n) for n in nodes], loop_percent=cyc["loop_percent"] or None)
 
     for x in cached(g, "cross_holdings", cross_holdings):
         if x["company"] == ticker and x["reverse_percent"] is None:
             add("listed_holder", "info", f"Бүртгэлтэй компани {x['holder']} {x['percent']:g}% эзэмшдэг"
-                if x["percent"] is not None else f"Бүртгэлтэй компани {x['holder']} эзэмшдэг", [x["holder_key"]])
+                if x["percent"] is not None else f"Бүртгэлтэй компани {x['holder']} эзэмшдэг", [x["holder_key"]],
+                holder={"key": x["holder_key"], "ticker": x["holder"], "name": x["holder_name"]}, percent=x["percent"])
 
     uo = g.ultimate_owners(ticker)
     if uo and uo[0]["effective_percent"] >= 50:
         add("controller", "info", f"Хяналтын эзэмшигч: {uo[0]['name']} ({uo[0]['effective_percent']:g}% look-through)",
-            [uo[0]["key"]])
+            [uo[0]["key"]], owner=_node_arg(uo[0]), percent=uo[0]["effective_percent"])
 
     held = g.ownership_summary(me)
     if held["nominee"]["holders"]:
         pct = held["nominee"]["percent"]
         add("nominee_holding", "info",
             f"Номини / кастодиан эзэмшил: {held['nominee']['holders']} эзэмшигч"
-            + (f", нийт {pct:g}%" if pct is not None else "") + " (харилцагчдын нэрийн өмнөөс; эзэн нь тодорхойгүй)")
+            + (f", нийт {pct:g}%" if pct is not None else "") + " (харилцагчдын нэрийн өмнөөс; эзэн нь тодорхойгүй)",
+            holders=held["nominee"]["holders"], percent=pct)
     if held["treasury"]["holders"] and held["treasury"]["percent"] is not None:
-        add("treasury", "info", f"Өөрийн (буцаан авсан) хувьцаа: {held['treasury']['percent']:g}%")
+        add("treasury", "info", f"Өөрийн (буцаан авсан) хувьцаа: {held['treasury']['percent']:g}%",
+            percent=held["treasury"]["percent"])
 
     for s in cached(g, "state_ownership", state_ownership):
         if s["key"] == me:
             direct = f"шууд {s['direct_percent']:g}%, " if s["direct_percent"] else ""
             add("state", "info", f"Төрийн оролцоо: {direct}look-through {s['lookthrough_percent']:g}%",
-                [o["key"] for o in s["top_owners"]])
+                [o["key"] for o in s["top_owners"]], direct=s["direct_percent"] or None,
+                lookthrough=s["lookthrough_percent"])
 
     for c in cached(g, "insider_owners", insider_owners):
         co = c["companies"][0]
         if co["ticker"] == ticker:
             pct = f" {co['percent']:g}%-ийг" if co["percent"] is not None else ""
             add("insider_owner", "info", f"{c['name']} ({', '.join(co['titles'])}) компанийн хувьцааны{pct} эзэмшдэг",
-                [c["key"]])
+                [c["key"]], person=_node_arg(c), roles=_role_args(co["titles"]), percent=co["percent"])
 
     for c in cached(g, "competitor_links", competitor_links, min_stake):
         tickers = [co["ticker"] for co in c["companies"]]
@@ -523,7 +550,10 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
                                for co in c["companies"] if co["ticker"] != ticker)
             add("competitor", "warn",
                 f"{c['name']} ({', '.join(mine['roles'])}) ижил салбарын ({c['sector']}) өөр компанид бас оролцоотой — {others}",
-                [c["key"]] + [co["key"] for co in c["companies"]])
+                [c["key"]] + [co["key"] for co in c["companies"]],
+                who=_node_arg(c), roles=_role_args(mine["roles"]), sector=c["sector"], sector_std=c["sector_std"],
+                others=[{**_node_arg(co), "roles": _role_args(co["roles"])}
+                        for co in c["companies"] if co["ticker"] != ticker])
 
     for r in cached(g, "related_parties", related_parties, min_stake):
         sides = {r["company"]["key"], r["counterparty"]["key"]}
@@ -536,13 +566,14 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
             add("related_party", "info",
                 f"{r['name']} ({_co(r['company'])}: {', '.join(r['company']['roles'])}) — {basis} {q['name']} "
                 f"{where} ({', '.join(r['counterparty']['roles'])}); баталгаажсан холбоо, эх сурвалж: {q['source']}",
-                [r["key"], q["key"], r["counterparty"]["key"], r["company"]["key"]])
+                [r["key"], q["key"], r["counterparty"]["key"], r["company"]["key"]],
+                **_related_args(r), relative=_node_arg(q), basis=q["basis"], source=q["source"])
         elif me in sides:
             rel = "хувьцаа эзэмшигч" if r["relation"] == "shareholder" else "охин компани"
             add("related_party", "info",
                 f"{r['name']}: {_co(r['company'])} ({', '.join(r['company']['roles'])}) болон түүний {rel} "
                 f"{_co(r['counterparty'])} ({', '.join(r['counterparty']['roles'])})",
-                [r["key"], r["counterparty"]["key"], r["company"]["key"]])
+                [r["key"], r["counterparty"]["key"], r["company"]["key"]], **_related_args(r))
 
     # the FRC's adverse decisions about the company (frc.py): suspension, revocation, penalty, ...
     from datetime import date as _date
@@ -551,8 +582,10 @@ def company_flags(g: Graph, ticker: str, min_stake: float = DEFAULT_MIN_STAKE) -
     for d in g.run("""MATCH (d:FrcDecision)-[:CONCERNS]->(c:Company {key: $me}) WHERE d.adverse AND d.date >= $since
                       RETURN d.date AS date, d.number AS number, d.name AS name ORDER BY d.date DESC LIMIT 10""",
                    me=me, since=since):
+        from .frc import decision_kind
         add("frc_decision", "warn", f"СЗХ-ны шийдвэр {d['date']}" + (f", №{d['number']}" if d["number"] else "")
-            + f": {d['name']}", [me])
+            + f": {d['name']}", [me], date=d["date"], number=d["number"] or None,
+            decision_kind=decision_kind(d["name"])[0], title=d["name"])
 
     order = {"warn": 0, "info": 1}
     flags.sort(key=lambda f: order[f["level"]])

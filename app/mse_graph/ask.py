@@ -196,7 +196,8 @@ def _run(g, intent: str, ents: list[dict]) -> dict:
         rows = [_row(r, via=sorted({x["name"] for x in r["links"]})[:6]) for r in g.related_companies(e["key"])]
         return {"rows": rows, "view": {"focus": e["key"]}}
     if intent == "flags" and e:
-        return {"rows": [{"level": f["level"], "kind": f["kind"], "text": f["text"], "key": (f["keys"] or [None])[0]}
+        return {"rows": [{"level": f["level"], "kind": f["kind"], "text": f["text"], "args": f["args"],
+                          "key": (f["keys"] or [None])[0]}
                          for f in analysis.company_flags(g, e["ticker"])], "view": {"focus": e["key"]}}
     if intent == "changes":
         if e and e.get("type") == "Company":
