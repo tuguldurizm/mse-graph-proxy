@@ -468,7 +468,7 @@ def _run(force: bool = False) -> None:
             log.warning("PIPELINE officials failed: %s", exc)
         try:   # possible family links (#32): hypotheses from registry patronymics, and the confirmed ones
             from . import relations
-            log.info("PIPELINE relations: %s", json.dumps(relations.summary(g), ensure_ascii=False))
+            log.info("PIPELINE relations: %s", json.dumps(relations.refresh(g), ensure_ascii=False))
         except Exception as exc:  # nor the family-link counts
             log.warning("PIPELINE relations failed: %s", exc)
         try:   # market data (#31): prices, market caps, the largest companies
