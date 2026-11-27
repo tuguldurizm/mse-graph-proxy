@@ -466,6 +466,11 @@ def _run(force: bool = False) -> None:
             log.info("PIPELINE officials: %s", json.dumps(officials.counts(g), ensure_ascii=False))
         except Exception as exc:  # nor the officials' counts
             log.warning("PIPELINE officials failed: %s", exc)
+        try:   # possible family links (#32): hypotheses from registry patronymics, and the confirmed ones
+            from . import relations
+            log.info("PIPELINE relations: %s", json.dumps(relations.summary(g), ensure_ascii=False))
+        except Exception as exc:  # nor the family-link counts
+            log.warning("PIPELINE relations failed: %s", exc)
         try:   # market data (#31): prices, market caps, the largest companies
             from . import market
             log.info("PIPELINE market: %s", json.dumps(market.summary_line(g), ensure_ascii=False))

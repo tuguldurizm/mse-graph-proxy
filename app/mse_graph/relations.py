@@ -24,13 +24,16 @@ patronymic only these two have scores 1 and one shared by eleven people 0.1. ``s
 1 - 0.5 ** evidence, with evidence = shared companies + 0.5 x linked company pairs + 0.25 for the
 same group + 0.5 for the same clan. Pairs under MIN_SCORE are not listed.
 
-Privacy
--------
-These are people's private relationships. The candidates are served only with the review password
-(`/api/review/relations`, header X-Review-Password; without REVIEW_PASSWORD or APP_PASSWORD on the
-server they are not served at all), never in the public `/api/analysis/resolution`. A dismissed
-candidate (`related:<a>|<b>`) stays a `(:Decision)` in the graph and is **not** exported to
-`data/overrides/reviewed.csv`, because the deploy mirror is a public repository.
+Public (owner, 2026-11-27)
+--------------------------
+The owner decided that the hypotheses need no password: `/api/review/relations` serves them to
+anyone, a person's panel lists theirs (`possible_relatives`) and a company's panel the pairs among
+its people (`possible_family`), always marked as unconfirmed guesses. They still never become a
+graph edge, a conflict row or a company flag until confirmed. Confirming (or dismissing) still
+needs the review password (`/api/review/decide`), because it writes to the graph; without one, a
+session confirms a link by adding a row with its public source to ``data/overrides/relations.csv``.
+A dismissed candidate (`related:<a>|<b>`) stays a `(:Decision)` in the graph and is not exported
+to `data/overrides/reviewed.csv`.
 
 Confirmed links
 ---------------
@@ -277,8 +280,43 @@ def confirmed(g) -> list[dict]:
     return out
 
 
+def cached_candidates(g) -> list[dict]:
+    """All candidates at MIN_SCORE, shared between requests for a while (memo.py). Read-only."""
+    from . import memo
+    return memo.cached(g, "relations.candidates", candidates, MIN_SCORE, 2000)
+
+
+def _other(c: dict, key: str) -> dict | None:
+    if c["a"]["key"] == key:
+        return c["b"]
+    if c["b"]["key"] == key:
+        return c["a"]
+    return None
+
+
+def possible_for_person(g, key: str) -> list[dict]:
+    """A person's possible relatives (unconfirmed hypotheses), best first."""
+    out = []
+    for c in cached_candidates(g):
+        o = _other(c, key)
+        if o:
+            out.append({"key": o["key"], "name": o["name"], "companies": o["companies"], "score": c["score"],
+                        "patronymic": c["patronymic"], "evidence": c["evidence"],
+                        "shared_companies": c["shared_companies"], "linked_companies": c["linked_companies"],
+                        "item": c["item"], "hypothesis": True})
+    return out
+
+
+def possible_for_company(g, ticker: str | None, name: str | None = None) -> list[dict]:
+    """Pairs of possible relatives where at least one of them is tied to the company (unconfirmed)."""
+    ids = {x for x in (ticker, name) if x}
+    if not ids:
+        return []
+    return [c for c in cached_candidates(g) if ids & (set(c["a"]["companies"]) | set(c["b"]["companies"]))]
+
+
 def review(g, min_score: float = MIN_SCORE, limit: int = 200) -> dict:
-    """What `/api/review/relations` serves (behind the review password)."""
+    """What `/api/review/relations` serves (public since 2026-11-27: hypotheses, marked as such)."""
     cands = candidates(g, min_score, limit)
     conf = confirmed(g)
     decisions = [r["d"] for r in g.run(
@@ -286,7 +324,8 @@ def review(g, min_score: float = MIN_SCORE, limit: int = 200) -> dict:
            RETURN d {.*} AS d ORDER BY d.created_at DESC, d.id""", p=ITEM_PREFIX)]
     return {"candidates": cands, "confirmed": conf, "decisions": decisions,
             "counts": {"candidates": len(cands), "confirmed": len(conf)},
-            "note": "Hypotheses only: a shared patronymic is weak evidence. Not shown anywhere else until confirmed."}
+            "note": ("Hypotheses only: a shared patronymic is weak evidence. Not a graph edge, conflict or flag "
+                     "until confirmed with a public source.")}
 
 
 def summary(g) -> dict:

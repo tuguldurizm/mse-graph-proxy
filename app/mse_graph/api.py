@@ -539,13 +539,12 @@ async def review_decide(request: Request):
 
 
 @app.get("/api/review/relations")
-def review_relations(request: Request, min_score: float = Query(0.05, ge=0, le=1),
+def review_relations(min_score: float = Query(0.05, ge=0, le=1),
                      limit: int = Query(200, ge=1, le=1000)):
-    """Possible family links from registry patronymics (issue #32, relations.py): hypotheses for
-    a reviewer, with the confirmed links and their decisions. People's private relationships:
-    served only with the review password (X-Review-Password), never without one."""
+    """Possible family links from registry patronymics (issue #32, relations.py): hypotheses,
+    with the confirmed links and their decisions. Public since 2026-11-27 (owner); confirming
+    them still needs the review password (/api/review/decide)."""
     from . import relations
-    _check_review_password(request, "see possible family links")
     return relations.review(g(), min_score, limit)
 
 

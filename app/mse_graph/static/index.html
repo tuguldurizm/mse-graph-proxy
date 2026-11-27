@@ -529,6 +529,17 @@ async function showDetails(d, seq = openSeq) {
   html += list(tr('Албан тушаал'), d.positions, p => `<span>${esc(co(p))}</span><span class="meta">${esc(roleTitle(p))}</span>${src(p)}`);
   html += list(tr('Ураг төрлийн холбоо (баталгаажсан)'), d.relatives,
                r => `<span>${esc(dn(r))} <span class="meta">${esc(BASIS_MN[r.basis] || r.basis)}</span></span><span class="meta">${esc(r.source || '')}</span>`);
+  // possible family links (issue #32): unconfirmed guesses from registry patronymics, marked as such
+  const relWhy = c => `${tr('оноо')} ${c.score} · «${esc(c.patronymic)}» · ${c.evidence.map(x => esc(REL_EVIDENCE[x] || x)).join(', ')}`;
+  if ((d.possible_relatives || []).length)
+    html += list(tr('Ураг төрлийн байж болох холбоо (таамаг)'), d.possible_relatives,
+                 r => `<span>${esc(dnS(r.name))} <span class="meta">${relWhy(r)}</span></span><span class="meta">${esc(r.companies.join(', '))}</span>`)
+      + tr('<div class="meta">Таамаг: эцгийн нэр ижил, нэг компани эсвэл бүлэгтэй. Баталгаажаагүй.</div>');
+  if ((d.possible_family || []).length)
+    html += `<h2>${tr('Ураг төрлийн байж болох холбоо (таамаг)')}</h2><ul>` + d.possible_family.map(c =>
+        `<li><span><span class="name" data-open="${esc(c.a.key)}">${esc(dnS(c.a.name))}</span> ↔ <span class="name" data-open="${esc(c.b.key)}">${esc(dnS(c.b.name))}</span>
+         <span class="meta">${relWhy(c)}</span></span><span class="meta">${esc(c.a.companies.join(', '))} | ${esc(c.b.companies.join(', '))}</span></li>`).join('')
+      + '</ul>' + tr('<div class="meta">Таамаг: эцгийн нэр ижил, нэг компани эсвэл бүлэгтэй. Баталгаажаагүй.</div>');
   // a shareholder's related parties as the company disclosed them on mse.mn: "out" = this entity's row
   // names the other, "in" = another holder's row names this one
   const affRow = a => `<span>${esc(dn(a))} <span class="meta">${esc(relText(a))}${a.direction === 'in' ? tr(' (тэдний мэдээлсэн)') : ''}</span></span>` +
@@ -722,39 +733,36 @@ async function showReview() {
       <div class="meta">${esc(p.a.companies.join(', '))} | ${esc(p.b.companies.join(', '))}</div>
       <div class="acts">${act(tr('Нэгтгэх'), {action: 'merge', key: p.suggest.merge, into: p.suggest.into})}
         ${act(tr('Өөр'), {action: 'dismiss', item: p.item})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
-  // possible family links (issue #32): private hypotheses, only with the review password
+  // possible family links (issue #32): public hypotheses since 2026-11-27; confirming needs the password
   html += group(tr('Ураг төрлийн байж болох холбоо (таамаг, #32)'));
-  html += st.writable
-    ? tr('<li id="relBox" class="meta">Хувийн мэдээлэл: зөвхөн нууц үгээр. <button data-rel-load="1">Нууц үгээр харах</button></li>')
-    : tr('<li class="meta">REVIEW_PASSWORD тохируулаагүй тул харуулахгүй (хувийн мэдээлэл).</li>');
+  html += tr('<li id="relBox" class="meta">Ачаалж байна…</li>');
   const groups = [...new Map(ds.map(d => [d.group, d])).values()].slice(0, 30);
   html += group(L`Шийдвэрүүд (${groups.length})`);
   html += groups.map(d => `<li class="rv"><span>${esc(d.action)} · ${esc(d.type === 'identity' ? `${d.before || ''} → ${d.target}` : d.item)}</span>
       <span class="meta">${esc(d.decided_by)} · ${esc(d.decided_at)}${d.note ? ' · ' + esc(d.note) : ''}</span>
       <div class="acts">${act(tr('Буцаах'), {action: 'revoke', id: d.group})}</div></li>`).join('') || tr('<li class="meta">Алга</li>');
   ul.innerHTML = html;
-  if (st.writable && reviewPw(false)) await showRelations(false);
+  await showRelations();
 }
-async function showRelations(ask = true) {
+async function showRelations() {
   const box = document.getElementById('relBox'); if (!box) return;
-  const pw = reviewPw(ask); if (!pw) return;
-  const r = await fetch('/api/review/relations', {headers: {'X-Review-Password': pw}});
-  if (r.status === 401) { try { sessionStorage.removeItem('reviewPassword'); } catch {} box.innerHTML = tr('Нууц үг буруу.'); return; }
+  const r = await fetch('/api/review/relations');
   if (!r.ok) { box.innerHTML = L`Алдаа: ${r.status}`; return; }
-  try { sessionStorage.setItem('reviewPassword', pw); } catch {}
   const d = await r.json();
+  const w = !!(rvStatus && rvStatus.writable);
   const groupOf = Object.fromEntries(d.decisions.map(x => [x.item, x.group]));
   let html = tr('<li class="meta">Таамаг: эцгийн нэр давхцах нь сул нотолгоо. Баталгаажуулах хүртэл граф, анхааруулгад харагдахгүй.</li>');
+  if (!w) html += tr('<li class="meta">Батлах: Claude-д хоёр хүн, холбоо, нийтийн эх сурвалжийг хэлбэл relations.csv-д нэмнэ.</li>');
   html += d.candidates.map(c => L`<li class="rv">${nameLink(c.a.key, c.a.name)} ↔ ${nameLink(c.b.key, c.b.name)}
       <span class="meta">оноо ${c.score} · «${esc(c.patronymic)}» ${c.people_with_patronymic} хүн · ${c.evidence.map(e => esc(REL_EVIDENCE[e] || e)).join(', ')}</span>
       <div class="meta">${esc(c.a.companies.join(', '))} | ${esc(c.b.companies.join(', '))}${c.shared_companies.length ? tr(' · хамтын: ') + c.shared_companies.map(esc).join(', ') : ''}${c.linked_companies.length ? ' · ' + c.linked_companies.map(p => esc(p.join(' — '))).join(', ') : ''}</div>
-      <div class="acts">${act(tr('Холбоотой (батлах)'), {action: 'relate', key: c.a.key, into: c.b.key})}
-        ${act(tr('Холбоогүй'), {action: 'dismiss', item: c.item})}</div></li>`).join('') || tr('<li class="meta">Таамаг алга</li>');
+      ${w ? `<div class="acts">${act(tr('Холбоотой (батлах)'), {action: 'relate', key: c.a.key, into: c.b.key})}
+        ${act(tr('Холбоогүй'), {action: 'dismiss', item: c.item})}</div>` : ''}</li>`).join('') || tr('<li class="meta">Таамаг алга</li>');
   html += L`<li class="meta">Баталгаажсан (${d.confirmed.length}):</li>`;
   html += d.confirmed.map(c => `<li class="rv">${nameLink(c.a, c.a_name)} ↔ ${nameLink(c.b, c.b_name)}
       <span class="meta">${esc(BASIS_MN[c.basis] || c.basis)} · ${esc(c.source)} · ${esc(c.decided_by)} ${esc(c.decided_at)}${c.from === 'file' ? ' · relations.csv' : ''}</span>
-      <div class="acts">${c.from === 'review' && groupOf[c.item] ? act(tr('Буцаах'), {action: 'revoke', id: groupOf[c.item]})
-        : act(tr('Холбоогүй гэж тэмдэглэх'), {action: 'relate', key: c.a, into: c.b, basis: 'none'})}</div></li>`).join('');
+      ${w ? `<div class="acts">${c.from === 'review' && groupOf[c.item] ? act(tr('Буцаах'), {action: 'revoke', id: groupOf[c.item]})
+        : act(tr('Холбоогүй гэж тэмдэглэх'), {action: 'relate', key: c.a, into: c.b, basis: 'none'})}</div>` : ''}</li>`).join('');
   box.outerHTML = html;
 }
 async function decide(payload) {
@@ -790,11 +798,11 @@ document.getElementById('btnReview').onclick = showReview;
 
 document.getElementById('details').addEventListener('click', ev => {
   if (ev.target.closest('a')) return;      // a source link opens the page, not the node
+  const n = ev.target.closest('[data-open]'); if (n) return open(n.dataset.open);
   const li = ev.target.closest('li[data-key]'); if (li) open(li.dataset.key);
 });
 document.getElementById('analysis').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]'); if (b) return decide(JSON.parse(b.dataset.act));
-  const rl = ev.target.closest('button[data-rel-load]'); if (rl) return showRelations(true);
   const so = ev.target.closest('button[data-sort]'); if (so) return showConcentration(so.dataset.sort);
   const cb = ev.target.closest('button[data-cen-by]'); if (cb) return showCentrality({ by: cb.dataset.cenBy });
   const ck = ev.target.closest('button[data-cen-kind]'); if (ck) return showCentrality({ kind: ck.dataset.cenKind });
