@@ -270,6 +270,12 @@ def main(argv=None):
     p.add_argument("--ticker", help="one company's documents and findings")
     p.add_argument("--kind", default="", choices=["", "subsidiary", "associate", "shareholder"])
     p.add_argument("--summary", action="store_true", help="counts only")
+    p.add_argument("--confirm", metavar="URL", help="a report's URL: write its finding --finding N (a subsidiary or "
+                   "associate someone checked) into data/manual/annual-reports as an OWNS stake")
+    p.add_argument("--finding", type=int, help="with --confirm: the finding's number (n in the listing)")
+    p.add_argument("--subsidiary", help="with --confirm: the subsidiary's ticker or register number, when its name "
+                   "doesn't find it")
+    p.add_argument("--percent", type=float, help="with --confirm: the percent, when the parser read it wrong")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("frc-decisions", help="the FRC's decisions with the companies they name (adverse only "
                                              "unless --all)")
@@ -841,6 +847,17 @@ def _market_cmd(g, args) -> None:
 
 def _reports_cmd(g, args) -> None:
     from . import reports
+    if args.confirm:
+        if args.finding is None:
+            raise SystemExit("--confirm needs --finding N")
+        try:
+            res = reports.confirm(g, args.confirm, args.finding, ticker=args.subsidiary, percent=args.percent)
+        except ValueError as exc:
+            raise SystemExit(f"error: {exc}")
+        print(json.dumps(res, ensure_ascii=False, default=str))
+        print(f"written to {reports.CONFIRMED_DIR}: merge it by PR; every start loads it (python -m mse_graph.cli load-manual "
+              "loads it now)")
+        return
     if args.fetch:
         logging.getLogger("mse_graph.reports").setLevel(logging.INFO)
         res = {"index": reports.index(g, limit=args.batch)}
@@ -864,7 +881,8 @@ def _reports_cmd(g, args) -> None:
                 else (f" [{r['pdf_error']}]" if r["pdf_error"] else "")
             print(f"{r['year'] or '----'}  {r['kind']:<19} {r['title'][:70]}{state}{read}\n      {r['url']}")
         for f in res["findings"]:
-            print(f"  {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']}, {f['year'] or '?'})")
+            print(f"  #{f['n']:<3} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']}, {f['year'] or '?'})"
+                  f"\n        {f['report']}")
         return
     res = reports.findings_report(g, args.kind)
     if args.json:
@@ -872,7 +890,8 @@ def _reports_cmd(g, args) -> None:
         return
     print(json.dumps(res["summary"], ensure_ascii=False))
     for f in res["items"]:
-        print(f"{f['ticker']:<6} {f['year'] or '----'} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']})")
+        print(f"{f['ticker']:<6} {f['year'] or '----'} #{f['n']:<3} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  "
+              f"(p. {f['page']})  {f['report']}")
 
 
 def _coverage(g, analysis: str, out=None) -> None:

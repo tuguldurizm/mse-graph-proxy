@@ -31,7 +31,7 @@ company's treasury shares are not a holding (issue #39).
 """
 from __future__ import annotations
 
-from .graph import Graph
+from .graph import Graph, is_joint_stock
 from .holdings import real
 from .normalize import comparable_sector, is_state, mse_sector_code, sector_std_name
 
@@ -109,11 +109,13 @@ def cross_holdings(g: Graph) -> list[dict]:
 # ---- conflicts of interest -------------------------------------------------------
 
 def insider_owners(g: Graph) -> list[dict]:
-    """Board members / executives who also hold shares in the same company."""
+    """Board members / executives who also hold shares in the same company. Only listed and other
+    joint-stock companies count (owner, 2026-11-27): an LLC whose founder is also its director is the
+    normal case, not a flag (285 of the first 472 rows were such LLCs)."""
     return g.run(
         f"""
         MATCH (p:Person)-[h:HOLDS_POSITION {{current: true}}]->(c:Company)<-[o:OWNS {{current: true}}]-(p)
-        WHERE {real("o")}
+        WHERE {real("o")} AND {is_joint_stock("c")}
         WITH p, c, o, collect(h.title) AS titles
         RETURN 'insider_owner' AS kind, p.key AS key, p.name AS name,
                [{{key: c.key, ticker: c.ticker, name: c.name, titles: titles, percent: o.percent}}] AS companies

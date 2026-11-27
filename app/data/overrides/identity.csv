@@ -6,3 +6,7 @@
 # Example (a split): XNB,Б.Батболд,person:б батболд#xnb,,,owner,2026-11-22,a different Б.Батболд
 company,name,target,source,kind,decided_by,decided_at,note
 *,- ОРОН НУТГИЙН ӨМЧ,org:орон нутгийн өмч,,shareholder,claude (governance check validation),2026-11-24,"local (aimag) property, a state holder of BTG, BDL and TTL on mse.mn; was read as a person (issue #10)"
+BDL,ТРАНС НЕФТХХК,org:транс нефт,,shareholder,owner (2026-11-27),2026-11-27,"a company (ХХК run into the name) read as a person on mse.mn"
+XAC,Ронок Партнерз Кей Эф Ти,org:ронок партнерз,,shareholder,owner (2026-11-27),2026-11-27,"Ronoc Partners Kft. (a Hungarian LLC) read as a person on mse.mn"
+2674769,Компани Бизнес Партнер,org:бизнес партнер,,shareholder,owner (2026-11-27),2026-11-27,"a company read as a person in the registry (АБТС ББСБ)"
+3252183,0 Хуйтан ХХК,org:хуйтан,,shareholder,owner (2026-11-27),2026-11-27,"a company read as a person in the registry (ИХЭС НУУРЫН ХИШИГ ХЗХ)"

@@ -29,8 +29,15 @@ Step 1 (this module) does three things, all bounded and all logged:
    with a percent is a finding: `subsidiary`, `associate` or `shareholder`, with the page and the line,
    stored as JSON on the Report (`findings`). They are **unchecked**: nothing is written as a stake,
    and no people are read (as with FRC, names in reports are mostly initial-form). The UI and the
-   dossier show them as "from the annual report, not checked"; a later step can turn confirmed ones
-   into stakes once real reports have been looked at.
+   dossier show them as "from the annual report, not checked".
+4. **Confirmed findings become stakes** (owner, 2026-11-27: "make OWNS links"). Once someone has checked
+   a subsidiary or associate finding against the report, `cli reports --confirm URL --finding N` (`confirm`
+   below) writes it into the hand-curated dataset `data/manual/annual-reports/` (CONFIRMED_DIR): an
+   `OWNS` stake from the publishing company, source `report:<the report's URL>`, percent and year as the
+   report gives them. The manual loader does the rest (records, history; deleting the row ends the stake).
+   The subsidiary is the graph's company of the same name when there is one (or `--ticker`), else a new
+   unlisted company in the dataset's companies.csv. Shareholder findings are not confirmed this way: a listed
+   company's owners are the ones mse.mn reports (owner, 2026-11-25).
 
 The pipeline runs it (`pipeline.reports_step`) at most every REPORTS_MIN_INTERVAL_HOURS (20);
 REPORTS_ENABLE=0 turns it off. `cli reports` runs or summarises it by hand.
@@ -624,12 +631,13 @@ def company_reports(g, key: str, limit: int = 200) -> dict:
             RETURN {_FIELDS}
             ORDER BY r.current DESC, coalesce(r.year, 0) DESC, r.date DESC, r.title LIMIT $limit""",
         key=key, limit=limit)]
-    findings = [{**f, "report": r["url"], "report_title": r["title"], "year": r["year"]}
-                for r in rows for f in r["findings"]]
+    findings = [{**f, "n": n, "report": r["url"], "report_title": r["title"], "year": r["year"]}
+                for r in rows for n, f in enumerate(r["findings"])]
     read = g.run("MATCH (c:Company {key: $key}) RETURN c.reports_read_at AS at", key=key)
     return {"items": rows, "findings": findings, "read_at": read[0]["at"] if read else None,
             "note": "Findings are lines of the company's own reports that name an organisation with a percent; "
-                    "they are not checked and are not used as stakes."}
+                    "they are not checked and are not used as stakes until someone confirms one "
+                    "(cli reports --confirm URL --finding N)."}
 
 
 def findings_report(g, kind: str = "", limit: int = 500) -> dict:
@@ -641,10 +649,10 @@ def findings_report(g, kind: str = "", limit: int = 500) -> dict:
            ORDER BY coalesce(r.year, 0) DESC, c.ticker""")
     out = []
     for r in rows:
-        for f in json.loads(r["findings"] or "[]"):
+        for n, f in enumerate(json.loads(r["findings"] or "[]")):
             if kind and f.get("kind") != kind:
                 continue
-            out.append({**f, "ticker": r["ticker"], "company": r["company"], "report": r["url"],
+            out.append({**f, "n": n, "ticker": r["ticker"], "company": r["company"], "report": r["url"],
                         "report_title": r["title"], "year": r["year"]})
     return {"items": out[:limit], "summary": {**summary(g), "listed_findings": len(out)}}
 
@@ -671,3 +679,73 @@ def summary(g) -> dict:
     r["with_documents"] = g.run("""MATCH (c:Company)-[:PUBLISHED]->(r:Report) WHERE r.current
                                     RETURN count(DISTINCT c) AS n""")[0]["n"]
     return r
+
+
+# ---- confirmed findings -> stakes (module docstring, step 4) ---------------------------------------
+
+CONFIRMED_DIR = "data/manual/annual-reports"
+SOURCE_PREFIX = "report:"              # provenance.REPORT_PREFIX
+CONFIRMABLE = ("subsidiary", "associate")
+
+
+def _slug(name: str) -> str:
+    from .normalize import entity_key
+
+    words = entity_key(name, "organization").split(":", 1)[-1]
+    return "~AR-" + (re.sub(r"[^0-9A-Za-zА-Яа-яӨөҮүЁё]+", "-", words).strip("-").upper() or "X")
+
+
+def _company_by_name(g, name: str) -> str | None:
+    """The ticker of the one company whose name (or alias) has the same organisation key, else None."""
+    from .normalize import entity_key
+
+    want = entity_key(name, "organization")
+    hits = set()
+    for r in g.run("MATCH (c:Company) RETURN c.ticker AS ticker, c.name AS name, coalesce(c.aliases, []) AS aliases"):
+        names = [r["name"] or ""] + [a for a in r["aliases"] if isinstance(a, str)]
+        if any(entity_key(n, "organization") == want for n in names if n):
+            hits.add(r["ticker"])
+    return hits.pop() if len(hits) == 1 else None
+
+
+def confirm(g, url: str, index: int, ticker: str | None = None, root: str | os.PathLike = CONFIRMED_DIR,
+            percent: float | None = None) -> dict:
+    """Write finding number `index` (0-based, in the report's `findings`) of the report at `url` into the
+    confirmed dataset as a stake (module docstring, step 4). `ticker`: the subsidiary's ticker or register
+    number when the name doesn't find it; `percent` corrects the parser's. Returns the row written."""
+    from pathlib import Path
+
+    from . import csv_io
+    from .models import Company, Shareholding
+
+    rows = g.run("""MATCH (c:Company)-[:PUBLISHED]->(r:Report {url: $url})
+                    RETURN c.ticker AS ticker, c.name AS name, r.year AS year, r.date AS date, r.findings AS findings""",
+                 url=url)
+    if not rows:
+        raise ValueError(f"no report with the URL {url}")
+    rep = rows[0]
+    findings = json.loads(rep["findings"] or "[]")
+    if not 0 <= index < len(findings):
+        raise ValueError(f"the report has {len(findings)} findings; there is no number {index}")
+    f = findings[index]
+    if f.get("kind") not in CONFIRMABLE:
+        raise ValueError(f"finding {index} is a {f.get('kind')}: only {', '.join(CONFIRMABLE)} findings become stakes")
+    root = Path(root)
+    ds = csv_io.read_dir(root) if root.is_dir() else csv_io.Dataset()
+    sub = g.resolve_ticker(ticker) if ticker else _company_by_name(g, f["name"])
+    new_company = None
+    if not sub:
+        sub = _slug(f["name"])
+        if not any(c.ticker == sub for c in ds.companies):
+            new_company = Company(ticker=sub, name=f["name"], listed=False, url=url)
+            ds.companies.append(new_company)
+    source = SOURCE_PREFIX + url
+    as_of = str(rep["year"] or (rep["date"] or "")[:4] or "")
+    row = Shareholding(company_ticker=sub, holder_name=rep["name"], holder_ticker=rep["ticker"],
+                       percent=percent if percent is not None else f.get("percent"), holder_type="organization",
+                       as_of=as_of, source=source)
+    ds.shareholdings = [h for h in ds.shareholdings
+                        if not (h.company_ticker == sub and h.holder_ticker == rep["ticker"])] + [row]
+    csv_io.write_dir(ds, root)
+    return {"company": sub, "holder": rep["ticker"], "percent": row.percent, "as_of": as_of, "source": source,
+            "new_company": new_company.name if new_company else None, "finding": f}

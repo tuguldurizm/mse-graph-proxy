@@ -258,10 +258,22 @@ def company_kind(v: str) -> str:
             f"WHEN 'money_lender' IN {fk} THEN 'money_lender' "
             f"WHEN {anyk(_INSURANCE_KINDS)} THEN 'insurance' "
             f"WHEN {anyk(_SECURITIES_KINDS)} THEN 'securities' "
-            f"WHEN toLower({form}) CONTAINS 'хувьцаат' OR {form} ENDS WITH 'ХК' OR {word('ХК')} OR {word('ТӨХК')} "
-            f"THEN 'jsc' "
+            f"WHEN {_jsc_form(v)} THEN 'jsc' "
             f"WHEN toLower({form}) CONTAINS 'хязгаарлагдмал' OR {form} STARTS WITH 'ХХК' OR {word('ХХК')} THEN 'llc' "
             f"ELSE 'other' END")
+
+
+def _jsc_form(v: str) -> str:
+    """Cypher: the registry's legal form or the name says joint-stock company (ХК, ТӨХК)."""
+    form = f"coalesce({v}.legal_form, '')"
+    word = lambda w: f"(' ' + toUpper(coalesce({v}.name, '')) + ' ') CONTAINS ' {w} '"
+    return f"(toLower({form}) CONTAINS 'хувьцаат' OR {form} ENDS WITH 'ХК' OR {word('ХК')} OR {word('ТӨХК')})"
+
+
+def is_joint_stock(v: str) -> str:
+    """Cypher: company `v` is listed or a joint-stock company by its legal form or name, whatever
+    its FRC type (an NBFI can be an ХК). LLCs and companies of unknown form are not."""
+    return f"({v}:Company AND (coalesce({v}.listed, true) OR {_jsc_form(v)}))"
 
 
 def kind_shown(v: str, param: str = "hide") -> str:
