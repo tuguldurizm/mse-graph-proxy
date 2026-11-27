@@ -147,6 +147,8 @@ def main(argv=None):
                                          "hypotheses for review, and the confirmed links")
     p.add_argument("--summary", action="store_true", help="counts only")
     p.add_argument("--min-score", type=float, default=0.05)
+    p.add_argument("--refresh", action="store_true",
+                   help="recompute the candidates and store them for the site (the pipeline does this each run)")
     p = sub.add_parser("officials", help="public officials whose asset declarations name a company, from the "
                                          "Open Data Lab registry pages (issue #9): disclosed interests, not findings")
     p.add_argument("--summary", action="store_true", help="counts only (officials, interests, licences, tenders)")
@@ -489,6 +491,8 @@ def main(argv=None):
             elif not csv_io.is_demo(ds) and g.drop_demo_data():
                 print("removed the demo data before loading real data", file=sys.stderr)
             res = g.load(ds, observed_at=args.date)
+            from . import relations
+            relations.refresh(g)        # the stored possible family links the site reads (#32)
             if not args.notify:
                 _print(res)
             else:
@@ -518,7 +522,10 @@ def main(argv=None):
             _print(review.export(g))
         elif args.cmd == "relations":
             from . import relations
-            _print(relations.summary(g) if args.summary else relations.review(g, args.min_score))
+            if args.refresh:
+                _print(relations.refresh(g))
+            else:
+                _print(relations.summary(g) if args.summary else relations.review(g, args.min_score))
         elif args.cmd == "officials":
             from . import officials
             if args.summary:

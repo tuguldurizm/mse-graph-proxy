@@ -189,20 +189,39 @@ def _fold(s: str) -> str:
 def candidates(g, min_score: float = MIN_SCORE, limit: int = 200, reviewed: set[str] | None = None) -> list[dict]:
     """Pairs of people who may be related (module docstring), best first, without the pairs
     already decided or dismissed."""
-    people = g.run(
+    # 1. only keys and patronymics, to count the people per patronymic
+    names = g.run(
         """
         MATCH (p:Person) WHERE NOT p:Company AND p.patronymic IS NOT NULL AND p.given_name IS NOT NULL
           AND coalesce(p.name_form, 'full') = 'full'
-        OPTIONAL MATCH (p)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company)
-        RETURN p.key AS key, p.name AS name, p.full_name AS full_name, p.patronymic AS patronymic,
-               p.clan_name AS clan, p.group_id AS group_id,
-               collect(DISTINCT {key: c.key, ticker: c.ticker, name: c.name}) AS companies
+        RETURN p.key AS key, p.patronymic AS patronymic
         """)
+    sizes: dict[str, list[str]] = {}
+    for p in names:
+        stem = _fold(patronymic_stem(p["patronymic"]))
+        if len(stem) >= 2:
+            sizes.setdefault(stem, []).append(p["key"])
+    # score = rarity x strength < rarity = 1 / (n - 1), so a patronymic shared by more than
+    # 1 / min_score + 1 people can never reach min_score: skip those (exact, and most of the work)
+    max_n = int(1 / min_score) + 1 if min_score > 0 else 10 ** 9
+    size_of = {s: len(ks) for s, ks in sizes.items()}
+    keep = [k for s, ks in sizes.items() if 2 <= len(ks) <= max_n for k in ks]
+    if not keep:
+        return []
+    # 2. the details of the people left
+    people = []
+    for i in range(0, len(keep), 2000):
+        people += g.run(
+            """
+            UNWIND $ks AS k MATCH (p:Person {key: k})
+            OPTIONAL MATCH (p)-[:OWNS|HOLDS_POSITION|BENEFICIAL_OWNER]->(c:Company)
+            RETURN p.key AS key, p.name AS name, p.full_name AS full_name, p.patronymic AS patronymic,
+                   p.clan_name AS clan, p.group_id AS group_id,
+                   collect(DISTINCT {key: c.key, ticker: c.ticker, name: c.name}) AS companies
+            """, ks=keep[i:i + 2000])
     by_stem: dict[str, list[dict]] = {}
     for p in people:
         stem = _fold(patronymic_stem(p["patronymic"]))
-        if len(stem) < 2:
-            continue
         p["companies"] = [c for c in p["companies"] if c.get("key")]
         p["_cos"] = {c["key"] for c in p["companies"]}
         by_stem.setdefault(stem, []).append(p)
@@ -222,7 +241,7 @@ def candidates(g, min_score: float = MIN_SCORE, limit: int = 200, reviewed: set[
 
     out = []
     for stem, ps in by_stem.items():
-        rarity = 1.0 / (len(ps) - 1)
+        rarity = 1.0 / (size_of.get(stem, len(ps)) - 1)
         for p, q in combinations(sorted(ps, key=lambda n: n["key"]), 2):   # a and b in key order
             if p["key"].split("#", 1)[0] == q["key"].split("#", 1)[0]:
                 continue        # namesakes split on purpose: the same name, no new evidence
@@ -244,7 +263,7 @@ def candidates(g, min_score: float = MIN_SCORE, limit: int = 200, reviewed: set[
                 continue
             out.append({
                 "item": item_id(p["key"], q["key"]), "hypothesis": True, "score": score,
-                "patronymic": p["patronymic"], "people_with_patronymic": len(ps), "rarity": round(rarity, 3),
+                "patronymic": p["patronymic"], "people_with_patronymic": size_of.get(stem, len(ps)), "rarity": round(rarity, 3),
                 "a": _brief(p), "b": _brief(q),
                 "shared_companies": [names.get(k, k) for k in shared],
                 "linked_companies": [[names.get(x, x), names.get(y, y)] for x, y in linked],
@@ -280,10 +299,40 @@ def confirmed(g) -> list[dict]:
     return out
 
 
+STORE_KEY = "relations"
+
+
+def refresh(g) -> dict:
+    """Compute the candidates and store them on (:Meta {key: 'relations'}) as JSON. The pipeline
+    calls this after each run (and `cli relations --refresh`); requests only read the stored list,
+    because computing it over the whole graph is far too slow for a request on Render."""
+    import json
+    cands = candidates(g, MIN_SCORE, 2000, reviewed=set())
+    g.run("MERGE (m:Meta {key: $k}) SET m.candidates = $c, m.computed_at = datetime(), m.count = $n",
+          k=STORE_KEY, c=json.dumps(cands, ensure_ascii=False), n=len(cands))
+    return {"candidates": len(cands), "confirmed": len(in_force(g))}
+
+
+def _stored(g) -> list[dict]:
+    import json
+    rows = g.run("MATCH (m:Meta {key: $k}) RETURN m.candidates AS c", k=STORE_KEY)
+    try:
+        return json.loads(rows[0]["c"]) if rows and rows[0]["c"] else []
+    except (TypeError, ValueError):
+        return []
+
+
+def stored_candidates(g) -> list[dict]:
+    """The stored candidates without the pairs decided or dismissed since (cheap: no recompute)."""
+    from .review import reviewed_items
+    skip = {item_id(*r.pair) for r in decided(g)} | set(reviewed_items(g))
+    return [c for c in _stored(g) if c["item"] not in skip]
+
+
 def cached_candidates(g) -> list[dict]:
-    """All candidates at MIN_SCORE, shared between requests for a while (memo.py). Read-only."""
+    """The stored candidates, shared between requests for a while (memo.py). Read-only."""
     from . import memo
-    return memo.cached(g, "relations.candidates", candidates, MIN_SCORE, 2000)
+    return memo.cached(g, "relations.candidates", stored_candidates)
 
 
 def _other(c: dict, key: str) -> dict | None:
@@ -317,7 +366,7 @@ def possible_for_company(g, ticker: str | None, name: str | None = None) -> list
 
 def review(g, min_score: float = MIN_SCORE, limit: int = 200) -> dict:
     """What `/api/review/relations` serves (public since 2026-11-27: hypotheses, marked as such)."""
-    cands = candidates(g, min_score, limit)
+    cands = [c for c in cached_candidates(g) if c["score"] >= min_score][:limit]
     conf = confirmed(g)
     decisions = [r["d"] for r in g.run(
         """MATCH (d:Decision) WHERE d.type = 'relation' OR (d.type = 'reviewed' AND d.item STARTS WITH $p)
@@ -330,6 +379,12 @@ def review(g, min_score: float = MIN_SCORE, limit: int = 200) -> dict:
 
 def summary(g) -> dict:
     return {"candidates": len(candidates(g)), "confirmed": len(in_force(g)), "pending_export": pending(g)}
+
+
+def stored_summary(g) -> dict:
+    rows = g.run("MATCH (m:Meta {key: $k}) RETURN m.count AS n, toString(m.computed_at) AS t", k=STORE_KEY)
+    return {"stored": rows[0]["n"] if rows else None, "computed_at": rows[0]["t"] if rows else None,
+            "open": len(stored_candidates(g)), "confirmed": len(in_force(g))}
 
 
 # ---- decisions -------------------------------------------------------------------------
