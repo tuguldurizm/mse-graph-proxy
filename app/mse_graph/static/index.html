@@ -432,7 +432,8 @@ async function open(key) {
 // to its page, the date the source gives (a stake's as_of) and when a run last saw it
 // a source's label (provenance.KINDS, with the host or file after a colon) in the UI's language
 const SRC_EN = [[mn('Хайлтын үр дүн (шалгаагүй)'), 'Search result (unverified)'], [mn('Гараар цуглуулсан'), 'Hand-collected'],
-                [mn('Жишээ (зохиомол)'), 'Example (fictional)'], [mn('Open Data Lab (файл)'), 'Open Data Lab (file)'], [mn('Бусад'), 'Other']];
+                [mn('Жишээ (зохиомол)'), 'Example (fictional)'], [mn('Open Data Lab (файл)'), 'Open Data Lab (file)'], [mn('Бусад'), 'Other'],
+                [mn('Жилийн тайлан (шалгасан)'), 'Annual report (checked)']];
 const srcLabel = l => !EN_ON || !l ? l : SRC_EN.reduce((s, [mn, en]) => s.startsWith(mn) ? en + s.slice(mn.length) : s, l);
 function src(x) {
   const ps = x.provenance || [];

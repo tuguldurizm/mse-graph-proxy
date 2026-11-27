@@ -97,6 +97,12 @@ class Fetcher:
     every try waits out the host's crawl delay.
     """
 
+    # A 403 whose body says the site refuses automated clients. open.mse.mn added an anti-scraping
+    # client (/assets/js/botblock.js) on 2026-11-27 03:22 UTC: every request under /securities/ without its
+    # session token gets {"code":403,"status":"SESSION_REQUIRED",...}. We don't work around it (the site
+    # asks not to be scraped); we stop asking for the rest of the run and say so in the log.
+    BLOCKED_MARKERS = ("SESSION_REQUIRED", "automated-access")
+
     # Statuses worth another try: a block or rate limit, a timeout, a proxy or upstream failure.
     RETRY_STATUS = {403, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
@@ -121,6 +127,9 @@ class Fetcher:
         self._proxy_clients: dict[str, httpx.Client] = {}
         self._last_by_host: dict[str, float] = {}
         self._hinted = False
+        # Hosts that refused us on purpose this run (an anti-scraping block, BLOCKED_MARKERS): no
+        # further requests go to them from this Fetcher, so a run makes one refused request, not hundreds.
+        self.blocked_hosts: set[str] = set()
         # Outcome of the last request that missed the cache: the site's HTTP status
         # (None if it never answered) and the last error seen.
         self.last_status: int | None = None
@@ -198,6 +207,8 @@ class Fetcher:
             return Attempt(r, 200, "", "ok")
         if r.status_code == 407:
             return Attempt(None, None, "HTTP 407 (check the proxy's username and password)", "next")
+        if r.status_code == 403 and any(m in r.text[:2000] for m in self.BLOCKED_MARKERS):
+            return Attempt(None, 403, "HTTP 403 (the site blocks automated access)", "blocked")
         step = "retry" if r.status_code in self.RETRY_STATUS else "stop"
         return Attempt(None, r.status_code, f"HTTP {r.status_code}", step)
 
@@ -205,6 +216,9 @@ class Fetcher:
         host = urlsplit(url).hostname or ""
         routes = self.router.routes_for(host)          # a bad ODL_PROXY_URL raises here
         self.last_status, self.last_error = None, ""
+        if host in self.blocked_hosts:
+            self.last_status, self.last_error = 403, "HTTP 403 (the site blocks automated access; not asked again)"
+            return None
         for route in routes:
             for n in range(1, route.attempts + 1):
                 a = self.try_route(route, url)
@@ -215,6 +229,11 @@ class Fetcher:
                 via = f" via {route.label}" if route is not egress.DIRECT else ""
                 tries = f" (try {n}/{route.attempts})" if route.attempts > 1 else ""
                 log.warning("GET %s%s%s -> %s", url, via, tries, a.error)
+                if a.step == "blocked":
+                    self.blocked_hosts.add(host)
+                    log.warning("BLOCKED %s refuses automated access (an anti-scraping check, HTTP 403): no more "
+                                "requests to it in this run", host)
+                    return None
                 if a.step == "stop":
                     return None
                 if a.step == "next":
@@ -675,6 +694,10 @@ def parse_open_tab(html: str, ticker: str, kind: str, source: str, nested: bool 
                 as_of = r[date_col] if date_col is not None and date_col < len(r) else ""
                 ds.shareholdings.append(Shareholding(ticker, name, pct, shares, as_of=as_of, source=source))
             else:
+                if is_organization(name):
+                    # e.g. TAND's auditor, "Шинэ Их тэрбум Аудит ХХК" as "Аудитын компани" (2026-11-27):
+                    # an organisation holds no position, and as a person it made a false Person node
+                    continue
                 c_title = _hcol(header, "албан тушаал", "position", "title")
                 title = clean(r[c_title]) if c_title is not None and c_title < len(r) else ""
                 if title and re.fullmatch(r"[\d\s.,/-]+", title):

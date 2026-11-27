@@ -8,6 +8,8 @@ edge now) and `sources` (every source that reported it). They are raw strings:
     https://www.opendatalab.mn/search/N  an Open Data Lab registry page
     opendatalab:<file>                   an Open Data Lab export loaded from a file
     search:<url>                         a search-engine result quoting <url> (data/manual, unverified)
+    report:<url>                         a company's annual report, a finding someone checked
+                                         (reports.confirm, data/manual/annual-reports)
     https://<other host>/...             a hand-curated dataset row (data/manual, data/mcs)
     DEMO-fictional                       the demo data
     mse.mn | opendatalab.mn | dataset:<host>   fact sources (#38)
@@ -24,6 +26,7 @@ DEMO_SOURCE = "DEMO-fictional"            # graph.DEMO_SOURCE (kept here to avoi
 UNVERIFIED_PREFIX = "search:"             # manual.UNVERIFIED_PREFIX
 REGISTRY_FILE_PREFIX = "opendatalab:"     # opendatalab.import_rows on a file
 DATASET_PREFIX = "dataset:"               # graph.company_row_source
+REPORT_PREFIX = "report:"                 # reports.SOURCE_PREFIX
 
 # kind -> what the UI calls it
 KINDS = {
@@ -32,6 +35,7 @@ KINDS = {
     "frc": "FRC (frc.mn)",
     "registry_file": "Open Data Lab (файл)",
     "dataset": "Гараар цуглуулсан",
+    "report": "Жилийн тайлан (шалгасан)",
     "search": "Хайлтын үр дүн (шалгаагүй)",
     "demo": "Жишээ (зохиомол)",
     "other": "Бусад",
@@ -70,6 +74,9 @@ def describe(source: str | None) -> dict | None:
         where = _host(inner) if url else inner
         return {"source": s, "label": f"{KINDS['search']}: {where}" if where else KINDS["search"],
                 "kind": "search", "url": url}
+    if s.startswith(REPORT_PREFIX):
+        inner = s[len(REPORT_PREFIX):]
+        return {"source": s, "label": KINDS["report"], "kind": "report", "url": inner if _is_url(inner) else None}
     if s.startswith(REGISTRY_FILE_PREFIX):
         name = s[len(REGISTRY_FILE_PREFIX):]
         return {"source": s, "label": f"Open Data Lab ({name})" if name else KINDS["registry_file"],
