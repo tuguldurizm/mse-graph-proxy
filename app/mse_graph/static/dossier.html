@@ -213,9 +213,10 @@ function render(d) {
   document.title = `${e.ticker && !e.ticker.startsWith('~') ? e.ticker + ' · ' : ''}${dn(e)} · ${tr('Компанийн досье')}`;
   let h = header(d);
 
-  // governance checks: the server writes them in Mongolian (analysis.company_flags)
-  h += section(tr('Анхаарах зүйлс'), d.flags.length ? (EN_ON ? '<p class="note">(in Mongolian: the checks write their findings in Mongolian)</p>' : '') +
-    `<ul class="flags">${d.flags.map(f => `<li class="${f.level}">${esc(f.text)}</li>`).join('')}</ul>` +
+  // governance checks: the server writes them in Mongolian with their content as `args`
+  // (analysis.company_flags); in English flagText (i18n.js) words them
+  h += section(tr('Анхаарах зүйлс'), d.flags.length ?
+    `<ul class="flags">${d.flags.map(f => `<li class="${f.level}">${esc(flagText(f))}</li>`).join('')}</ul>` +
     tr('<p class="note">Анхааруулга нь нягталж харах зүйл, дүгнэлт биш.</p>') : '');
 
   // shareholders

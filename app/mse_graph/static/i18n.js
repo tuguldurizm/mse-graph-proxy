@@ -94,6 +94,52 @@ const ISSUE_EN = { percent_over_100: 'holdings add up to more than 100%', duplic
   no_sector_std: 'no standard sector (only the MSE text)', unknown_roles: 'position titles not recognised' };
 const issueText = i => !EN_ON || !ISSUE_EN[i.code] ? i.text : ISSUE_EN[i.code] + (i.detail ? `: ${tr(i.detail)}` : '');
 
+// the governance flags (analysis.company_flags): the server writes each as a Mongolian sentence (`text`)
+// and gives what it says as `args`; in English the sentence is worded here, with the names transliterated
+const FLAG_BASIS_EN = { sibling: 'sibling', parent_child: 'parent / child', spouse: 'spouse', relative: 'relative' };
+const FRC_KIND_EN = { suspension: 'suspension', revocation: 'licence revoked', penalty: 'penalty', liquidation: 'liquidation',
+  administration: 'administration', restriction: 'restriction', warning: 'warning', restoration: 'restoration',
+  grant: 'licence granted', other: 'decision' };
+function flagText(f) {
+  const a = f && f.args;
+  if (!EN_ON || !a) return f ? f.text : '';
+  const pc = v => `${+(+v).toFixed(4)}%`;
+  const lab = x => !x ? '?' : x.ticker && !String(x.ticker).startsWith('~') ? x.ticker : dn(x);
+  const roles = rs => [...new Set((rs || []).map(r => r.percent != null ? r.percent
+    : r.role_std && r.role_std !== 'unknown' ? ROLE_EN[r.role_std] : titleS(r.title)))].join(', ');
+  const side = x => `${lab(x)} (${roles(x.roles)})`;
+  const where = (rel, cp) => rel === 'same_company' ? 'also in this company'
+    : `in its ${rel === 'shareholder' ? 'shareholder' : 'subsidiary'} ${lab(cp)}`;
+  switch (f.kind) {
+    case 'ownership_cycle': case 'mutual_holding':
+      return `${f.kind === 'mutual_holding' ? 'Mutual holding' : 'Ownership loop'}: ${(a.ring || []).map(lab).join(' → ')}` +
+        (a.loop_percent ? ` (owns ${pc(a.loop_percent)} of itself through the loop)` : '');
+    case 'listed_holder':
+      return `Listed company ${lab(a.holder)} holds ${a.percent != null ? pc(a.percent) : 'shares'}`;
+    case 'controller': return `Controlling owner: ${dn(a.owner)} (${pc(a.percent)} look-through)`;
+    case 'nominee_holding':
+      return `Nominee / custodian holdings: ${a.holders} holder${a.holders === 1 ? '' : 's'}` +
+        (a.percent != null ? `, ${pc(a.percent)} in all` : '') + ' (held for clients; the owners are not known)';
+    case 'treasury': return `Own (bought-back) shares: ${pc(a.percent)}`;
+    case 'state': return `State participation: ${a.direct ? `direct ${pc(a.direct)}, ` : ''}look-through ${pc(a.lookthrough)}`;
+    case 'insider_owner':
+      return `${dn(a.person)} (${roles(a.roles)}) holds ${a.percent != null ? pc(a.percent) + ' of the' : 'some of the'} company's shares`;
+    case 'competitor':
+      return `${dn(a.who)} (${roles(a.roles)}) is also involved in another company of the same sector ` +
+        `(${secName(a.sector, a.sector_std)}): ${(a.others || []).map(o => `${lab(o)}: ${roles(o.roles)}`).join('; ')}`;
+    case 'related_party':
+      if (a.relative)
+        return `${dn(a.person)} (${lab(a.company)}: ${roles(a.company.roles)}): ` +
+          `${FLAG_BASIS_EN[a.basis] || 'relative'} ${dn(a.relative)} ${where(a.relation, a.counterparty)} ` +
+          `(${roles(a.counterparty.roles)}); a confirmed link, source: ${a.source || '?'}`;
+      return `${dn(a.person)}: ${side(a.company)} and its ${a.relation === 'shareholder' ? 'shareholder' : 'subsidiary'} ${side(a.counterparty)}`;
+    case 'frc_decision':
+      return `FRC decision ${a.date}${a.number ? `, No. ${a.number}` : ''}: ${FRC_KIND_EN[a.decision_kind] || 'decision'}` +
+        ` (title in Mongolian: ${a.title})`;
+    default: return f.text;
+  }
+}
+
 // translate the static HTML once, at start-up: text nodes and title / placeholder attributes
 function translateStatic(root) {
   if (!EN_ON) return;
