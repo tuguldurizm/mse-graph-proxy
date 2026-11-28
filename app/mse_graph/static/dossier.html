@@ -329,7 +329,7 @@ function render(d) {
     const FK = {subsidiary: tr('Охин компани'), associate: tr('Хараат компани'), shareholder: tr('Хувьцаа эзэмшигч')};
     h += section(tr('Тайлангаас (шалгаагүй)'), table([{ h: tr('Төрөл') }, { h: tr('Байгууллага') }, { h: '%', n: 1 }, { h: tr('Эх сурвалж') }],
       rp.findings.slice(0, 25).map(f => `<td>${esc(FK[f.kind] || f.kind)}</td><td>${esc(f.name)}</td><td class="n">${esc(f.percent)}</td>` +
-        `<td class="d">${esc(f.year || '')} · ${tr('хуудас')} ${esc(f.page)}</td>`), rp.findings.length - 25) +
+        `<td class="d">${esc(f.year || '')} · ${tr('хуудас')} ${esc(f.page)}${f.ocr ? ' · OCR' : ''}</td>`), rp.findings.length - 25) +
       tr('<p class="note">Тайлангийн PDF-ээс автоматаар уншсан мөр: шалгаагүй, эзэмшилд тооцоогүй.</p>'));
   }
 

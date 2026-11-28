@@ -1197,7 +1197,7 @@ function reportsBlock(r) {
     `<span class="meta">${esc(x.year || '')}${x.scanned ? tr(' скан') : ''}</span>`) : '';
   if (r.findings.length)
     h += list(tr('Тайлангаас (шалгаагүй)'), r.findings.slice(0, 10), f => `<span>${esc(f.name)} <span class="meta">${esc(FK[f.kind] || f.kind)}</span></span>` +
-      `<span>${esc(f.percent)}% <span class="meta">${esc(f.year || '')}</span></span>`) +
+      `<span>${esc(f.percent)}% <span class="meta">${esc(f.year || '')}${f.ocr ? ' · OCR' : ''}</span></span>`) +
       tr('<div class="meta">PDF-ээс автоматаар уншсан: шалгаагүй, эзэмшилд тооцоогүй.</div>');
   return h;
 }
