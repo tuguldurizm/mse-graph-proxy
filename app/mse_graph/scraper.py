@@ -134,18 +134,30 @@ class Fetcher:
         # (None if it never answered) and the last error seen.
         self.last_status: int | None = None
         self.last_error = ""
+        self.last_url = ""          # where the last request ended up, after its redirects
 
-    # robots.txt crawl-delay of sites that ask for one
-    HOST_DELAY = {"opendatalab.mn": 11.0, "www.opendatalab.mn": 11.0}
+    # Crawl delay per domain: the domain and all its hosts share one clock (opendatalab.mn and
+    # www.opendatalab.mn are one server). Until 2026-11-28 it was kept per host name, so a request to
+    # one didn't wait for the other.
+    HOST_DELAY = {"opendatalab.mn": 11.0}
+    # Redirects are followed by hand, each hop after the crawl delay of its own host and through
+    # its own route (httpx's follow_redirects sent the next hop at once: opendatalab.mn answers
+    # /search/<n> with a 302 to another page, and its bare domain with 301s).
+    MAX_REDIRECTS = 5
 
     @staticmethod
     def _make_client(**kw):
         import httpx
         return httpx.Client(
             # generous timeout: a free Render instance can take ~1 min to wake up
-            timeout=httpx.Timeout(90, connect=30), follow_redirects=True,
+            timeout=httpx.Timeout(90, connect=30), follow_redirects=False,
             headers={"User-Agent": "mse-graph/0.1 (research crawler)"}, **kw,
         )
+
+    def delay_key(self, host: str) -> str:
+        """The clock a request to `host` waits on: its HOST_DELAY domain, else the host itself."""
+        host = host.lower().rstrip(".")
+        return next((d for d in self.HOST_DELAY if egress.host_matches(host, d)), host)
 
     def _proxy_client(self, route: egress.Route):
         client = self._proxy_clients.get(route.url)
@@ -155,20 +167,25 @@ class Fetcher:
         return client
 
     def _throttle(self, host: str) -> None:
-        delay = max(self.delay, self.HOST_DELAY.get(host, 0.0))
-        wait = delay - (time.monotonic() - self._last_by_host.get(host, float("-inf")))
-        # For hosts with a crawl delay, the last request's time is also kept next to the
+        key = self.delay_key(host)
+        delay = max(self.delay, self.HOST_DELAY.get(key, 0.0))
+        wait = delay - (time.monotonic() - self._last_by_host.get(key, float("-inf")))
+        # For domains with a crawl delay, the last request's time is also kept next to the
         # cache, so commands run one after another (odl-enrich, then odl-discover) keep
-        # the delay between them too.
-        stamp = self.cache_dir / f".last-request-{host}" if host in self.HOST_DELAY else None
+        # the delay between them too. Older versions kept one stamp per host name
+        # (.last-request-www.opendatalab.mn): those count as well.
+        stamp = self.cache_dir / f".last-request-{key}" if key in self.HOST_DELAY else None
         if stamp is not None:
             try:
-                wait = max(wait, delay - (time.time() - stamp.stat().st_mtime))
+                last = max((p.stat().st_mtime for p in self.cache_dir.glob(f".last-request-*{key}")
+                            if p.name == stamp.name or p.name.endswith("." + key)), default=None)
             except OSError:
-                pass
+                last = None
+            if last is not None:
+                wait = max(wait, delay - (time.time() - last))
         if wait > 0:
             time.sleep(min(wait, delay))
-        self._last_by_host[host] = time.monotonic()
+        self._last_by_host[key] = time.monotonic()
         if stamp is not None:
             try:
                 stamp.touch()
@@ -205,6 +222,10 @@ class Fetcher:
             return Attempt(None, None, f"gateway HTTP {r.status_code}: {r.text[:200]}", step)
         if r.status_code == 200:
             return Attempt(r, 200, "", "ok")
+        if r.is_redirect:
+            # the next hop is the caller's to make (Fetcher._request), after its host's crawl delay;
+            # the fetch gateway hands opendatalab.mn's redirects back the same way (proxy/app.py)
+            return Attempt(r, r.status_code, "", "redirect")
         if r.status_code == 407:
             return Attempt(None, None, "HTTP 407 (check the proxy's username and password)", "next")
         if r.status_code == 403 and any(m in r.text[:2000] for m in self.BLOCKED_MARKERS):
@@ -213,6 +234,21 @@ class Fetcher:
         return Attempt(None, r.status_code, f"HTTP {r.status_code}", step)
 
     def _request(self, url: str):
+        """The final answer for `url` (a 200), following up to MAX_REDIRECTS redirects: each hop
+        is a request of its own, routed, retried and throttled for its own host."""
+        self.last_url = url
+        for _ in range(self.MAX_REDIRECTS + 1):
+            r = self._request_once(url)
+            if r is None or not r.is_redirect:
+                return r
+            nxt = urljoin(url, r.headers["location"])
+            log.info("GET %s -> HTTP %d, redirected to %s", url, r.status_code, nxt)
+            url = self.last_url = nxt
+        self.last_status, self.last_error = None, f"more than {self.MAX_REDIRECTS} redirects"
+        log.warning("GET %s -> %s", url, self.last_error)
+        return None
+
+    def _request_once(self, url: str):
         host = urlsplit(url).hostname or ""
         routes = self.router.routes_for(host)          # a bad ODL_PROXY_URL raises here
         self.last_status, self.last_error = None, ""
@@ -222,8 +258,8 @@ class Fetcher:
         for route in routes:
             for n in range(1, route.attempts + 1):
                 a = self.try_route(route, url)
-                if a.step == "ok":
-                    self.last_status = 200
+                if a.step in ("ok", "redirect"):
+                    self.last_status = a.status
                     return a.response
                 self.last_status, self.last_error = a.status, a.error
                 via = f" via {route.label}" if route is not egress.DIRECT else ""
@@ -254,6 +290,12 @@ class Fetcher:
             return time.time() - path.stat().st_mtime < self.cache_max_age
         except OSError:
             return False
+
+    def forget(self, url: str) -> None:
+        """Drop `url` from the disk cache: an answer the caller found to be no real page
+        (a block or challenge page served with HTTP 200) must not be replayed for 20 h."""
+        for ext in (".html", ".bin"):
+            self._cache_path(url, ext).unlink(missing_ok=True)
 
     def get(self, url: str, use_cache: bool = True) -> str | None:
         path = self._cache_path(url, ".html")

@@ -489,21 +489,48 @@ def _entity_page(html: str, reg_no: str) -> dict | None:
 
 def fetch_registry_page(reg_no: str, fetcher=None) -> tuple[dict | None, str]:
     """Download and parse the registry page for `reg_no`. Returns (page or None, url)."""
-    url = registry_url(reg_no)
-    html = (fetcher or _fetcher()).get(url)
-    return (_entity_page(html, reg_no) if html else None), url
+    _, page, url = fetch_entity(reg_no, fetcher or _fetcher())
+    return page, url
+
+
+def _page_title(html: str) -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
+    return clean(m.group(1))[:80] if m else ""
 
 
 def fetch_entity(reg_no: str, fetcher) -> tuple[str, dict | None, str]:
     """(status, parsed page or None, url) for one registry page. The status is "ok",
-    "not found" (no such entity: a 404, or an answer that isn't this number's page)
-    or "fetch failed" (no answer through any route; `fetcher.last_error` says why)."""
+    "not found" or "fetch failed" (`fetcher.last_error` says why).
+
+    "Not found" is only what the registry itself says: a 404 or 410 (its answer for a number
+    it doesn't know, seen on Render 2026-11-21 and 11-24), or the registry page of another
+    number (/search/000207696 redirected to /search/5562236's page, 2026-11-21). Any other
+    page answered with HTTP 200 (a block or challenge page, a proxy's error page, a layout the
+    parser no longer reads) is "fetch failed" and leaves the cache: until 2026-11-28 it counted as
+    "not found", stayed cached 20 h and made the number rest DISCOVERY_RETRY_DAYS (30 days)."""
     url = registry_url(reg_no)
     html = fetcher.get(url)
-    if html is None and getattr(fetcher, "last_status", None) not in (404, 410):
-        return "fetch failed", None, url
-    page = _entity_page(html, reg_no) if html else None
-    return ("ok" if page else "not found"), page, url
+    if html is None:
+        return ("not found" if getattr(fetcher, "last_status", None) in (404, 410) else "fetch failed"), None, url
+    page = parse_registry_page(html)
+    got = re.sub(r"\D", "", page["info"].get("reg_no", ""))
+    if got == re.sub(r"\D", "", reg_no):
+        return "ok", page, url
+    if got:
+        log.info("ODL %s: the registry answered with the page of %s (%s)", reg_no, got,
+                 getattr(fetcher, "last_url", "") or url)
+        return "not found", None, url
+    if hasattr(fetcher, "forget"):
+        fetcher.forget(url)
+    title = _page_title(html)
+    error = ("answered HTTP 200 with a page that isn't a registry page (a block or challenge page?"
+             + (f" title: {title!r}" if title else "") + ")")
+    log.warning("ODL %s: %s", url, error)
+    try:
+        fetcher.last_error = error
+    except AttributeError:
+        pass
+    return "fetch failed", None, url
 
 
 REGISTRY_LEASE = "registry"
@@ -656,5 +683,7 @@ def check_egress(reg_no: str, fetcher=None) -> list[dict]:
         res["ok"] = a.step == "ok" and _entity_page(a.response.text, reg_no) is not None
         if a.step == "ok" and not res["ok"]:
             res["error"] = "answered, but not with the registry page (unknown number, or a block page?)"
+        elif a.step == "redirect":
+            res["error"] = f"HTTP {a.status}: redirected to {a.response.headers.get('location', '?')} (not followed)"
         results.append(res)
     return results

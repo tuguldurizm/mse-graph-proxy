@@ -34,14 +34,45 @@ URLISH = re.compile(r"""["'`]((?:https?://[^"'`\s]{4,200})|(?:/[A-Za-z0-9_\-./{}
 def _client():
     # Deliberately not routed through ODL_PROXY_URL (egress.py): discovery probes paths other
     # than /search/<reg no>, the kind of traffic that got the server's address refused (issue #4).
+    # Redirects are followed by _get, one throttled hop at a time.
     import httpx
-    return httpx.Client(timeout=30, follow_redirects=True,
+    return httpx.Client(timeout=30, follow_redirects=False,
                         headers={"User-Agent": "Mozilla/5.0 (compatible; mse-graph/0.1)"})
 
 
+# Seconds between two requests to one domain (all its hosts share the clock, as in
+# scraper.Fetcher); other sites get DEFAULT_DELAY.
+HOST_DELAY = {"opendatalab.mn": 11.0}
+DEFAULT_DELAY = 1.0
+MAX_REDIRECTS = 5
+_last_hit: dict[str, float] = {}
+
+
+def _delay_key(host: str) -> str:
+    from .egress import host_matches
+    return next((d for d in HOST_DELAY if host_matches(host, d)), host.lower().rstrip("."))
+
+
+def _wait_turn(url: str) -> None:
+    import time
+    key = _delay_key(urlsplit(url).hostname or "")
+    wait = HOST_DELAY.get(key, DEFAULT_DELAY) - (time.monotonic() - _last_hit.get(key, float("-inf")))
+    if wait > 0:
+        time.sleep(wait)
+    _last_hit[key] = time.monotonic()
+
+
 def _get(c, url):
+    """GET `url` after its domain's delay; each redirect hop waits its turn too."""
     try:
-        return c.get(url)
+        for _ in range(MAX_REDIRECTS + 1):
+            _wait_turn(url)
+            r = c.get(url)
+            if not r.is_redirect:
+                return r
+            url = urljoin(str(r.url), r.headers["location"])
+        log.info("DISC GET %s: more than %d redirects", url, MAX_REDIRECTS)
+        return None
     except Exception as exc:
         log.info("DISC GET %s failed: %s", url, exc)
         return None
@@ -155,20 +186,6 @@ if __name__ == "__main__":
 
 # ---- pass 2: explore specific pages --------------------------------------------
 
-HOST_DELAY = {"opendatalab.mn": 11.0, "www.opendatalab.mn": 11.0}
-_last_hit: dict[str, float] = {}
-
-
-def _polite_get(c, url):
-    import time
-    host = urlsplit(url).hostname or ""
-    wait = HOST_DELAY.get(host, 1.0) - (time.monotonic() - _last_hit.get(host, 0))
-    if wait > 0:
-        time.sleep(wait)
-    _last_hit[host] = time.monotonic()
-    return _get(c, url)
-
-
 def _rsc_snippets(html: str, limit: int = 6) -> list[str]:
     """Next.js app-router flight data (self.__next_f.push) often embeds the page data."""
     chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.S)
@@ -187,7 +204,7 @@ def explore(url: str, seen_scripts: set[str]) -> None:
 
     c = _client()
     host = urlsplit(url).hostname or ""
-    r = _polite_get(c, url)
+    r = _get(c, url)
     if r is None:
         return
     ctype = r.headers.get("content-type", "")
@@ -234,7 +251,7 @@ def explore(url: str, seen_scripts: set[str]) -> None:
         if src in seen_scripts or host not in src_host:
             continue
         seen_scripts.add(src)
-        rs = _polite_get(c, src)
+        rs = _get(c, src)
         if rs is not None and rs.status_code == 200:
             found.update(_interesting_strings(rs.text, host))
     if found:

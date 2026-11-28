@@ -167,6 +167,10 @@ SCHEMA = [
     "CREATE CONSTRAINT official_key IF NOT EXISTS FOR (o:Official) REQUIRE o.key IS UNIQUE",
     # documents listed companies publish on open.mse.mn (issue #10, reports.py)
     "CREATE CONSTRAINT report_url IF NOT EXISTS FOR (r:Report) REQUIRE r.url IS UNIQUE",
+    # one node per key: leases (claim), run stamps, digests. Without it, two first claims of a lease
+    # (after a wipe) could MERGE two nodes and both get it. Aura had no duplicate key on 2026-11-28; if
+    # one ever appears this statement fails and the app doesn't start: merge the nodes first.
+    "CREATE CONSTRAINT meta_key IF NOT EXISTS FOR (m:Meta) REQUIRE m.key IS UNIQUE",
 ]
 # company properties kept as dated facts (issue #38): fact name -> company-row field
 COMPANY_FACTS = {"name": "name", "name_en": "name_en", "address": "address", "sector": "sector_mse"}

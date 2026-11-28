@@ -8,6 +8,11 @@ networks that can't. It is NOT an open proxy:
   re-checked on every redirect hop;
 * GET only, http/https only, response size capped.
 
+A redirect from or to a host in PASS_REDIRECT_HOSTS (default opendatalab.mn, which asks
+for 10 s between requests) is not followed here: the 3xx goes back to the caller with an
+absolute Location, and the caller (mse_graph.scraper.Fetcher) asks for the next hop after
+its crawl delay. Sleeping 11 s inside the request instead would eat the caller's timeout.
+
 Hosts in UPSTREAM_PROXY_HOSTS (default opendatalab.mn, which refuses Render's own
 address, issue #4) always leave through the forward proxy in UPSTREAM_PROXY_URL
 (e.g. a Webshare rotating endpoint) when it is set: never directly, not even on
@@ -35,6 +40,11 @@ UPSTREAM_PROXY_URL = os.environ.get("UPSTREAM_PROXY_URL", "").strip()
 UPSTREAM_PROXY_HOSTS = [
     h.strip().lower()
     for h in os.environ.get("UPSTREAM_PROXY_HOSTS", "opendatalab.mn").split(",")
+    if h.strip()
+]
+PASS_REDIRECT_HOSTS = [
+    h.strip().lower()
+    for h in os.environ.get("PASS_REDIRECT_HOSTS", "opendatalab.mn").split(",")
     if h.strip()
 ]
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(25 * 1024 * 1024)))
@@ -96,6 +106,7 @@ def client_for(url: str) -> httpx.AsyncClient:
 def healthz():
     return {
         "ok": True, "allowed_hosts": ALLOWED_HOSTS, "token_configured": bool(PROXY_TOKEN),
+        "pass_redirect_hosts": PASS_REDIRECT_HOSTS,
         "upstream_proxy": ({"hosts": UPSTREAM_PROXY_HOSTS, "route": _redact(UPSTREAM_PROXY_URL)}
                            if UPSTREAM_PROXY_URL else None),
     }
@@ -120,7 +131,14 @@ async def fetch(url: str = Query(...), x_proxy_token: str = Header(default="")):
             raise HTTPException(502, _scrub(f"upstream error: {exc.__class__.__name__}: {exc}"))
         if upstream.is_redirect and "location" in upstream.headers:
             await upstream.aclose()
-            url = urljoin(url, upstream.headers["location"])
+            target = urljoin(url, upstream.headers["location"])
+            if not host_allowed(target):
+                raise HTTPException(403, f"host not allowed: {urlsplit(target).hostname}")
+            if _matches(url, PASS_REDIRECT_HOSTS) or _matches(target, PASS_REDIRECT_HOSTS):
+                # the caller makes the next request, after the host's crawl delay
+                return Response(status_code=upstream.status_code, headers={
+                    "Location": target, "X-Final-Url": url, "X-Upstream-Status": str(upstream.status_code)})
+            url = target
             continue
         break
     else:
