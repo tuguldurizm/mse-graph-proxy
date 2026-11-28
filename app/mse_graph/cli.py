@@ -59,6 +59,7 @@ and ODL_PROXY_URL to send opendatalab.mn requests through a proxy of their own
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -72,6 +73,30 @@ from . import csv_io
 def _graph():
     from .graph import Graph
     return Graph()
+
+
+@contextlib.contextmanager
+def _registry_lease(what: str):
+    """Hold the registry lease (opendatalab.RegistryLease) while the block runs: opendatalab.mn is
+    never read by two runs at once, even for one page. Exits with the busy message when another
+    run holds it, as odl-enrich does."""
+    from . import opendatalab
+    g = _graph()
+    lease = opendatalab.RegistryLease(g, what)
+    try:
+        try:
+            got = lease.acquire()
+        except Exception as exc:         # no Neo4j: no lease, so no request either
+            sys.exit(f"cannot take the registry lease ({type(exc).__name__}: {exc}); opendatalab.mn is only read "
+                     "under the lease, so set NEO4J_URI (and NEO4J_PASSWORD) to the graph the other runs use")
+        if not got:
+            sys.exit(f"{lease.busy_message()}; try again later")
+        try:
+            yield lease
+        finally:
+            lease.release()
+    finally:
+        g.close()
 
 
 def _resolve(g, q: str) -> str:
@@ -213,7 +238,8 @@ def main(argv=None):
     p.add_argument("a")
     p.add_argument("b")
 
-    p = sub.add_parser("odl-company", help="show one company's Open Data Lab registry page, parsed")
+    p = sub.add_parser("odl-company", help="show one company's Open Data Lab registry page, parsed (takes the "
+                                           "registry lease, so it needs the graph's NEO4J_URI)")
     p.add_argument("reg_no")
     p.add_argument("--raw", action="store_true", help="print every parsed section, not just graph records")
     p = sub.add_parser("odl-enrich",
@@ -254,7 +280,8 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("egress-check",
                        help="show how requests leave this server; fetch one Open Data Lab registry page "
-                            "through each opendatalab.mn route (one request per route, 11 s apart)")
+                            "through each opendatalab.mn route (one request per route, 11 s apart; takes the "
+                            "registry lease, so it needs the graph's NEO4J_URI)")
     p.add_argument("--reg", default="2008572", help="registration number of the page to fetch (default %(default)s)")
 
     p = sub.add_parser("ask", help="ask the graph a question in plain Mongolian or English (#10); answered by a "
@@ -385,9 +412,12 @@ def main(argv=None):
 
     if args.cmd == "odl-company":
         from . import opendatalab
-        page, url = opendatalab.fetch_registry_page(args.reg_no)
+        with _registry_lease("odl-company"):
+            fetcher = opendatalab._fetcher()
+            status, page, url = opendatalab.fetch_entity(args.reg_no, fetcher)
         if page is None:
-            sys.exit(f"no registry page for {args.reg_no} ({url})")
+            why = fetcher.last_error or (f"HTTP {fetcher.last_status}" if fetcher.last_status else "")
+            sys.exit(f"{status}: no registry page for {args.reg_no} ({url}{'; ' + why if why else ''})")
         if args.raw:
             _print(page)
         else:
@@ -470,8 +500,9 @@ def main(argv=None):
         try:
             print(f"{'mse.mn':<16} -> {fetcher.router.describe(settings.mse_base_url)}")
             print(f"{'opendatalab.mn':<16} -> {fetcher.router.describe(settings.odl_base_url)}")
-            print(f"fetching {opendatalab.registry_url(args.reg)} through each opendatalab.mn route:")
-            results = opendatalab.check_egress(args.reg, fetcher)
+            with _registry_lease("egress-check"):
+                print(f"fetching {opendatalab.registry_url(args.reg)} through each opendatalab.mn route:")
+                results = opendatalab.check_egress(args.reg, fetcher)
         except egress.EgressConfigError as exc:
             sys.exit(f"error: {exc}")
         for r in results:
