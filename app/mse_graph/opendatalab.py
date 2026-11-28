@@ -498,6 +498,24 @@ def _page_title(html: str) -> str:
     return clean(m.group(1))[:80] if m else ""
 
 
+# Signs of a page served with HTTP 200 in place of the one asked for: a bot check or challenge, a
+# CDN's or a proxy's error page, a rate limit. Callers check them only on a page their parser found
+# nothing in, so a company or holder named like one of them can't trip it.
+_CHALLENGE_RE = re.compile(
+    r"<meta[^>]+http-equiv\s*=\s*[\"']?refresh"
+    r"|just a moment|checking if the site connection is secure|checking your browser"
+    r"|enable javascript and cookies|cf-chl|challenge-platform|captcha|attention required"
+    r"|access denied|request blocked|too many requests|rate limit"
+    r"|proxy error|bad gateway|service unavailable|gateway time-?out", re.I)
+
+
+def challenge_marker(html: str) -> str:
+    """The first sign in `html` that it is a block or challenge page or an error page (see
+    _CHALLENGE_RE), e.g. "just a moment", or "" when it shows none."""
+    m = _CHALLENGE_RE.search((html or "")[:50_000])
+    return clean(m.group(0)).lower()[:40] if m else ""
+
+
 def fetch_entity(reg_no: str, fetcher) -> tuple[str, dict | None, str]:
     """(status, parsed page or None, url) for one registry page. The status is "ok",
     "not found" or "fetch failed" (`fetcher.last_error` says why).
@@ -522,9 +540,9 @@ def fetch_entity(reg_no: str, fetcher) -> tuple[str, dict | None, str]:
         return "not found", None, url
     if hasattr(fetcher, "forget"):
         fetcher.forget(url)
-    title = _page_title(html)
+    title, marker = _page_title(html), challenge_marker(html)
     error = ("answered HTTP 200 with a page that isn't a registry page (a block or challenge page?"
-             + (f" title: {title!r}" if title else "") + ")")
+             + (f" title: {title!r}" if title else "") + (f" shows {marker!r}" if marker else "") + ")")
     log.warning("ODL %s: %s", url, error)
     try:
         fetcher.last_error = error

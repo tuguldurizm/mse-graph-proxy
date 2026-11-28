@@ -1112,8 +1112,11 @@ def _holders_cmd(args):
                     print(f"    {c}")
         print(f"searched {report['searched']} of {report['due']} holders due ({report['total']} in all, "
               f"quota {report['quota'] or 'none'}): {report['holdings']} holdings, {report['in_graph']} already in "
-              f"the graph, {report['new']} new companies for discovery, {report['unresolved']} unresolved; "
-              f"{report['requests']} requests; {report['left']} holders still due")
+              f"the graph, {report['new']} new companies for discovery, {report['unresolved']} unresolved, "
+              f"{report['empty']} with no result; {report['requests']} requests; {report['left']} holders still due")
+        if report["unconfirmed"]:
+            print(f"{report['unconfirmed']} searches at the end came back with no result and no real page followed "
+                  "to confirm them: those holders stay due")
         if report["stopped"]:
             print(f"stopped: {report['stopped']}", file=sys.stderr)
     sys.exit(1 if report["stopped"] and "time budget" not in report["stopped"] else 0)
