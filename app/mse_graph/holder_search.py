@@ -32,6 +32,9 @@ Every holder is searched again every `every_days` (7) days, a share of them each
 graph, never-searched holders first, the closest to the listed companies first. A run
 stops at its time budget; whoever is left is first in line the next day.
 
+A block or challenge page served with HTTP 200 is no answer: a search counts only when a real
+search page comes back (see `search`), so a block never parks holders as having no holdings.
+
 Like every opendatalab.mn request: 11 s apart, never in parallel (opendatalab.RegistryLease).
 robots.txt disallows /search?query=; the owner has an agreement with Open Data Lab that
 this project may ignore it (CLAUDE.md), so the load is kept gentle instead.
@@ -55,6 +58,7 @@ log = logging.getLogger(__name__)
 
 EVERY_DAYS = 7               # each holder is searched again after this many days
 DEFAULT_MINUTES = 60.0       # time budget of one run
+MAX_EMPTY_IN_A_ROW = 10      # name searches with no result at all, in a row, that stop a run
 FOLLOW_ROLES = ("эзэмшигч",)  # record types followed: shareholders (founders)
 
 # legal forms as the search results spell them out, after the company's name
@@ -203,12 +207,24 @@ def quota_for(total: int, quota, every_days: int = EVERY_DAYS) -> int | None:
 
 def search(g, fetcher=None, minutes: float = DEFAULT_MINUTES, quota="auto", every_days: int = EVERY_DAYS,
            keys: list[str] | None = None, progress=None,
-           max_failures: int = opendatalab.MAX_CONSECUTIVE_FAILURES, clock=time.monotonic) -> dict:
+           max_failures: int = opendatalab.MAX_CONSECUTIVE_FAILURES, max_empty: int = MAX_EMPTY_IN_A_ROW,
+           clock=time.monotonic) -> dict:
     """Search the registry for the holdings of the holders due today (or `keys`) and keep
     what it finds as (:HoldingLead) nodes; the next discovery run reads the new companies.
 
+    Only a real search page counts as an answer. A page served with HTTP 200 that has no
+    result at all and shows a sign of a block or challenge page (opendatalab.challenge_marker)
+    is a failed download: it leaves the cache, counts toward `max_failures` and the holder
+    stays due. A page with no result and no such sign may be either (the search for a
+    holder's own name normally finds at least that holder's record), so it is held back:
+    the holder counts as searched with no holdings ("empty") only once a later search of
+    the run returns a real result page; `max_empty` such pages in a row stop the run and
+    leave those holders due. Until 2026-11-28 any page counted as "no holdings" and parked
+    the holder for `every_days`.
+
     Returns a report: `searched` holders, `holdings` matched, `in_graph` (companies the
-    graph has), `new` (register numbers it doesn't), `unresolved` records, `requests`,
+    graph has), `new` (register numbers it doesn't), `unresolved` records, `empty` (searched,
+    nothing found), `unconfirmed` (empty answers the run ended on, still due), `requests`,
     `failed`, `left` (holders still due), `stopped`, and `found` per holder."""
     fetcher = fetcher or opendatalab._fetcher()
     total = g.holder_target_count()
@@ -219,23 +235,47 @@ def search(g, fetcher=None, minutes: float = DEFAULT_MINUTES, quota="auto", ever
     known = g.holding_records()
     deadline = clock() + minutes * 60 if minutes else None
     report = {"total": total, "quota": limit, "due": len(targets), "searched": 0, "holdings": 0, "in_graph": 0,
-              "new": 0, "unresolved": 0, "self": 0, "requests": 0, "failed": [], "found": [], "stopped": ""}
+              "new": 0, "unresolved": 0, "self": 0, "empty": 0, "unconfirmed": 0, "requests": 0, "failed": [],
+              "found": [], "stopped": ""}
     failures = 0
+    empty: list[tuple[dict, str]] = []     # (holder, url) of empty answers waiting for a real page
+
+    def failed() -> None:
+        nonlocal failures
+        failures += 1
+        if failures >= max_failures and not report["stopped"]:
+            report["stopped"] = (f"{failures} opendatalab.mn requests in a row failed; "
+                                 "check the route: python -m mse_graph.cli egress-check")
+
+    def forget(url) -> None:
+        if hasattr(fetcher, "forget"):
+            fetcher.forget(url)
 
     def get(url):
-        nonlocal failures
         html = fetcher.get(url)
         report["requests"] += 1
         if progress:
             progress()
         if html is None:
-            failures += 1
-            if failures >= max_failures:
-                report["stopped"] = (f"{failures} opendatalab.mn requests in a row failed; "
-                                     "check the route: python -m mse_graph.cli egress-check")
-        else:
-            failures = 0
+            failed()
         return html
+
+    def blocked(url, html) -> str:
+        """Why `html` (in which nothing was found) is no real answer, or ""."""
+        marker = opendatalab.challenge_marker(html)
+        if marker:
+            forget(url)
+            failed()
+            log.warning("HOLDERS %s: answered HTTP 200 with a block or challenge page (shows %r)", url, marker)
+        return marker
+
+    def searched_empty(pending) -> None:
+        g.note_holder_searched([{"key": t["key"], "found": 0, "new": 0} for t, _ in pending])
+        for t, _ in pending:
+            report["searched"] += 1
+            report["empty"] += 1
+            report["found"].append({"key": t["key"], "name": t["name"], "holdings": 0, "new": 0, "companies": []})
+            log.info("HOLDERS %s: no results", t["name"])
 
     for t in targets:
         if report["stopped"]:
@@ -243,16 +283,36 @@ def search(g, fetcher=None, minutes: float = DEFAULT_MINUTES, quota="auto", ever
         if deadline is not None and clock() >= deadline:
             report["stopped"] = f"time budget of {minutes:g} minutes used"
             break
-        html = get(search_url(query_for(t)))
+        url = search_url(query_for(t))
+        html = get(url)
         if html is None:
             report["failed"].append({"key": t["key"], "error": getattr(fetcher, "last_error", "")})
             continue
-        rows = matching(parse_search(html), t)
+        records, entities = parse_search(html), parse_entities(html)
+        if not records and not entities:
+            marker = blocked(url, html)
+            if marker:
+                report["failed"].append({"key": t["key"], "error": f"a block or challenge page (shows {marker!r})"})
+                continue
+            empty.append((t, url))
+            if len(empty) >= max_empty:
+                report["stopped"] = (f"{len(empty)} opendatalab.mn name searches in a row came back with no "
+                                     "result at all (a block or challenge page?); those holders stay due")
+                for e, u in empty:
+                    forget(u)
+                    report["failed"].append({"key": e["key"], "error": "no result at all (unconfirmed)"})
+                empty.clear()
+            continue
+        failures = 0
+        if empty:                         # a real page: the empty answers before it were real too
+            searched_empty(empty)
+            empty.clear()
+        rows = matching(records, t)
         self_leads = []
         if t["kind"] == "organization" and not t.get("reg"):
             # the organisation's own registry entry: its register number, when one entity has its name
             own = set(t.get("keys") or [t["key"]])
-            same = {e["reg"]: e for e in parse_entities(html) if company_key(e["name"]) in own}
+            same = {e["reg"]: e for e in entities if company_key(e["name"]) in own}
             if len(same) == 1:
                 e = next(iter(same.values()))
                 ticker = regs.get(e["reg"])
@@ -275,7 +335,16 @@ def search(g, fetcher=None, minutes: float = DEFAULT_MINUTES, quota="auto", ever
                 if report["stopped"] or (deadline is not None and clock() >= deadline):
                     status = "unresolved"          # next search of this holder resolves it
                 else:
-                    reg = parse_record(get(record_url(r["record"], r["model"])) or "")
+                    rurl = record_url(r["record"], r["model"])
+                    page = get(rurl)
+                    reg = parse_record(page or "")
+                    if reg:
+                        failures = 0
+                    elif page is not None:
+                        # no link to a company: a block page (a failure) or an odd record; either
+                        # way not replayed from the cache when the holder is searched again
+                        if not blocked(rurl, page):
+                            forget(rurl)
                     status = "" if reg else "unresolved"
             if reg and not ticker:
                 ticker = regs.get(reg)
@@ -296,13 +365,19 @@ def search(g, fetcher=None, minutes: float = DEFAULT_MINUTES, quota="auto", ever
                                 "companies": [f"{x['company']} ({x['reg'] or '?'}, {x['status']})" for x in leads]})
         log.info("HOLDERS [%d/%d] %s: %d holdings, %d new", report["searched"], len(targets), t["name"],
                  len(by_company), new)
+    if empty:
+        # the run ended on empty answers that no real page followed: they stay due (first in line
+        # next time) rather than being parked for `every_days` on an answer that may be a block page
+        report["unconfirmed"] = len(empty)
+        for _, u in empty:
+            forget(u)
     report["left"] = len(g.holder_targets(every_days)) if not keys else 0
     return report
 
 
 def summary(report: dict, names: int = 15) -> dict:
     out = {k: report[k] for k in ("total", "quota", "searched", "holdings", "in_graph", "new", "unresolved",
-                                  "self", "requests", "left") if k in report}
+                                  "self", "empty", "unconfirmed", "requests", "left") if k in report}
     if report.get("failed"):
         out["failed"] = len(report["failed"])
     top = sorted(report.get("found", []), key=lambda f: -f["new"])[:names]
