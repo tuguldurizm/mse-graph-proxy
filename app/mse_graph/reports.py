@@ -22,7 +22,7 @@ Step 1 (this module) does three things, all bounded and all logged:
 2. **Read.** Up to REPORTS_PDF_BUDGET (4) PDFs a run, each company's newest unread annual report or
    financial statement first, are read with pdfplumber: the first REPORTS_PDF_MAX_PAGES (80) pages, at
    most REPORTS_PDF_MAX_MB (25) MB, not kept on disk. Stored on the Report: `pages`, `text_pages` and
-   `scanned` (almost no text layer: a scan, which this step does not OCR), and `sections`, the pages
+   `scanned` (almost no text layer: a scan, read by step 5), and `sections`, the pages
    where the shareholders, subsidiaries, associates, board, related parties and the auditor's report
    are named.
 3. **Findings.** On those pages, a line naming an **organisation** (a legal form: ХХК, ХК, LLC, ...)
@@ -38,6 +38,15 @@ Step 1 (this module) does three things, all bounded and all logged:
    The subsidiary is the graph's company of the same name when there is one (or `--ticker`), else a new
    unlisted company in the dataset's companies.csv. Shareholder findings are not confirmed this way: a listed
    company's owners are the ones mse.mn reports (owner, 2026-11-25).
+
+5. **OCR of scans** (2026-11-28). Most documents read so far are scans (7 of the first 8: no text layer),
+   so `read_scans` renders the pages of documents marked `scanned` with pypdfium2 (300 dpi) and reads them
+   with Tesseract (REPORTS_OCR_LANG, `mon+eng`), REPORTS_OCR_BUDGET (6) documents and REPORTS_OCR_MAX_PAGES
+   (40) pages each, the newest first. The text goes through the same sections and findings as step 3,
+   after `fix_ocr_percent` puts back the percent signs Tesseract reads as "96". The findings replace the
+   scan's empty ones and carry `"ocr": true` (shown as "OCR"); they are as unchecked as the others, and
+   OCR misreads names and numbers, so check them against the PDF before `--confirm`. It needs Tesseract,
+   so the daily job runs it (`cli reports --ocr`), not Render's 0.15-CPU service.
 
 The pipeline runs it (`pipeline.reports_step`) at most every REPORTS_MIN_INTERVAL_HOURS (20);
 REPORTS_ENABLE=0 turns it off. `cli reports` runs or summarises it by hand.
@@ -404,6 +413,181 @@ def analyse_pdf(data: bytes, page_limit: int | None = None) -> dict:
     return analyse_text(texts, total)
 
 
+# ---- OCR of scanned PDFs (module docstring, step 5) ----------------------------------------------
+
+OCR_DPI = 300                       # 200 dpi read "100%" as "10096" more often (2026-11-28 trials)
+OCR_PAGE_TIMEOUT = 120              # seconds for one page; a page that takes longer is left out
+# Tesseract's Mongolian model reads "%" as "96": "34%" -> "3496", "51.5 %" -> "51.5 96" (2026-11-28 trials;
+# at 300 dpi it sometimes gives "90", which also ends amounts like "1,290", so that is not mended). Only on a
+# line that names an organisation (a legal form), only where the number before it is a percent (<= 100), not
+# a four-digit year ("1996", "2096") and not an amount or a count (a unit word after it).
+_OCR_PCT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,4})?)(\s?)(96)(?![\d%])"
+                      r"(?!\s*(?:сая|мянга|мянган|тэрбум|төгрөг|₮|ширхэг|ш\.|ш\b|хувьцаа|млн|тэрб|mln|bn|mnt|usd|\$))",
+                      re.I)
+
+
+def ocr_lang() -> str:
+    return os.getenv("REPORTS_OCR_LANG") or "mon+eng"
+
+
+def ocr_budget() -> int:
+    return int(os.getenv("REPORTS_OCR_BUDGET") or 6)
+
+
+def ocr_max_pages() -> int:
+    return int(os.getenv("REPORTS_OCR_MAX_PAGES") or 40)
+
+
+def ocr_available() -> str:
+    """"" when Tesseract and its language data (ocr_lang) are installed, else why not."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("tesseract"):
+        return "tesseract is not installed (apt-get install tesseract-ocr tesseract-ocr-mon)"
+    try:
+        out = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"tesseract: {exc}"
+    have = set((out.stdout or "").split())
+    missing = [lang for lang in ocr_lang().split("+") if lang not in have]
+    return f"tesseract has no language data for {', '.join(missing)}" if missing else ""
+
+
+def fix_ocr_percent(text: str) -> str:
+    """Put back the percent signs Tesseract read as "96" / "90", on lines that name an organisation."""
+    out = []
+    for line in (text or "").splitlines():
+        if _ORG.search(line):
+            def repl(m):
+                num, digits = m.group(1), m.group(1) + m.group(3)
+                if not m.group(2) and re.fullmatch(r"(?:19|20)\d\d", digits):
+                    return m.group(0)                      # a year
+                try:
+                    value = float(num.replace(",", "."))
+                except ValueError:
+                    return m.group(0)
+                return f"{num}%" if 0 < value <= 100 else m.group(0)
+            line = _OCR_PCT.sub(repl, line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def ocr_pdf(data: bytes, page_limit: int | None = None) -> tuple[list[str], int]:
+    """(the text of each of the first pages, total pages): each page rendered at OCR_DPI with pypdfium2
+    (installed with pdfplumber) and read by Tesseract (ocr_lang)."""
+    import subprocess
+
+    import pypdfium2 as pdfium
+
+    page_limit = page_limit or ocr_max_pages()
+    texts = []
+    pdf = pdfium.PdfDocument(data)
+    try:
+        total = len(pdf)
+        for i in range(min(total, page_limit)):
+            page = pdf[i]
+            try:
+                img = page.render(scale=OCR_DPI / 72).to_pil().convert("L")
+                buf = io.BytesIO()
+                img.save(buf, "PNG")
+                out = subprocess.run(["tesseract", "stdin", "stdout", "-l", ocr_lang(), "--psm", "6"],
+                                     input=buf.getvalue(), capture_output=True, timeout=OCR_PAGE_TIMEOUT)
+                texts.append(fix_ocr_percent(out.stdout.decode("utf-8", "replace")))
+            except Exception as exc:       # one bad page must not lose the rest
+                log.debug("ocr page %d: %s", i + 1, exc)
+                texts.append("")
+            finally:
+                page.close()
+    finally:
+        pdf.close()
+    return texts, total
+
+
+def scans_due(g, budget: int) -> list[dict]:
+    """Scanned documents not read by OCR yet: the newest first, a year's annual report before its
+    financial statement, audit report and half-year report (as pdfs_due)."""
+    rows = g.run(
+        """
+        MATCH (c:Company)-[:PUBLISHED]->(r:Report)
+        WHERE r.current AND r.scanned AND r.pdf_error IS NULL AND r.ocr_at IS NULL AND r.kind IN $kinds
+        RETURN c.ticker AS ticker, r.url AS url, r.kind AS kind, coalesce(r.year, 0) AS year,
+               coalesce(r.period, '') AS period
+        """, kinds=list(READ_KINDS))
+    rank = {k: i for i, k in enumerate(READ_KINDS)}
+    rank_period = {"annual": 0, "": 1, "half": 2, "quarter": 3}
+    return sorted(rows, key=lambda r: (-r["year"], rank[r["kind"]], rank_period.get(r["period"], 1),
+                                       r["url"]))[:budget]
+
+
+def write_ocr(g, url: str, res: dict, when: str) -> None:
+    """OCR results on the Report: `ocr_at`, `ocr_text_pages`, `ocr_error`; its sections and findings
+    replace pdfplumber's (empty for a scan). Each finding carries "ocr": true."""
+    findings = [{**f, "ocr": True} for f in res.get("findings") or []]
+    g.run(
+        """
+        MATCH (r:Report {url: $url})
+        SET r.ocr_at = $when, r.ocr_version = $v, r.ocr_error = $error, r.ocr_pages_read = $pages_read,
+            r.ocr_text_pages = $text_pages
+        FOREACH (_ IN CASE WHEN $error IS NULL THEN [1] ELSE [] END |
+            SET r.sections = $sections, r.findings = $findings, r.findings_count = $nf)
+        """, url=url, when=when, v=STEP_VERSION, error=res.get("error"), pages_read=res.get("pages_read"),
+        text_pages=res.get("text_pages"),
+        sections=[f"{k}:{','.join(map(str, v))}" for k, v in (res.get("sections") or {}).items()],
+        findings=json.dumps(findings, ensure_ascii=False), nf=len(findings))
+
+
+def read_scans(g, fetcher=None, budget: int | None = None, minutes: float | None = None,
+               when: str | None = None, clock=None) -> dict:
+    """OCR up to `budget` (REPORTS_OCR_BUDGET, 6) scanned documents, within `minutes` (default 20).
+    Needs Tesseract (ocr_available), so it runs in the daily job, not on Render's 0.15 CPU."""
+    import time
+
+    from .scraper import Fetcher
+
+    report = {"read": 0, "failed": 0, "findings": 0, "pages": 0, "errors": [], "skipped": ocr_available()}
+    if report["skipped"]:
+        return report
+    report.pop("skipped")
+    clock = clock or time.monotonic
+    deadline = clock() + 60 * (20 if minutes is None else minutes)
+    fetcher = fetcher or Fetcher()
+    when = when or date.today().isoformat()
+    for r in scans_due(g, ocr_budget() if budget is None else budget):
+        if clock() >= deadline:
+            report["stopped"] = "time budget used"
+            break
+        data = fetcher.get_bytes(r["url"], use_cache=False, store=False)
+        if data is None or not data.startswith(b"%PDF") or len(data) > max_bytes():
+            # a failed download is tried again next time; a page that isn't a PDF is not
+            error = ("not a PDF" if data is not None and not data.startswith(b"%PDF") else
+                     "too large" if data is not None else f"fetch: {fetcher.last_error or fetcher.last_status}")
+            report["failed"] += 1
+            if len(report["errors"]) < 5:
+                report["errors"].append(f"{r['ticker']}: {error}")
+            if data is not None:
+                write_ocr(g, r["url"], {"error": error}, when)
+            continue
+        try:
+            texts, total = ocr_pdf(data)
+            res = analyse_text(texts, total)
+        except Exception as exc:
+            res = {"error": f"ocr: {type(exc).__name__}: {exc}"[:200]}
+        write_ocr(g, r["url"], res, when)
+        if res.get("error"):
+            report["failed"] += 1
+            if len(report["errors"]) < 5:
+                report["errors"].append(f"{r['ticker']}: {res['error']}")
+            continue
+        report["read"] += 1
+        report["pages"] += res.get("pages_read") or 0
+        report["findings"] += len(res.get("findings") or [])
+        log.info("REPORTS ocr %s %s: %s", r["ticker"], r["url"][-80:], json.dumps(
+            {k: res.get(k) for k in ("pages", "pages_read", "text_pages", "sections", "unmatched")} |
+            {"findings": (res.get("findings") or [])[:5]}, ensure_ascii=False))
+    return report
+
+
 # ---- the graph -----------------------------------------------------------------------------
 
 def _utc_now() -> str:
@@ -588,7 +772,8 @@ def upgrade(g) -> dict | None:
     companies = g.run("MATCH (c:Company) WHERE c.reports_read_at IS NOT NULL REMOVE c.reports_read_at "
                       "RETURN count(c) AS n")[0]["n"]
     pdfs = g.run("""MATCH (r:Report) WHERE r.pdf_read_at IS NOT NULL AND coalesce(r.pdf_version, 0) < $v
-                    REMOVE r.pdf_read_at, r.pdf_error RETURN count(r) AS n""", v=STEP_VERSION)[0]["n"]
+                    REMOVE r.pdf_read_at, r.pdf_error, r.ocr_at, r.ocr_error RETURN count(r) AS n""",
+                 v=STEP_VERSION)[0]["n"]
     return {"from": rows[0]["v"], "to": STEP_VERSION, "companies": companies, "pdfs": pdfs}
 
 
@@ -624,7 +809,7 @@ def _row(r: dict) -> dict:
 _FIELDS = """r.url AS url, r.title AS title, r.year AS year, r.period AS period, r.kind AS kind, r.tab AS tab,
              r.ext AS ext, r.date AS date, r.first_seen AS first_seen, r.last_seen AS last_seen,
              r.current AS current, r.pdf_read_at AS pdf_read_at, r.pdf_error AS pdf_error, r.pages AS pages,
-             r.scanned AS scanned, r.sections AS sections, r.findings AS findings"""
+             r.scanned AS scanned, r.ocr_at AS ocr_at, r.sections AS sections, r.findings AS findings"""
 
 
 def company_reports(g, key: str, limit: int = 200) -> dict:
@@ -672,6 +857,7 @@ def summary(g) -> dict:
                size([r IN rs WHERE r.pdf_read_at IS NOT NULL AND r.pdf_error IS NULL]) AS pdfs_read,
                size([r IN rs WHERE r.pdf_error IS NOT NULL]) AS pdfs_failed,
                size([r IN rs WHERE r.scanned]) AS scanned,
+               size([r IN rs WHERE r.ocr_at IS NOT NULL AND r.ocr_error IS NULL]) AS ocr_read,
                reduce(n = 0, r IN rs | n + coalesce(r.findings_count, 0)) AS findings,
                [r IN rs | r.kind] AS kinds
         """)

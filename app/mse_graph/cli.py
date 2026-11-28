@@ -294,6 +294,10 @@ def main(argv=None):
     p.add_argument("--fetch", action="store_true", help="run the step first: index a batch of companies, read PDFs")
     p.add_argument("--batch", type=int, help="with --fetch: companies to index (REPORTS_BATCH, 25)")
     p.add_argument("--pdf", type=int, help="with --fetch: PDFs to read (REPORTS_PDF_BUDGET, 4)")
+    p.add_argument("--ocr", action="store_true", help="read scanned PDFs with Tesseract (the daily job; needs "
+                   "tesseract-ocr and tesseract-ocr-mon): REPORTS_OCR_BUDGET (6) documents, --minutes (20) at most")
+    p.add_argument("--ocr-budget", type=int, help="with --ocr: documents to read")
+    p.add_argument("--minutes", type=float, help="with --ocr: time budget (20)")
     p.add_argument("--ticker", help="one company's documents and findings")
     p.add_argument("--kind", default="", choices=["", "subsidiary", "associate", "shareholder"])
     p.add_argument("--summary", action="store_true", help="counts only")
@@ -904,6 +908,15 @@ def _reports_cmd(g, args) -> None:
         res = {"index": reports.index(g, limit=args.batch) if mse_enabled() else {"skipped": "MSE_ENABLE=0"}}
         res["pdf"] = reports.read_pdfs(g, budget=args.pdf)
         print(json.dumps(res, ensure_ascii=False, default=str))
+    if getattr(args, "ocr", False):
+        logging.getLogger("mse_graph.reports").setLevel(logging.INFO)
+        res = reports.read_scans(g, budget=args.ocr_budget, minutes=args.minutes)
+        print(json.dumps({"ocr": res}, ensure_ascii=False, default=str))
+        if res.get("skipped"):
+            print(f"OCR skipped: {res['skipped']}", file=sys.stderr)
+        if res.get("failed") and not res.get("read"):
+            sys.exit(1)
+        return
     if args.summary:
         print(json.dumps(reports.summary(g), ensure_ascii=False))
         return
@@ -918,11 +931,13 @@ def _reports_cmd(g, args) -> None:
             return
         for r in res["items"]:
             state = "" if r["current"] else " (gone)"
-            read = (" scanned" if r["scanned"] else f" {r['pages']} p.") if r["pdf_read_at"] and not r["pdf_error"] \
+            read = ((" scanned" + (", OCR" if r.get("ocr_at") else "")) if r["scanned"] else f" {r['pages']} p.") \
+                if r["pdf_read_at"] and not r["pdf_error"] \
                 else (f" [{r['pdf_error']}]" if r["pdf_error"] else "")
             print(f"{r['year'] or '----'}  {r['kind']:<19} {r['title'][:70]}{state}{read}\n      {r['url']}")
         for f in res["findings"]:
-            print(f"  #{f['n']:<3} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']}, {f['year'] or '?'})"
+            print(f"  #{f['n']:<3} {f['kind']:<11} {f['percent']:>7}%  {f['name']}  (p. {f['page']}, {f['year'] or '?'}"
+                  f"{', OCR' if f.get('ocr') else ''})"
                   f"\n        {f['report']}")
         return
     res = reports.findings_report(g, args.kind)
