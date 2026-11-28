@@ -1603,10 +1603,14 @@ class Graph:
         Returns {"ok", "owner", "until"}; on failure `owner` / `until` are the holder's.
         The hosted pipeline and the daily job both read opendatalab.mn, which must never
         be crawled in parallel: each takes the "registry" lease first (see pipeline.py, cli.py).
+        The node's write lock is taken (`SET m._lock`) before the lease is read, so two claims
+        made at the same moment run one after the other and only one of them gets the lease.
+        Without it, both read "free" before either wrote, and both got it.
         """
         return self.run(
             """
             MERGE (m:Meta {key: $k})
+            SET m._lock = true REMOVE m._lock
             WITH m, m.until IS NULL OR m.until < datetime() OR m.owner = $owner AS free
             SET m.owner = CASE WHEN free THEN $owner ELSE m.owner END,
                 m.until = CASE WHEN free THEN datetime() + duration({seconds: toInteger($secs)}) ELSE m.until END

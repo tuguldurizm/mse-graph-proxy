@@ -402,10 +402,12 @@ def main(argv=None):
 
     if args.cmd == "odl-enrich":
         from . import opendatalab
-        g = _graph() if (args.load or not args.src) else None
-        lease = opendatalab.RegistryLease(g, "odl-enrich") if g else None
-        # opendatalab.mn is never crawled in parallel (the hosted pipeline may be reading it)
-        if lease and not lease.acquire():
+        # opendatalab.mn is never crawled in parallel (the hosted pipeline may be reading it), so
+        # the lease is taken even when nothing goes into the graph (--from without --load)
+        g = _graph()
+        use_graph = args.load or not args.src
+        lease = opendatalab.RegistryLease(g, "odl-enrich")
+        if not lease.acquire():
             g.close()
             sys.exit(f"{lease.busy_message()}; try again later")
         try:
@@ -424,13 +426,19 @@ def main(argv=None):
                 companies = with_registry_tickers(companies, everything)
             print(f"{sum(1 for _, r in companies if opendatalab.is_register_no(r))} companies have a register "
                   "number the registry uses")
-            ds, report = opendatalab.enrich_companies(companies, limit=args.limit,
-                                                      progress=lease.keep if lease else None)
+            ds, report = opendatalab.enrich_companies(companies, limit=args.limit, progress=lease.keep)
             for e in report:
                 print(f"{e['ticker']:<8} {e['reg_no']:<9} {e['status']:<10} "
                       f"{e.get('shareholders', '')!s:>3} sh {e.get('officers', '')!s:>3} off "
                       f"{e.get('beneficial_owners', '')!s:>3} ubo  {e['url']}")
-            if g:
+            found = sum(1 for e in report if e["status"] == "ok")
+            failed = sum(1 for e in report if e["status"] in ("fetch failed", "skipped"))
+            if failed and not found:
+                # as the hosted pipeline does (pipeline.registry_step): keep the previous registry
+                # data, don't write or archive an empty run, and fail so the daily job reports it
+                sys.exit(f"Open Data Lab unreachable: {failed} registry pages failed and none was read; "
+                         f"nothing written or archived. Check the route: python -m mse_graph.cli egress-check")
+            if use_graph:
                 # numbers the registry doesn't know are left alone for a while (see odl-discover)
                 g.note_registry_checks([{"reg": e["reg_no"], "status": e["status"], "ticker": e["ticker"]}
                                         for e in report])
@@ -438,12 +446,11 @@ def main(argv=None):
             csv_io.write_dir(ds, args.out)
             print(f"wrote {args.out}: {ds.summary()}")
             print(f"archived to {csv_io.archive(ds, part='opendatalab')}")
-            if g and args.load:
+            if args.load:
                 _print(g.load(ds))
         finally:
-            if g:
-                lease.release()
-                g.close()
+            lease.release()
+            g.close()
         return
 
     if args.cmd == "odl-discover":
@@ -859,8 +866,11 @@ def _reports_cmd(g, args) -> None:
               "loads it now)")
         return
     if args.fetch:
+        from .pipeline import mse_enabled
         logging.getLogger("mse_graph.reports").setLevel(logging.INFO)
-        res = {"index": reports.index(g, limit=args.batch)}
+        # the index reads open.mse.mn's tabs: paused like the pipeline's step (pipeline.mse_enabled);
+        # the PDFs already indexed are on issuers.mse.mn and are still read
+        res = {"index": reports.index(g, limit=args.batch) if mse_enabled() else {"skipped": "MSE_ENABLE=0"}}
         res["pdf"] = reports.read_pdfs(g, budget=args.pdf)
         print(json.dumps(res, ensure_ascii=False, default=str))
     if args.summary:
@@ -1097,4 +1107,8 @@ def _history_cmd(g, args):
 
 
 if __name__ == "__main__":
-    main()
+    from .opendatalab import LeaseLost
+    try:
+        main()
+    except LeaseLost as exc:      # another run took the registry lease: stop, exit 1
+        sys.exit(f"stopped: {exc}")

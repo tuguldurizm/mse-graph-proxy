@@ -105,7 +105,8 @@ def healthz():
 async def fetch(url: str = Query(...), x_proxy_token: str = Header(default="")):
     if not PROXY_TOKEN:
         raise HTTPException(503, "PROXY_TOKEN is not configured on the server")
-    if not hmac.compare_digest(x_proxy_token, PROXY_TOKEN):
+    # bytes: compare_digest raises TypeError on str with non-ASCII, which was a 500 instead of a 401
+    if not hmac.compare_digest(x_proxy_token.encode(), PROXY_TOKEN.encode()):
         raise HTTPException(401, "bad or missing X-Proxy-Token")
 
     for _ in range(MAX_REDIRECTS + 1):

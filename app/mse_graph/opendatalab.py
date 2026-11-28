@@ -517,10 +517,16 @@ def lease_owner(what: str) -> str:
     return f"{what} on {os.getenv('RENDER_SERVICE_NAME') or socket.gethostname()} (pid {os.getpid()})"
 
 
+class LeaseLost(RuntimeError):
+    """The registry lease expired and another run took it: this run must stop reading opendatalab.mn."""
+
+
 class RegistryLease:
     """opendatalab.mn is never crawled by two runs at once (the hosted pipeline and the daily
     job both read it). A run `acquire()`s the lease in Neo4j first, calls `keep()` after each
-    page (it renews the lease every `renew_every` seconds) and `release()`s it at the end."""
+    page (it renews the lease every `renew_every` seconds) and `release()`s it at the end.
+    If a renewal finds the lease taken by another run (this one stalled past its expiry),
+    `keep()` raises LeaseLost, so the two never go on reading together."""
 
     def __init__(self, g, what: str, minutes: float = REGISTRY_LEASE_MINUTES, renew_every: float = 300):
         self.g, self.owner, self.minutes, self.renew_every = g, lease_owner(what), minutes, renew_every
@@ -536,7 +542,11 @@ class RegistryLease:
     def keep(self) -> None:
         import time
         if time.monotonic() - self._renewed >= self.renew_every:
-            self.g.claim(REGISTRY_LEASE, self.owner, self.minutes)
+            renewed = self.g.claim(REGISTRY_LEASE, self.owner, self.minutes)
+            if not renewed.get("ok"):
+                self.holder = renewed
+                raise LeaseLost(f"the registry lease expired and {renewed.get('owner')} took it "
+                                f"(until {renewed.get('until')}); stopping so two runs never read opendatalab.mn at once")
             self._renewed = time.monotonic()
 
     def release(self) -> None:
