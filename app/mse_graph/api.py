@@ -50,7 +50,8 @@ async def basic_auth(request: Request, call_next):
         if header.lower().startswith("basic "):
             try:
                 _user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
-                ok = hmac.compare_digest(pw, APP_PASSWORD)
+                # bytes: compare_digest raises TypeError on str with non-ASCII (a Cyrillic password)
+                ok = hmac.compare_digest(pw.encode(), APP_PASSWORD.encode())
             except (ValueError, UnicodeDecodeError):
                 ok = False
         if not ok:
